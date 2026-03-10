@@ -2,20 +2,19 @@ import { useState, useEffect, useRef } from "react";
 
 // ─── THEME & CONSTANTS ───────────────────────────────────────────────────────
 const REGIME_CONFIG = {
-  bull:     { label: "BULL", color: "#30D158", glow: "0 0 28px rgba(48,209,88,0.4)", bg: "rgba(48,209,88,0.08)", text: "Water flows freely. Participation is healthy - ride clean setups with full conviction." },
-  bear:     { label: "BEAR", color: "#FF3B30", glow: "0 0 28px rgba(255,59,48,0.4)", bg: "rgba(255,59,48,0.08)", text: "Flames consume the careless. Stay defensive. Only high-conviction cuts through the smoke." },
-  sideways: { label: "SIDEWAYS", color: "#FFD60A", glow: "0 0 28px rgba(255,214,10,0.4)", bg: "rgba(255,214,10,0.08)", text: "Thunder waits for the right moment. Range-bound - wait for the break before striking." },
+  bull:     { label: "BULL", color: "#DC143C", glow: "0 0 0 rgba(0,0,0,0)", bg: "rgba(220,20,60,0.06)", text: "Trend is constructive. Stay selective, press clean strength, and let quality setups do the work." },
+  bear:     { label: "BEAR", color: "#DC143C", glow: "0 0 0 rgba(0,0,0,0)", bg: "rgba(220,20,60,0.06)", text: "Flames consume the careless. Stay defensive. Only high-conviction cuts through the smoke." },
+  sideways: { label: "SIDEWAYS", color: "#DC143C", glow: "0 0 0 rgba(0,0,0,0)", bg: "rgba(220,20,60,0.06)", text: "Range-bound conditions. Stay patient, stay light, and wait for decisive expansion before committing." },
 };
 
 const THEME_TOKENS = {
-  label: "#8E8E93",
-  selectorInactiveBorder: "#2C2C2E",
-  selectorInactiveText: "#555",
-  portfolioValue: "#30D158",
-  openRiskValue: "#FFFFFF",
-  heatNeutral: "#FFFFFF",
-  heatWarm: "#FFD60A",
-  heatHot: "#FF3B30",
+  selectorInactiveBorder: "#2A2A2A",
+  selectorInactiveText: "#A39C89",
+  portfolioValue: "#D4CCB6",
+  openRiskValue: "#D4CCB6",
+  heatNeutral: "#D4CCB6",
+  heatWarm: "#A39C89",
+  heatHot: "#DC143C",
 };
 
 const SETUP_TYPES = ["Breakout", "Pullback", "U&R", "Range Break", "Momentum"];
@@ -265,9 +264,9 @@ function NiftyStrip() {
   return (
     <div style={{
       position: "sticky", top: 49, zIndex: 99,
-      background: "rgba(12,0,32,0.98)", backdropFilter: "blur(12px)",
+      background: "rgba(10,10,10,0.96)", backdropFilter: "blur(12px)",
       borderBottom: "1px solid var(--border2)",
-      boxShadow: "0 2px 16px rgba(80,0,180,0.12)",
+      boxShadow: "none",
       padding: "5px 16px", display: "flex", alignItems: "center", gap: 16,
       fontFamily: "var(--mono)", fontSize: 11, overflowX: "auto", whiteSpace: "nowrap",
     }}>
@@ -312,36 +311,36 @@ function NiftyStrip() {
 // ─── GLOBAL STYLES ──────────────────────────────────────────────────────────
 const GlobalStyle = () => (
   <style>{`
-    @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
       /* ── Demon Slayer void backgrounds ── */
-      --bg:      #06000F;
-      --bg2:     #0C0020;
-      --bg3:     #130030;
-      --bg4:     #1C0048;
+      --bg:      #0A0A0A;
+      --bg2:     #141414;
+      --bg3:     #101010;
+      --bg4:     #1A1A1A;
       /* ── Violet-edge borders ── */
-      --border:  #2A0E60;
-      --border2: #3D1880;
+      --border:  #2A2A2A;
+      --border2: #343434;
       /* ── Text: pale lavender → deep muted ── */
-      --text:    #EDE0FF;
-      --text2:   #9A7EC4;
-      --text3:   #5A3D80;
+      --text:    #D4CCB6;
+      --text2:   #A39C89;
+      --text3:   #7E7767;
       /* ── Water Breathing teal-green (profit) ── */
-      --green:   #00E8B0;
-      --green2:  #00BF92;
+      --green:   #D4CCB6;
+      --green2:  #B8AF96;
       /* ── Flame orange-red (loss / Rengoku) ── */
-      --red:     #FF4520;
+      --red:     #DC143C;
       /* ── Thunder gold (caution / Zenitsu) ── */
-      --amber:   #FFD43B;
+      --amber:   #A39C89;
       /* ── Void violet (primary accent) ── */
-      --blue:    #9D4EDD;
-      --violet:  #C77DFF;
-      --mono:    'DM Mono', monospace;
-      --display: 'Bebas Neue', sans-serif;
-      --body:    'DM Sans', sans-serif;
+      --blue:    #8B0000;
+      --violet:  #DC143C;
+      --mono:    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      --display: 'Inter', sans-serif;
+      --body:    'Inter', sans-serif;
     }
 
     html, body {
@@ -354,19 +353,19 @@ const GlobalStyle = () => (
 
     input, select, textarea {
       background: var(--bg3);
-      border: 1.5px solid var(--border2);
+      border: 1px solid var(--border2);
       color: var(--text);
-      font-family: var(--mono);
+      font-family: var(--body);
       font-size: 15px;
       padding: 12px 14px;
-      border-radius: 10px;
+      border-radius: 12px;
       outline: none;
       width: 100%;
       transition: border-color 0.2s, box-shadow 0.2s;
     }
     input:focus, select:focus {
       border-color: var(--violet);
-      box-shadow: 0 0 0 3px #9D4EDD1A;
+      box-shadow: 0 0 0 3px rgba(220, 20, 60, 0.15);
     }
     input::placeholder { color: var(--text3); }
 
@@ -414,26 +413,27 @@ const GlobalStyle = () => (
     }
 
     .card {
-      background: linear-gradient(145deg, var(--bg2) 0%, var(--bg) 100%);
-      border: 1.5px solid var(--border);
-      border-radius: 16px;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 18px;
       padding: 16px;
-      box-shadow: 0 4px 32px rgba(80, 0, 180, 0.08);
+      box-shadow: none;
     }
 
     .card-sm {
-      background: linear-gradient(145deg, var(--bg3) 0%, var(--bg2) 100%);
-      border: 1.5px solid var(--border);
-      border-radius: 12px;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 18px;
       padding: 12px 14px;
-      box-shadow: 0 2px 16px rgba(80, 0, 180, 0.06);
+      box-shadow: none;
     }
 
     .label {
-      font-family: var(--mono);
+      font-family: var(--body);
       font-size: 10px;
-      letter-spacing: 0.12em;
-      color: #8E8E93;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      color: var(--text2);
       text-transform: uppercase;
       margin-bottom: 4px;
     }
@@ -441,7 +441,8 @@ const GlobalStyle = () => (
     .big-num {
       font-family: var(--display);
       font-size: 32px;
-      letter-spacing: 0.02em;
+      font-weight: 800;
+      letter-spacing: -0.03em;
       line-height: 1;
     }
 
@@ -452,32 +453,33 @@ const GlobalStyle = () => (
       padding: 4px 10px;
       border-radius: 20px;
       font-size: 11px;
-      font-weight: 600;
+      font-weight: 700;
       letter-spacing: 0.06em;
-      font-family: var(--mono);
+      font-family: var(--body);
     }
 
     .btn-primary {
-      background: linear-gradient(135deg, var(--violet) 0%, var(--blue) 100%);
+      background: var(--violet);
       color: #fff;
       font-weight: 700;
       font-size: 14px;
       padding: 14px 24px;
-      border-radius: 12px;
+      border-radius: 14px;
       letter-spacing: 0.04em;
-      box-shadow: 0 2px 12px #9D4EDD33;
+      box-shadow: none;
+      border: 1px solid rgba(220, 20, 60, 0.4);
     }
-    .btn-primary:hover { box-shadow: 0 4px 24px #C77DFF55; filter: brightness(1.1); }
+    .btn-primary:hover { background: var(--blue); filter: none; }
 
     .btn-ghost {
-      background: transparent;
-      color: var(--text2);
+      background: var(--bg2);
+      color: var(--text);
       font-size: 14px;
       padding: 12px 20px;
-      border-radius: 12px;
-      border: 1.5px solid var(--border2);
+      border-radius: 14px;
+      border: 1px solid var(--border);
     }
-    .btn-ghost:hover { border-color: var(--violet); color: var(--violet); box-shadow: 0 0 12px #9D4EDD22; }
+    .btn-ghost:hover { border-color: var(--violet); color: var(--text); box-shadow: none; }
 
     .btn-danger {
       background: transparent;
@@ -485,9 +487,9 @@ const GlobalStyle = () => (
       font-size: 13px;
       padding: 10px 16px;
       border-radius: 10px;
-      border: 1.5px solid #FF452044;
+      border: 1px solid rgba(220, 20, 60, 0.35);
     }
-    .btn-danger:hover { background: #FF452012; border-color: var(--red); }
+    .btn-danger:hover { background: rgba(220, 20, 60, 0.08); border-color: var(--red); }
 
     .nav-tab {
       flex: 1;
@@ -497,9 +499,9 @@ const GlobalStyle = () => (
       gap: 3px;
       padding: 8px 4px 10px;
       background: none;
-      color: var(--text3);
+      color: var(--text2);
       font-size: 10px;
-      font-weight: 500;
+      font-weight: 700;
       letter-spacing: 0.06em;
       border-top: 2px solid transparent;
       transition: all 0.2s;
@@ -507,14 +509,15 @@ const GlobalStyle = () => (
     .nav-tab.active {
       color: var(--violet);
       border-top-color: var(--violet);
-      text-shadow: 0 0 12px var(--violet);
+      text-shadow: none;
     }
     .nav-tab svg { width: 20px; height: 20px; }
 
     .section-title {
       font-family: var(--display);
       font-size: 28px;
-      letter-spacing: 0.04em;
+      font-weight: 800;
+      letter-spacing: -0.04em;
       line-height: 1;
     }
 
@@ -539,19 +542,19 @@ const GlobalStyle = () => (
     .chip {
       padding: 6px 14px;
       border-radius: 20px;
-      border: 1.5px solid var(--border2);
-      background: var(--bg3);
+      border: 1px solid var(--border);
+      background: var(--bg2);
       color: var(--text2);
       font-size: 13px;
-      font-weight: 500;
+      font-weight: 700;
       cursor: pointer;
       transition: all 0.15s;
     }
     .chip.active {
       border-color: var(--violet);
       color: var(--violet);
-      background: #9D4EDD15;
-      box-shadow: 0 0 8px #9D4EDD22;
+      background: rgba(220, 20, 60, 0.08);
+      box-shadow: none;
     }
 
     .result-row {
@@ -563,28 +566,28 @@ const GlobalStyle = () => (
     }
     .result-row:last-child { border-bottom: none; }
     .result-label { font-size: 13px; color: var(--text2); }
-    .result-val { font-family: var(--mono); font-size: 14px; font-weight: 500; }
+    .result-val { font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--text); }
 
     .trade-card {
-      background: linear-gradient(145deg, var(--bg2) 0%, var(--bg) 100%);
-      border: 1.5px solid var(--border);
-      border-left: 3px solid #9D4EDD33;
-      border-radius: 14px;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-left: 2px solid rgba(220, 20, 60, 0.2);
+      border-radius: 18px;
       padding: 14px;
       margin-bottom: 10px;
       transition: border-color 0.25s, border-left-color 0.25s, box-shadow 0.25s;
-      box-shadow: 0 2px 20px rgba(80, 0, 180, 0.06);
+      box-shadow: none;
     }
     .trade-card:hover {
       border-color: var(--border2);
       border-left-color: var(--violet);
-      box-shadow: 0 4px 32px #9D4EDD22;
+      box-shadow: none;
     }
 
     .inline-form {
       background: var(--bg3);
-      border: 1.5px solid var(--border2);
-      border-radius: 12px;
+      border: 1px solid var(--border2);
+      border-radius: 16px;
       padding: 12px;
       margin-top: 10px;
     }
@@ -624,9 +627,9 @@ function TopBar({ regime, portfolio, page }) {
   return (
     <div style={{
       position: "sticky", top: 0, zIndex: 100,
-      background: "rgba(6,0,15,0.96)", backdropFilter: "blur(24px)",
+      background: "rgba(10,10,10,0.96)", backdropFilter: "blur(24px)",
       borderBottom: "1px solid var(--border)",
-      borderLeft: "3px solid var(--violet)",
+      borderLeft: "0 solid transparent",
       padding: "12px 16px",
       display: "flex", alignItems: "center", justifyContent: "space-between",
       gap: 12,
@@ -635,7 +638,7 @@ function TopBar({ regime, portfolio, page }) {
         <div style={{
           fontFamily: "var(--display)", fontSize: 22, letterSpacing: "0.06em",
           color: "var(--violet)", lineHeight: 1,
-          textShadow: "0 0 20px #C77DFF88",
+          textShadow: "none",
         }}>
           TRADESK
         </div>
@@ -655,7 +658,7 @@ function TopBar({ regime, portfolio, page }) {
         background: "var(--bg3)", border: "1px solid var(--border2)",
         borderRadius: 10, padding: "6px 12px",
         fontFamily: "var(--mono)", fontSize: 13, color: "var(--text)",
-        boxShadow: "0 2px 12px rgba(80,0,180,0.15)",
+        boxShadow: "none",
       }}>
         {formatINR(portfolio)}
       </div>
@@ -863,11 +866,11 @@ function OpenTradeCard({ trade, livePrice }) {
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <div style={{ fontFamily: "var(--display)", fontSize: 20, letterSpacing: "0.04em" }}>{trade.symbol}</div>
             {trade.status === "partial" && (
-              <span className="tag" style={{ background: "#FFAA0012", color: "var(--amber)", border: "1px solid #FFAA0033", fontSize: 10 }}>PARTIAL</span>
+              <span className="tag" style={{ background: "rgba(220,20,60,0.08)", color: "var(--violet)", border: "1px solid rgba(220,20,60,0.2)", fontSize: 10 }}>PARTIAL</span>
             )}
           </div>
           <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap", alignItems: "center" }}>
-            <span className="tag" style={{ background: "#00E87A15", color: "var(--green)", border: "1px solid #00E87A33" }}>
+            <span className="tag" style={{ background: "rgba(212,204,182,0.06)", color: "var(--text)", border: "1px solid rgba(212,204,182,0.14)" }}>
               {trade.setupType}
             </span>
             <DaysHeldBadge trade={trade} />
@@ -1082,8 +1085,8 @@ function CalcPage({ portfolio, onSendToJournal }) {
 
           {rr && (
             <div style={{
-              background: parseFloat(rr) >= 2 ? "#00E87A12" : "#FFAA0012",
-              border: `1px solid ${parseFloat(rr) >= 2 ? "#00E87A33" : "#FFAA0033"}`,
+              background: parseFloat(rr) >= 2 ? "rgba(212,204,182,0.06)" : "rgba(220,20,60,0.06)",
+              border: `1px solid ${parseFloat(rr) >= 2 ? "rgba(212,204,182,0.16)" : "rgba(220,20,60,0.16)"}`,
               borderRadius: 10, padding: "12px 14px", marginBottom: 12,
               display: "flex", justifyContent: "space-between", alignItems: "center"
             }}>
@@ -1121,7 +1124,7 @@ function CalcPage({ portfolio, onSendToJournal }) {
 
       {!valid && entry && stop && (
         <div style={{
-          background: "#FF3D5A12", border: "1px solid #FF3D5A33",
+          background: "rgba(220,20,60,0.08)", border: "1px solid rgba(220,20,60,0.2)",
           borderRadius: 10, padding: "12px 14px", marginBottom: 12,
           fontSize: 13, color: "var(--red)"
         }}>
@@ -1400,9 +1403,9 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
             <button key={v} onClick={() => setForm(f => ({ ...f, conviction: v }))}
               style={{
                 flex: 1, padding: "12px 0", borderRadius: 10, fontSize: 16,
-                background: form.conviction >= v ? "#00E87A20" : "var(--bg3)",
-                border: `1.5px solid ${form.conviction >= v ? "var(--green)" : "var(--border2)"}`,
-                color: form.conviction >= v ? "var(--green)" : "var(--text3)",
+                background: form.conviction >= v ? "rgba(220,20,60,0.08)" : "var(--bg3)",
+                border: `1px solid ${form.conviction >= v ? "var(--violet)" : "var(--border2)"}`,
+                color: form.conviction >= v ? "var(--violet)" : "var(--text3)",
               }}>
               ★
             </button>
@@ -1585,11 +1588,11 @@ function JournalTradeCard({ trade, onUpdateTrade, onDelete }) {
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <div style={{ fontFamily: "var(--display)", fontSize: 22, letterSpacing: "0.04em" }}>{trade.symbol}</div>
             {trade.status === "partial" && (
-              <span className="tag" style={{ background: "#FFAA0012", color: "var(--amber)", border: "1px solid #FFAA0033" }}>PARTIAL</span>
+              <span className="tag" style={{ background: "rgba(220,20,60,0.08)", color: "var(--violet)", border: "1px solid rgba(220,20,60,0.2)" }}>PARTIAL</span>
             )}
           </div>
           <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap", alignItems: "center" }}>
-            <span className="tag" style={{ background: "#00E87A12", color: "var(--green)", border: "1px solid #00E87A25" }}>
+            <span className="tag" style={{ background: "rgba(212,204,182,0.06)", color: "var(--text)", border: "1px solid rgba(212,204,182,0.14)" }}>
               {trade.setupType}
             </span>
             <span className="tag" style={{ background: "var(--bg3)", color: "var(--text3)", border: "1px solid var(--border)" }}>
@@ -1662,8 +1665,8 @@ function JournalTradeCard({ trade, onUpdateTrade, onDelete }) {
       {isActive && unrealizedPnl !== null && (
         <div style={{
           padding: "8px 10px", borderRadius: 8, marginBottom: 10,
-          background: unrealizedPnl >= 0 ? "#00E87A0A" : "#FF3D5A0A",
-          border: `1px solid ${unrealizedPnl >= 0 ? "#00E87A25" : "#FF3D5A25"}`,
+          background: unrealizedPnl >= 0 ? "rgba(212,204,182,0.06)" : "rgba(220,20,60,0.06)",
+          border: `1px solid ${unrealizedPnl >= 0 ? "rgba(212,204,182,0.14)" : "rgba(220,20,60,0.14)"}`,
           display: "flex", justifyContent: "space-between", alignItems: "center"
         }}>
           <span style={{ fontSize: 12, color: "var(--text2)" }}>Unrealized P&L</span>
@@ -1738,7 +1741,7 @@ function JournalTradeCard({ trade, onUpdateTrade, onDelete }) {
             onClick={() => setMode("exit")}>
             Exit ↗
           </button>
-          <button className="btn-ghost" style={{ padding: "8px 11px", fontSize: 13, borderRadius: 10, color: "var(--red)", borderColor: "#FF3D5A33" }}
+          <button className="btn-ghost" style={{ padding: "8px 11px", fontSize: 13, borderRadius: 10, color: "var(--red)", borderColor: "rgba(220,20,60,0.2)" }}
             onClick={() => { if (confirm(`Delete ${trade.symbol}?`)) onDelete(trade.id); }}>
             🗑
           </button>
@@ -1929,8 +1932,8 @@ function AnalyticsPage({ trades, portfolio }) {
       {/* P&L Hero */}
       <div className="card" style={{
         marginBottom: 14,
-        background: totalPnl >= 0 ? "#00E87A0A" : "#FF3D5A0A",
-        border: `1.5px solid ${totalPnl >= 0 ? "#00E87A33" : "#FF3D5A33"}`,
+        background: totalPnl >= 0 ? "rgba(212,204,182,0.06)" : "rgba(220,20,60,0.06)",
+        border: `1px solid ${totalPnl >= 0 ? "rgba(212,204,182,0.14)" : "rgba(220,20,60,0.14)"}`,
       }}>
         <div className="label">Total P&L</div>
         <div className="big-num" style={{ color: totalPnl >= 0 ? "var(--green)" : "var(--red)", marginTop: 4 }}>
@@ -2038,9 +2041,9 @@ function BottomNav({ page, setPage }) {
   return (
     <div style={{
       position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 200,
-      background: "rgba(6,0,15,0.97)", backdropFilter: "blur(24px)",
+      background: "rgba(10,10,10,0.98)", backdropFilter: "blur(24px)",
       borderTop: "1px solid var(--border2)",
-      boxShadow: "0 -4px 32px rgba(80,0,180,0.2)",
+      boxShadow: "none",
       display: "flex",
       paddingBottom: "env(safe-area-inset-bottom)",
       maxWidth: 480, margin: "0 auto",
