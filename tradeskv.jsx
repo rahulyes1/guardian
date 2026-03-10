@@ -36,7 +36,7 @@ const QUOTE_FALLBACK_TIMEOUT_MS = 3000;
 const SUGGESTION_PRICE_REFRESH_MS = 8000;
 const SELECTED_SYMBOL_REFRESH_MS = 15000;
 const YAHOO_RETRY_ATTEMPTS = 2;
-const LIVE_SOURCE_POLICY = "hybrid_api_first"; // browser_yahoo_only | hybrid_api_first
+const LIVE_SOURCE_POLICY = "browser_yahoo_only"; // browser_yahoo_only | hybrid_api_first
 
 function formatINR(val) {
   if (!val && val !== 0) return "—";

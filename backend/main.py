@@ -14,8 +14,9 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-CACHE_DIR = BASE_DIR / "cache"
+_TMP = Path("/tmp")
+DATA_DIR = _TMP / "tradesk_data" if not (BASE_DIR / "data").exists() else BASE_DIR / "data"
+CACHE_DIR = _TMP / "tradesk_cache" if not (BASE_DIR / "cache").exists() else BASE_DIR / "cache"
 WATCHLIST_PATH = DATA_DIR / "watchlist.json"
 NSE_SYMBOLS_CACHE_PATH = CACHE_DIR / "nse_symbols.csv"
 NSE_SYMBOLS_URL = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
