@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-
+import { useSyncedAppState } from "./appStateSync.js";
 // ─── THEME & CONSTANTS ───────────────────────────────────────────────────────
 const REGIME_CONFIG = {
   bull:     { label: "BULL", color: "#DC143C", glow: "0 0 0 rgba(0,0,0,0)", bg: "rgba(220,20,60,0.06)", text: "Trend is constructive. Stay selective, press clean strength, and let quality setups do the work." },
@@ -18,6 +18,25 @@ const THEME_TOKENS = {
 };
 
 const SETUP_TYPES = ["Breakout", "Pullback", "U&R", "Range Break", "Momentum"];
+const SEARCH_API_DEBOUNCE_MS = 300;
+const SEARCH_RESULT_LIMIT = 10;
+const LIVE_REFRESH_INTERVAL_MS = 15000;
+const CLOSED_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+const PRICE_CACHE_TTL_MS = 15000;
+const NIFTY_CACHE_KEY = "td_nifty_strip_cache_v1";
+const LOCAL_SYMBOLS_URL = "/nse_symbols.min.json";
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const MARKET_OPEN_MINUTES = 9 * 60 + 15;
+const MARKET_CLOSE_MINUTES = 15 * 60 + 30;
+const SEARCH_API_TIMEOUT_MS = 1200;
+const QUOTES_API_TIMEOUT_MS = 6000;
+const INDICES_API_TIMEOUT_MS = 6000;
+const LOCAL_SYMBOLS_TIMEOUT_MS = 1800;
+const QUOTE_FALLBACK_TIMEOUT_MS = 3000;
+const SUGGESTION_PRICE_REFRESH_MS = 8000;
+const SELECTED_SYMBOL_REFRESH_MS = 15000;
+const YAHOO_RETRY_ATTEMPTS = 2;
+const LIVE_SOURCE_POLICY = "hybrid_api_first"; // browser_yahoo_only | hybrid_api_first
 
 function formatINR(val) {
   if (!val && val !== 0) return "—";
@@ -40,37 +59,198 @@ function getHeatColor(heat) {
   return THEME_TOKENS.heatNeutral;
 }
 
+let _localSymbols = null;
+let _localSymbolsPromise = null;
+
+function normalizeSymbol(symbol) {
+  return String(symbol || "").trim().toUpperCase().replace(/\.NS$/i, "");
+}
+
+function getIstNow() {
+  const now = new Date();
+  return new Date(now.getTime() + now.getTimezoneOffset() * 60000 + IST_OFFSET_MS);
+}
+
+function isMarketOpenAt(istDate) {
+  const day = istDate.getDay();
+  if (day === 0 || day === 6) return false;
+  const mins = istDate.getHours() * 60 + istDate.getMinutes();
+  return mins >= MARKET_OPEN_MINUTES && mins <= MARKET_CLOSE_MINUTES;
+}
+
+function isMarketOpen() {
+  return isMarketOpenAt(getIstNow());
+}
+
+function getNextOpenIstDate(baseIst) {
+  const next = new Date(baseIst);
+  next.setSeconds(0, 0);
+  while (true) {
+    const day = next.getDay();
+    const mins = next.getHours() * 60 + next.getMinutes();
+    if (day === 0) {
+      next.setDate(next.getDate() + 1);
+      next.setHours(9, 15, 0, 0);
+      continue;
+    }
+    if (day === 6) {
+      next.setDate(next.getDate() + 2);
+      next.setHours(9, 15, 0, 0);
+      continue;
+    }
+    if (mins < MARKET_OPEN_MINUTES) {
+      next.setHours(9, 15, 0, 0);
+      return next;
+    }
+    if (mins > MARKET_CLOSE_MINUTES) {
+      next.setDate(next.getDate() + 1);
+      next.setHours(9, 15, 0, 0);
+      continue;
+    }
+    return next;
+  }
+}
+
+function getRefreshDelayMs(openMs = LIVE_REFRESH_INTERVAL_MS, closedMs = CLOSED_REFRESH_INTERVAL_MS) {
+  const nowIst = getIstNow();
+  if (isMarketOpenAt(nowIst)) return openMs;
+  const nextOpen = getNextOpenIstDate(nowIst);
+  const untilNextOpen = Math.max(5000, nextOpen.getTime() - nowIst.getTime());
+  return Math.min(closedMs, untilNextOpen);
+}
+
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = QUOTES_API_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function waitMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // ─── YAHOO FINANCE ───────────────────────────────────────────────────────────
 const _priceCache = new Map(); // ticker → { result, ts }
 
-async function fetchStockPrice(symbol) {
-  if (!symbol || symbol.length < 2) return null;
-  const ticker = /\./.test(symbol) ? symbol : `${symbol}.NS`;
-  const cached = _priceCache.get(ticker);
-  if (cached && Date.now() - cached.ts < 30000) return cached.result;
+function parseQuoteFromApi(symbol, rawQuote) {
+  if (!rawQuote || typeof rawQuote !== "object") return null;
+  if (!Number.isFinite(rawQuote.price)) return null;
+  return {
+    price: rawQuote.price,
+    name: rawQuote.name || symbol,
+    changePct: Number.isFinite(rawQuote.change_pct) ? rawQuote.change_pct : 0,
+  };
+}
 
+async function fetchQuotesFromApi(symbols) {
+  if (LIVE_SOURCE_POLICY === "browser_yahoo_only") return {};
+  const unique = [...new Set(symbols.map(normalizeSymbol).filter(Boolean))];
+  if (unique.length === 0) return {};
+  const data = await fetchJsonWithTimeout(
+    `/api/quotes?symbols=${encodeURIComponent(unique.join(","))}`,
+    { headers: { Accept: "application/json" } },
+    QUOTES_API_TIMEOUT_MS,
+  );
+  return data?.quotes && typeof data.quotes === "object" ? data.quotes : {};
+}
+
+async function fetchStockPrice(symbol, options = {}) {
+  const { force = false, skipApi = false } = options;
+  const normalized = normalizeSymbol(symbol);
+  if (!normalized || (normalized.length < 2 && !normalized.startsWith("^"))) return null;
+
+  const cached = _priceCache.get(normalized);
+  if (!force && cached && Date.now() - cached.ts < PRICE_CACHE_TTL_MS) return cached.result;
+
+  if (!skipApi) {
+    const apiQuotes = await fetchQuotesFromApi([normalized]);
+    const fromApi = parseQuoteFromApi(normalized, apiQuotes[normalized]);
+    if (fromApi) {
+      _priceCache.set(normalized, { result: fromApi, ts: Date.now() });
+      return fromApi;
+    }
+  }
+
+  const ticker = normalized.startsWith("^") || /\./.test(normalized) ? normalized : `${normalized}.NS`;
   const yUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${ticker}`;
   const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(yUrl)}`;
   const proxy2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(yUrl)}`;
+  const urls = [proxyUrl, proxy2, yUrl];
 
-  for (const url of [proxyUrl, proxy2, yUrl]) {
-    try {
-      const res = await fetch(url, { headers: { Accept: "application/json" } });
-      if (!res.ok) continue;
-      const data = await res.json();
+  for (let attempt = 0; attempt < YAHOO_RETRY_ATTEMPTS; attempt += 1) {
+    for (const url of urls) {
+      const data = await fetchJsonWithTimeout(
+        url,
+        { headers: { Accept: "application/json" } },
+        QUOTE_FALLBACK_TIMEOUT_MS,
+      );
       const q = data?.quoteResponse?.result?.[0];
-      if (q && q.regularMarketPrice) {
+      if (q && Number.isFinite(q.regularMarketPrice)) {
         const result = {
           price: q.regularMarketPrice,
-          name: q.shortName || q.longName || symbol,
-          changePct: q.regularMarketChangePercent || 0,
+          name: q.shortName || q.longName || normalized,
+          changePct: Number.isFinite(q.regularMarketChangePercent) ? q.regularMarketChangePercent : 0,
         };
-        _priceCache.set(ticker, { result, ts: Date.now() });
+        _priceCache.set(normalized, { result, ts: Date.now() });
         return result;
       }
-    } catch {}
+    }
+    if (attempt < YAHOO_RETRY_ATTEMPTS - 1) {
+      await waitMs(120 * (attempt + 1));
+    }
   }
   return null;
+}
+
+async function fetchQuotes(symbols, options = {}) {
+  const { force = false } = options;
+  const unique = [...new Set(symbols.map(normalizeSymbol).filter(Boolean))];
+  if (unique.length === 0) return {};
+
+  const results = {};
+  const missing = [];
+  unique.forEach((symbol) => {
+    const cached = _priceCache.get(symbol);
+    if (!force && cached && Date.now() - cached.ts < PRICE_CACHE_TTL_MS) {
+      results[symbol] = cached.result;
+    } else {
+      missing.push(symbol);
+    }
+  });
+
+  if (missing.length > 0) {
+    const apiQuotes = await fetchQuotesFromApi(missing);
+    const unresolved = [];
+    missing.forEach((symbol) => {
+      const parsed = parseQuoteFromApi(symbol, apiQuotes[symbol]);
+      if (parsed) {
+        results[symbol] = parsed;
+        _priceCache.set(symbol, { result: parsed, ts: Date.now() });
+      } else {
+        unresolved.push(symbol);
+      }
+    });
+
+    if (unresolved.length > 0) {
+      const fetched = await Promise.all(unresolved.map(async (symbol) => [symbol, await fetchStockPrice(symbol, { force: true, skipApi: true })]));
+      fetched.forEach(([symbol, value]) => {
+        if (value) results[symbol] = value;
+      });
+    }
+  }
+
+  return results;
 }
 
 // ─── TRADE NORMALIZATION (backwards compat) ──────────────────────────────────
@@ -107,42 +287,148 @@ function useStorage(key, def) {
 }
 
 // ─── MARKET UTILS ────────────────────────────────────────────────────────────
-function isMarketOpen() {
-  const now = new Date();
-  const ist = new Date(now.getTime() + now.getTimezoneOffset() * 60000 + 5.5 * 3600000);
-  const day = ist.getDay();
-  if (day === 0 || day === 6) return false;
-  const mins = ist.getHours() * 60 + ist.getMinutes();
-  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
-}
-
 async function fetchIndicesData() {
-  try {
-    const res = await fetch("/api/indices", {
-      headers: { Accept: "application/json" },
-    });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null;
+  if (LIVE_SOURCE_POLICY !== "browser_yahoo_only") {
+    const data = await fetchJsonWithTimeout(
+      "/api/indices",
+      { headers: { Accept: "application/json" } },
+      INDICES_API_TIMEOUT_MS,
+    );
+    const hasServerPrice =
+      Number.isFinite(data?.nifty50?.price) || Number.isFinite(data?.nifty500?.price);
+    if (hasServerPrice) return data;
   }
+
+  const fetchFirstWorkingQuote = async (symbols) => {
+    for (const symbol of symbols) {
+      const quote = await fetchStockPrice(symbol, { force: true, skipApi: true });
+      if (quote?.price != null) return quote;
+    }
+    return null;
+  };
+
+  const [nifty50Live, nifty500Live] = await Promise.all([
+    fetchFirstWorkingQuote(["^NSEI"]),
+    fetchFirstWorkingQuote(["^CRSLDX", "^CNX500"]),
+  ]);
+  if (!nifty50Live && !nifty500Live) return null;
+  return {
+    nifty50: nifty50Live ? { price: nifty50Live.price, change_pct: nifty50Live.changePct } : null,
+    nifty500: nifty500Live ? { price: nifty500Live.price, change_pct: nifty500Live.changePct } : null,
+    as_of: new Date().toISOString(),
+    is_live: isMarketOpen(),
+  };
 }
 
 // ─── SYMBOL SEARCH ───────────────────────────────────────────────────────────
-const SEARCH_API_DEBOUNCE_MS = 300;
+async function searchSymbolsFromApi(query) {
+  if (LIVE_SOURCE_POLICY === "browser_yahoo_only") return [];
+  const data = await fetchJsonWithTimeout(
+    `/api/search?q=${encodeURIComponent(query)}`,
+    { headers: { Accept: "application/json" } },
+    SEARCH_API_TIMEOUT_MS,
+  );
+  return Array.isArray(data) ? data : [];
+}
 
-async function searchSymbols(query) {
+function rankLocalSymbolMatch(record, query) {
+  const symbol = record.symbol.toLowerCase();
+  const name = record.name.toLowerCase();
+  if (symbol === query) return [0, symbol];
+  if (symbol.startsWith(query)) return [1, symbol];
+  if (name.startsWith(query)) return [2, symbol];
+  if (symbol.includes(query)) return [3, symbol];
+  return [4, symbol];
+}
+
+async function loadLocalSymbols() {
+  if (_localSymbols) return _localSymbols;
+  if (_localSymbolsPromise) return _localSymbolsPromise;
+  _localSymbolsPromise = (async () => {
+    try {
+      const raw = await fetchJsonWithTimeout(
+        LOCAL_SYMBOLS_URL,
+        { headers: { Accept: "application/json" } },
+        LOCAL_SYMBOLS_TIMEOUT_MS,
+      );
+      if (!Array.isArray(raw)) return [];
+      const records = raw.map((item) => {
+        if (Array.isArray(item)) {
+          return { symbol: normalizeSymbol(item[0]), name: String(item[1] || item[0] || "").trim() };
+        }
+        const symbol = normalizeSymbol(item?.symbol || item?.s);
+        const name = String(item?.name || item?.n || symbol || "").trim();
+        return { symbol, name };
+      }).filter((record) => record.symbol && record.name);
+      _localSymbols = records;
+      return records;
+    } catch {
+      return [];
+    } finally {
+      _localSymbolsPromise = null;
+    }
+  })();
+  return _localSymbolsPromise;
+}
+
+async function searchSymbolsFallback(query) {
+  const q = String(query || "").trim().toLowerCase();
+  if (q.length < 2) return [];
+  const records = await loadLocalSymbols();
+  const matches = records.filter((record) => record.symbol.toLowerCase().includes(q) || record.name.toLowerCase().includes(q));
+  matches.sort((a, b) => {
+    const [ar, as] = rankLocalSymbolMatch(a, q);
+    const [br, bs] = rankLocalSymbolMatch(b, q);
+    if (ar !== br) return ar - br;
+    return as.localeCompare(bs);
+  });
+  return matches.slice(0, SEARCH_RESULT_LIMIT).map((record) => ({
+    symbol: record.symbol,
+    name: record.name,
+    ltp: null,
+    from_watchlist: false,
+  }));
+}
+
+async function searchSymbols(query, options = {}) {
+  const { enrichPrices = false } = options;
   if (!query || query.length < 2) return [];
-  try {
-    const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`, {
-      headers: { Accept: "application/json" },
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return Array.isArray(data) ? data : [];
-  } catch {
-    return [];
+
+  const fallback = await searchSymbolsFallback(query);
+  if (LIVE_SOURCE_POLICY === "browser_yahoo_only") {
+    if (!enrichPrices || fallback.length === 0) return fallback;
+    const quotes = await fetchQuotes(fallback.map((item) => item.symbol), { force: true });
+    return fallback.map((item) => ({
+      ...item,
+      ltp: quotes[normalizeSymbol(item.symbol)]?.price ?? item.ltp,
+    }));
   }
+
+  const apiResults = await searchSymbolsFromApi(query);
+  const base = apiResults.length > 0 ? apiResults : fallback;
+  if (base.length === 0) return [];
+
+  const withCached = base.map((item) => {
+    const normalized = normalizeSymbol(item.symbol);
+    const cached = _priceCache.get(normalized);
+    const cachedPrice = cached && Date.now() - cached.ts < PRICE_CACHE_TTL_MS
+      ? cached.result?.price
+      : null;
+    return {
+      ...item,
+      ltp: Number.isFinite(item.ltp) ? item.ltp : (Number.isFinite(cachedPrice) ? cachedPrice : null),
+    };
+  });
+
+  if (!enrichPrices) return withCached;
+
+  const missingSymbols = [...new Set(withCached.filter((item) => !Number.isFinite(item.ltp)).map((item) => item.symbol))];
+  if (missingSymbols.length === 0) return withCached;
+  const quotes = await fetchQuotes(missingSymbols, { force: true });
+  return withCached.map((item) => ({
+    ...item,
+    ltp: Number.isFinite(item.ltp) ? item.ltp : (quotes[normalizeSymbol(item.symbol)]?.price ?? null),
+  }));
 }
 
 function formatSuggestionLtp(ltp) {
@@ -202,8 +488,17 @@ function useSymbolLookup({ onSymbolChange, onSymbolInfo, onLtpSelect }) {
   const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [fetchingSym, setFetchingSym] = useState(false);
+  const [selectedSymbol, setSelectedSymbol] = useState("");
   const containerRef = useRef(null);
   const debounceRef = useRef(null);
+  const latestQueryRef = useRef("");
+  const suggestionsRef = useRef([]);
+  const onSymbolInfoRef = useRef(onSymbolInfo);
+  const onLtpSelectRef = useRef(onLtpSelect);
+
+  useEffect(() => { suggestionsRef.current = suggestions; }, [suggestions]);
+  useEffect(() => { onSymbolInfoRef.current = onSymbolInfo; }, [onSymbolInfo]);
+  useEffect(() => { onLtpSelectRef.current = onLtpSelect; }, [onLtpSelect]);
 
   useEffect(() => {
     const handlePointerDown = (event) => {
@@ -222,6 +517,8 @@ function useSymbolLookup({ onSymbolChange, onSymbolInfo, onLtpSelect }) {
 
   const handleSymbolChange = (value) => {
     const sym = value.toUpperCase();
+    latestQueryRef.current = sym;
+    setSelectedSymbol("");
     onSymbolChange(sym);
     onSymbolInfo(null);
     setSuggestions([]);
@@ -236,14 +533,30 @@ function useSymbolLookup({ onSymbolChange, onSymbolInfo, onLtpSelect }) {
     setFetchingSym(true);
     setShowSuggestions(true);
     debounceRef.current = setTimeout(async () => {
-      const results = await searchSymbols(sym);
+      const results = await searchSymbols(sym, { enrichPrices: false });
+      if (latestQueryRef.current !== sym) return;
       setSuggestions(results);
       setShowSuggestions(results.length > 0);
       setFetchingSym(false);
+
+      const pendingSymbols = results
+        .filter((item) => !Number.isFinite(item.ltp))
+        .map((item) => item.symbol);
+      if (pendingSymbols.length === 0) return;
+
+      const quoteMap = await fetchQuotes(pendingSymbols, { force: true });
+      if (latestQueryRef.current !== sym) return;
+      setSuggestions((prev) => prev.map((item) => {
+        const next = quoteMap[normalizeSymbol(item.symbol)];
+        if (!next || !Number.isFinite(next.price)) return item;
+        return { ...item, ltp: next.price, name: item.name || next.name };
+      }));
     }, SEARCH_API_DEBOUNCE_MS);
   };
 
   const selectSuggestion = async (suggestion) => {
+    const normalized = normalizeSymbol(suggestion.symbol);
+    setSelectedSymbol(normalized);
     onSymbolChange(suggestion.symbol);
     setSuggestions([]);
     setShowSuggestions(false);
@@ -255,17 +568,70 @@ function useSymbolLookup({ onSymbolChange, onSymbolInfo, onLtpSelect }) {
         changePct: null,
       });
       if (onLtpSelect) onLtpSelect(suggestion.ltp);
-      return;
     }
 
     setFetchingSym(true);
-    const result = await fetchStockPrice(suggestion.symbol);
+    const result = await fetchStockPrice(suggestion.symbol, { force: true });
     setFetchingSym(false);
     if (result) {
-      onSymbolInfo(result);
+      onSymbolInfo({ ...result, name: result.name || suggestion.name });
       if (onLtpSelect && typeof result.price === "number") onLtpSelect(result.price);
     }
   };
+
+  useEffect(() => {
+    if (!showSuggestions) return;
+    let cancelled = false;
+    let timerId = null;
+
+    const run = async () => {
+      const list = suggestionsRef.current;
+      if (list.length > 0) {
+        const queryToken = latestQueryRef.current;
+        const symbols = [...new Set(list.map((item) => item.symbol).filter(Boolean))];
+        const quoteMap = await fetchQuotes(symbols, { force: true });
+        if (cancelled || latestQueryRef.current !== queryToken) return;
+        setSuggestions((prev) => prev.map((item) => {
+          const next = quoteMap[normalizeSymbol(item.symbol)];
+          if (!next || !Number.isFinite(next.price)) return item;
+          return { ...item, ltp: next.price, name: item.name || next.name };
+        }));
+      }
+      if (cancelled) return;
+      timerId = setTimeout(run, SUGGESTION_PRICE_REFRESH_MS);
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+      if (timerId) clearTimeout(timerId);
+    };
+  }, [showSuggestions]);
+
+  useEffect(() => {
+    if (!selectedSymbol) return;
+    let cancelled = false;
+    let timerId = null;
+
+    const run = async () => {
+      const result = await fetchStockPrice(selectedSymbol, { force: true });
+      if (cancelled) return;
+      if (result) {
+        onSymbolInfoRef.current({ ...result, name: result.name || selectedSymbol });
+        if (onLtpSelectRef.current && typeof result.price === "number") {
+          onLtpSelectRef.current(result.price);
+        }
+      }
+      if (cancelled) return;
+      timerId = setTimeout(run, getRefreshDelayMs(SELECTED_SYMBOL_REFRESH_MS, CLOSED_REFRESH_INTERVAL_MS));
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+      if (timerId) clearTimeout(timerId);
+    };
+  }, [selectedSymbol]);
 
   return {
     containerRef,
@@ -278,6 +644,7 @@ function useSymbolLookup({ onSymbolChange, onSymbolInfo, onLtpSelect }) {
       }
     },
     handleSymbolChange,
+    pinSelectedSymbol: (symbol) => setSelectedSymbol(normalizeSymbol(symbol)),
     selectSuggestion,
     showSuggestions,
     suggestions,
@@ -318,37 +685,69 @@ function DaysHeldBadge({ trade }) {
 }
 
 // ─── NIFTY STRIP ─────────────────────────────────────────────────────────────
-function NiftyStrip() {
-  const [nsei, setNsei] = useState(null);
-  const [cnx500, setCnx500] = useState(null);
-
-  const fetchAll = async () => {
-    const data = await fetchIndicesData();
-    if (data?.nifty50) {
-      setNsei({
-        price: data.nifty50.price,
-        changePct: data.nifty50.change_pct,
-      });
+function useIndicesTicker() {
+  const [state, setState] = useState(() => {
+    try {
+      const raw = localStorage.getItem(NIFTY_CACHE_KEY);
+      if (!raw) return { nsei: null, cnx500: null, asOf: null, stale: false };
+      const parsed = JSON.parse(raw);
+      return {
+        nsei: parsed?.nsei || null,
+        cnx500: parsed?.cnx500 || null,
+        asOf: parsed?.asOf || null,
+        stale: true,
+      };
+    } catch {
+      return { nsei: null, cnx500: null, asOf: null, stale: false };
     }
-    if (data?.nifty500) {
-      setCnx500({
-        price: data.nifty500.price,
-        changePct: data.nifty500.change_pct,
-      });
-    }
-  };
+  });
 
   useEffect(() => {
-    fetchAll();
-    if (!isMarketOpen()) return;
-    const iv = setInterval(fetchAll, 60000);
-    return () => clearInterval(iv);
+    let cancelled = false;
+    let timerId = null;
+
+    const run = async () => {
+      const data = await fetchIndicesData();
+      if (cancelled) return;
+
+      if (data?.nifty50 || data?.nifty500) {
+        setState((prev) => {
+          const next = {
+            nsei: data?.nifty50 ? { price: data.nifty50.price, changePct: data.nifty50.change_pct } : prev.nsei,
+            cnx500: data?.nifty500 ? { price: data.nifty500.price, changePct: data.nifty500.change_pct } : prev.cnx500,
+            asOf: data?.as_of || new Date().toISOString(),
+            stale: false,
+          };
+          try { localStorage.setItem(NIFTY_CACHE_KEY, JSON.stringify(next)); } catch {}
+          return next;
+        });
+      } else {
+        setState((prev) => ({ ...prev, stale: Boolean(prev.nsei || prev.cnx500) }));
+      }
+
+      timerId = setTimeout(run, getRefreshDelayMs(LIVE_REFRESH_INTERVAL_MS, CLOSED_REFRESH_INTERVAL_MS));
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+      if (timerId) clearTimeout(timerId);
+    };
   }, []);
 
+  return state;
+}
+
+function NiftyStrip({ data }) {
+  const nsei = data?.nsei || null;
+  const cnx500 = data?.cnx500 || null;
+  const stale = data?.stale || false;
+  const asOf = data?.asOf || null;
   const fmtPrice = (v) => v?.toLocaleString("en-IN", { maximumFractionDigits: 2 }) ?? "—";
   const fmtPct = (v) => v != null ? `${v >= 0 ? "+" : ""}${v.toFixed(2)}%` : "";
   const pctColor = (v) => v >= 0 ? "var(--green)" : "var(--red)";
   const open = isMarketOpen();
+  const hasData = Boolean(nsei || cnx500);
 
   return (
     <div style={{
@@ -392,11 +791,12 @@ function NiftyStrip() {
         ) : (
           <span style={{ color: "var(--text3)" }}>CLOSED</span>
         )}
+        {stale && hasData && <span style={{ color: "var(--amber)", fontSize: 10 }}>STALE</span>}
+        {asOf && <span style={{ color: "var(--text3)", fontSize: 9 }}>{new Date(asOf).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</span>}
       </span>
     </div>
   );
 }
-
 // ─── GLOBAL STYLES ──────────────────────────────────────────────────────────
 const GlobalStyle = () => (
   <style>{`
@@ -764,27 +1164,41 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
   const openTrades = trades.filter(t => t.status === "open" || t.status === "partial").map(normalizeTrade);
   const totalRisk = openTrades.reduce((s, t) => s + (t.riskAmount || 0), 0);
   const heat = portfolio > 0 ? ((totalRisk / portfolio) * 100).toFixed(1) : "0.0";
+  const openSymbols = [...new Set(openTrades.map(t => normalizeSymbol(t.symbol)).filter(Boolean))];
+  const openSymbolsKey = openSymbols.join(",");
 
   const [livePrices, setLivePrices] = useState({});
   const [refreshing, setRefreshing] = useState(false);
 
-  const refreshPrices = async () => {
-    if (openTrades.length === 0) return;
+  const refreshPrices = async (options = {}) => {
+    const { force = false } = options;
+    if (openSymbols.length === 0) {
+      setLivePrices({});
+      setRefreshing(false);
+      return;
+    }
     setRefreshing(true);
-    const symbols = [...new Set(openTrades.map(t => t.symbol))];
-    const results = await Promise.all(symbols.map(async sym => [sym, await fetchStockPrice(sym)]));
-    const map = {};
-    results.forEach(([sym, r]) => { if (r) map[sym] = r; });
-    setLivePrices(map);
+    const quotes = await fetchQuotes(openSymbols, { force });
+    setLivePrices(quotes);
     setRefreshing(false);
   };
 
   useEffect(() => {
-    refreshPrices();
-    if (!isMarketOpen()) return;
-    const iv = setInterval(refreshPrices, 30000);
-    return () => clearInterval(iv);
-  }, []);
+    let cancelled = false;
+    let timerId = null;
+
+    const run = async () => {
+      await refreshPrices({ force: true });
+      if (cancelled) return;
+      timerId = setTimeout(run, getRefreshDelayMs(LIVE_REFRESH_INTERVAL_MS, CLOSED_REFRESH_INTERVAL_MS));
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+      if (timerId) clearTimeout(timerId);
+    };
+  }, [openSymbolsKey]);
 
   const today = new Date().toDateString();
   const closedTrades = trades.filter(t => t.status === "closed").map(normalizeTrade);
@@ -801,7 +1215,7 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
   });
 
   const totalUnrealized = openTrades.reduce((s, t) => {
-    const lp = livePrices[t.symbol];
+    const lp = livePrices[normalizeSymbol(t.symbol)];
     if (!lp) return s;
     return s + (lp.price - t.avgEntry) * (t.remainingQty || t.totalQty || 0);
   }, 0);
@@ -904,7 +1318,7 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
           <div style={{ display: "flex", gap: 8 }}>
             {openTrades.length > 0 && (
               <button className="btn-ghost" style={{ padding: "8px 12px", fontSize: 12, borderRadius: 8 }}
-                onClick={refreshPrices} disabled={refreshing}>
+                onClick={() => refreshPrices({ force: true })} disabled={refreshing}>
                 {refreshing ? "..." : "↺ Prices"}
               </button>
             )}
@@ -922,7 +1336,7 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
           </div>
         ) : (
           openTrades.map(t => (
-            <OpenTradeCard key={t.id} trade={t} livePrice={livePrices[t.symbol]} />
+            <OpenTradeCard key={t.id} trade={t} livePrice={livePrices[normalizeSymbol(t.symbol)]} />
           ))
         )}
       </div>
@@ -1047,6 +1461,7 @@ function CalcPage({ portfolio, onSendToJournal }) {
     handleInputFocus,
     handleInputKeyDown,
     handleSymbolChange,
+    pinSelectedSymbol,
     selectSuggestion,
     showSuggestions,
     suggestions,
@@ -1055,6 +1470,12 @@ function CalcPage({ portfolio, onSendToJournal }) {
     onSymbolInfo: setSymbolInfo,
     onLtpSelect: (ltp) => setEntry(String(ltp.toFixed(2))),
   });
+
+  useEffect(() => {
+    if (!showSuggestions && symbol && symbol.length >= 2) {
+      pinSelectedSymbol(symbol);
+    }
+  }, [symbol, showSuggestions]);
 
   return (
     <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
@@ -1241,7 +1662,7 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
         targets: [prefill.target ? String(prefill.target) : "", "", ""],
       });
       if (prefill.symbol) {
-        fetchStockPrice(prefill.symbol).then(r => setSymbolInfo(r));
+        fetchStockPrice(prefill.symbol, { force: true }).then(r => setSymbolInfo(r));
       }
       setStep(1);
       setPrefill(null);
@@ -1254,6 +1675,7 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
     handleInputFocus,
     handleInputKeyDown,
     handleSymbolChange,
+    pinSelectedSymbol,
     selectSuggestion,
     showSuggestions,
     suggestions,
@@ -1265,6 +1687,12 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
       entries: f.entries.map((entry, index) => index === 0 ? { ...entry, price: String(ltp.toFixed(2)) } : entry),
     })),
   });
+
+  useEffect(() => {
+    if (!showSuggestions && form.symbol && form.symbol.length >= 2) {
+      pinSelectedSymbol(form.symbol);
+    }
+  }, [form.symbol, showSuggestions]);
 
   const updateEntry = (i, field, val) => {
     const entries = form.entries.map((e, idx) => idx === i ? { ...e, [field]: val } : e);
@@ -1346,7 +1774,7 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
     <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
         <button className="btn-ghost" style={{ padding: "8px 14px", fontSize: 12 }}
-          onClick={() => { setStep(0); setSymbolInfo(null); }}>← Back</button>
+          onClick={() => { setStep(0); setSymbolInfo(null); }}>&lt; Back</button>
         <div className="section-title" style={{ fontSize: 22 }}>New Trade</div>
       </div>
 
@@ -1554,7 +1982,7 @@ function JournalTradeCard({ trade, onUpdateTrade, onDelete }) {
 
   const handleRefreshPrice = async () => {
     setFetchingPrice(true);
-    const result = await fetchStockPrice(trade.symbol);
+    const result = await fetchStockPrice(trade.symbol, { force: true });
     setFetchingPrice(false);
     if (result) setLivePrice(result);
   };
@@ -2119,19 +2547,28 @@ function BottomNav({ page, setPage }) {
 // ─── APP ─────────────────────────────────────────────────────────────────────
 export default function App() {
   const [page, setPage] = useState("today");
-  const [regime, setRegime] = useStorage("td_regime", "bull");
-  const [regimeSince, setRegimeSince] = useStorage("td_regime_since", null);
-  const [portfolio, setPortfolio] = useStorage("td_portfolio", 100000);
-  const [trades, setTrades] = useStorage("td_trades", []);
+  const {
+    regime,
+    setRegime,
+    regimeSince,
+    setRegimeSince,
+    portfolio,
+    setPortfolio,
+    trades,
+    setTrades,
+  } = useSyncedAppState();
   const [prefill, setPrefill] = useState(null);
-  const prevRegimeRef = useRef(regime);
+  const indicesTicker = useIndicesTicker();
 
   useEffect(() => {
-    if (prevRegimeRef.current !== regime) {
-      setRegimeSince(new Date().toISOString());
-      prevRegimeRef.current = regime;
-    }
-  }, [regime]);
+    loadLocalSymbols();
+  }, []);
+
+  const handleRegimeChange = (nextRegime) => {
+    if (nextRegime === regime) return;
+    setRegime(nextRegime);
+    setRegimeSince(new Date().toISOString());
+  };
 
   const handleSendToJournal = (data) => {
     setPrefill(data);
@@ -2142,10 +2579,10 @@ export default function App() {
     <div style={{ maxWidth: 480, margin: "0 auto", minHeight: "100vh", background: "var(--bg)", position: "relative" }}>
       <GlobalStyle />
       <TopBar regime={regime} portfolio={portfolio} page={page} />
-      <NiftyStrip />
+      <NiftyStrip data={indicesTicker} />
 
       {page === "today" && (
-        <TodayPage regime={regime} setRegime={setRegime} regimeSince={regimeSince} portfolio={portfolio} setPortfolio={setPortfolio} trades={trades} setPage={setPage} />
+        <TodayPage regime={regime} setRegime={handleRegimeChange} regimeSince={regimeSince} portfolio={portfolio} setPortfolio={setPortfolio} trades={trades} setPage={setPage} />
       )}
       {page === "calc" && (
         <CalcPage portfolio={portfolio} onSendToJournal={handleSendToJournal} />

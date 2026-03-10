@@ -20,8 +20,9 @@ WATCHLIST_PATH = DATA_DIR / "watchlist.json"
 NSE_SYMBOLS_CACHE_PATH = CACHE_DIR / "nse_symbols.csv"
 NSE_SYMBOLS_URL = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
 NSE_CACHE_TTL = timedelta(days=7)
-QUOTE_TIMEOUT_SECONDS = 2.0
+QUOTE_TIMEOUT_SECONDS = 4.0
 SEARCH_LIMIT = 10
+IST = timezone(timedelta(hours=5, minutes=30))
 
 app = FastAPI(title="Tradesk API")
 app.add_middleware(
@@ -47,6 +48,19 @@ def ensure_data_dirs() -> None:
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def ist_now() -> datetime:
+    return datetime.now(IST)
+
+
+def is_market_open_ist(now: datetime | None = None) -> bool:
+    ts = now or ist_now()
+    day = ts.weekday()
+    if day >= 5:
+        return False
+    mins = ts.hour * 60 + ts.minute
+    return (9 * 60 + 15) <= mins <= (15 * 60 + 30)
 
 
 def should_refresh_cache(path: Path, ttl: timedelta) -> bool:
@@ -229,14 +243,14 @@ async def fetch_quote_snapshot_with_timeout(symbol: str) -> dict[str, float | No
         return {"price": None, "prev_close": None, "change": None, "change_pct": None}
 
 
-def fetch_ltp_batch(symbols: list[str]) -> dict[str, float | None]:
+def fetch_close_ltp_batch(symbols: list[str]) -> dict[str, float | None]:
     if not symbols:
         return {}
 
-    tickers = [f"{symbol}.NS" for symbol in symbols]
+    tickers = [to_yahoo_symbol(symbol) for symbol in symbols]
     table = yf.download(
         " ".join(tickers),
-        period="1d",
+        period="5d",
         interval="1d",
         progress=False,
         auto_adjust=False,
@@ -265,37 +279,118 @@ def fetch_ltp_batch(symbols: list[str]) -> dict[str, float | None]:
     return {symbols[0]: round(value, 2) if value is not None else None}
 
 
-async def fetch_ltps(symbols: list[str]) -> dict[str, float | None]:
+async def fetch_close_ltps(symbols: list[str]) -> dict[str, float | None]:
     try:
-        return await asyncio.wait_for(asyncio.to_thread(fetch_ltp_batch, symbols), timeout=QUOTE_TIMEOUT_SECONDS)
+        return await asyncio.wait_for(asyncio.to_thread(fetch_close_ltp_batch, symbols), timeout=QUOTE_TIMEOUT_SECONDS)
     except Exception:
         return {symbol: None for symbol in symbols}
 
 
+def to_yahoo_symbol(symbol: str) -> str:
+    normalized = symbol.strip().upper()
+    if not normalized:
+        return normalized
+    if normalized.startswith("^") or "." in normalized:
+        return normalized
+    return f"{normalized}.NS"
+
+
+async def fetch_quotes_for_symbols(symbols: list[str]) -> dict[str, dict[str, float | None]]:
+    unique_symbols = [symbol.strip().upper() for symbol in symbols if symbol and symbol.strip()]
+    if not unique_symbols:
+        return {}
+
+    snapshots = await asyncio.gather(
+        *[fetch_quote_snapshot_with_timeout(to_yahoo_symbol(symbol)) for symbol in unique_symbols]
+    )
+    return {symbol: snapshot for symbol, snapshot in zip(unique_symbols, snapshots)}
+
 @app.get("/api/indices")
-async def get_indices() -> dict[str, dict[str, float | None]]:
+async def get_indices() -> dict[str, Any]:
+    now_utc = utc_now()
+    live = is_market_open_ist()
     nifty50, nifty500 = await asyncio.gather(
         fetch_quote_snapshot_with_timeout("^NSEI"),
         fetch_quote_snapshot_with_timeout("^CRSLDX"),
     )
+    if nifty500.get("price") is None:
+        alt_nifty500 = await fetch_quote_snapshot_with_timeout("^CNX500")
+        if alt_nifty500.get("price") is not None:
+            nifty500 = alt_nifty500
+
+    missing_symbols: list[str] = []
+    if nifty50.get("price") is None:
+        missing_symbols.append("^NSEI")
+    if nifty500.get("price") is None:
+        missing_symbols.append("^CRSLDX")
+    close_ltps = await fetch_close_ltps(missing_symbols) if missing_symbols else {}
+
+    if nifty50.get("price") is None and close_ltps.get("^NSEI") is not None:
+        nifty50["price"] = close_ltps["^NSEI"]
+    if nifty500.get("price") is None and close_ltps.get("^CRSLDX") is not None:
+        nifty500["price"] = close_ltps["^CRSLDX"]
+
     return {
         "nifty50": nifty50,
         "nifty500": nifty500,
+        "as_of": now_utc.isoformat(),
+        "is_live": live,
+    }
+
+
+@app.get("/api/quotes")
+async def get_quotes(symbols: str = Query(..., min_length=1)) -> dict[str, Any]:
+    symbol_list = list(dict.fromkeys([part.strip().upper() for part in symbols.split(",") if part.strip()]))
+    if not symbol_list:
+        return {"quotes": {}, "as_of": utc_now().isoformat(), "is_live": is_market_open_ist()}
+
+    symbol_name_lookup = {record.symbol: record.name for record in merged_symbol_records()}
+    snapshots = await fetch_quotes_for_symbols(symbol_list)
+    missing_symbols = [symbol for symbol in symbol_list if snapshots.get(symbol, {}).get("price") is None]
+    close_ltps = await fetch_close_ltps(missing_symbols) if missing_symbols else {}
+    as_of = utc_now().isoformat()
+    live = is_market_open_ist()
+
+    quotes: dict[str, dict[str, Any]] = {}
+    for symbol in symbol_list:
+        snapshot = snapshots.get(symbol, {"price": None, "prev_close": None, "change": None, "change_pct": None})
+        price = snapshot.get("price")
+        if price is None:
+            price = close_ltps.get(symbol)
+        quotes[symbol] = {
+            "name": symbol_name_lookup.get(symbol, symbol),
+            "price": price,
+            "change": snapshot.get("change"),
+            "change_pct": snapshot.get("change_pct"),
+            "as_of": as_of,
+            "is_live": live,
+        }
+
+    return {
+        "quotes": quotes,
+        "as_of": as_of,
+        "is_live": live,
     }
 
 
 @app.get("/api/search")
 async def search_symbols_endpoint(q: str = Query(..., min_length=1)) -> list[dict[str, Any]]:
     records = search_symbol_records(q)
-    ltps = await fetch_ltps([record.symbol for record in records])
+    snapshots = await fetch_quotes_for_symbols([record.symbol for record in records])
+    missing_symbols = [record.symbol for record in records if snapshots.get(record.symbol, {}).get("price") is None]
+    close_ltps = await fetch_close_ltps(missing_symbols) if missing_symbols else {}
 
     results: list[dict[str, Any]] = []
     for record in records:
+        snapshot = snapshots.get(record.symbol, {})
+        price = snapshot.get("price")
+        if price is None:
+            price = close_ltps.get(record.symbol)
         results.append(
             {
                 "symbol": record.symbol,
                 "name": record.name,
-                "ltp": ltps.get(record.symbol),
+                "ltp": price,
                 "from_watchlist": record.from_watchlist,
             }
         )
