@@ -2,9 +2,20 @@ import { useState, useEffect, useRef } from "react";
 
 // ─── THEME & CONSTANTS ───────────────────────────────────────────────────────
 const REGIME_CONFIG = {
-  bull:     { label: "BULL", color: "#00E8B0", glow: "0 0 28px #00E8B066", bg: "#00E8B010", text: "Water flows freely. Participation is healthy — ride clean setups with full conviction." },
-  bear:     { label: "BEAR", color: "#FF4520", glow: "0 0 28px #FF452066", bg: "#FF452010", text: "Flames consume the careless. Stay defensive. Only high-conviction cuts through the smoke." },
-  sideways: { label: "SIDE", color: "#FFD43B", glow: "0 0 28px #FFD43B66", bg: "#FFD43B10", text: "Thunder waits for the right moment. Range-bound — wait for the break before striking." },
+  bull:     { label: "BULL", color: "#30D158", glow: "0 0 28px rgba(48,209,88,0.4)", bg: "rgba(48,209,88,0.08)", text: "Water flows freely. Participation is healthy - ride clean setups with full conviction." },
+  bear:     { label: "BEAR", color: "#FF3B30", glow: "0 0 28px rgba(255,59,48,0.4)", bg: "rgba(255,59,48,0.08)", text: "Flames consume the careless. Stay defensive. Only high-conviction cuts through the smoke." },
+  sideways: { label: "SIDEWAYS", color: "#FFD60A", glow: "0 0 28px rgba(255,214,10,0.4)", bg: "rgba(255,214,10,0.08)", text: "Thunder waits for the right moment. Range-bound - wait for the break before striking." },
+};
+
+const THEME_TOKENS = {
+  label: "#8E8E93",
+  selectorInactiveBorder: "#2C2C2E",
+  selectorInactiveText: "#555",
+  portfolioValue: "#30D158",
+  openRiskValue: "#FFFFFF",
+  heatNeutral: "#FFFFFF",
+  heatWarm: "#FFD60A",
+  heatHot: "#FF3B30",
 };
 
 const SETUP_TYPES = ["Breakout", "Pullback", "U&R", "Range Break", "Momentum"];
@@ -21,6 +32,13 @@ function formatINR(val) {
 function pct(a, b) {
   if (!b || b === 0) return null;
   return ((a / b) * 100).toFixed(2);
+}
+
+function getHeatColor(heat) {
+  const value = Number(heat);
+  if (value > 10) return THEME_TOKENS.heatHot;
+  if (value >= 5) return THEME_TOKENS.heatWarm;
+  return THEME_TOKENS.heatNeutral;
 }
 
 // ─── YAHOO FINANCE ───────────────────────────────────────────────────────────
@@ -415,7 +433,7 @@ const GlobalStyle = () => (
       font-family: var(--mono);
       font-size: 10px;
       letter-spacing: 0.12em;
-      color: var(--text3);
+      color: #8E8E93;
       text-transform: uppercase;
       margin-bottom: 4px;
     }
@@ -623,7 +641,7 @@ function TopBar({ regime, portfolio, page }) {
         </div>
         <div style={{
           background: cfg.bg,
-          border: `1px solid ${cfg.color}55`,
+          border: `1px solid ${cfg.color}`,
           borderRadius: 6, padding: "3px 8px",
           fontSize: 10, fontFamily: "var(--mono)", fontWeight: 600,
           color: cfg.color, letterSpacing: "0.1em",
@@ -699,7 +717,7 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
       <div className="card" style={{
         marginBottom: 14,
         background: `linear-gradient(135deg, ${cfg.bg} 0%, var(--bg2) 60%)`,
-        border: `1.5px solid ${cfg.color}33`,
+        border: `1.5px solid ${cfg.color}`,
         boxShadow: cfg.glow,
       }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
@@ -713,7 +731,7 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
             {Object.keys(REGIME_CONFIG).map(r => (
               <button key={r} onClick={() => setRegime(r)}
                 className="chip"
-                style={regime === r ? { borderColor: cfg.color, color: cfg.color, background: cfg.bg } : {}}
+                style={regime === r ? { borderColor: REGIME_CONFIG[r].color, color: REGIME_CONFIG[r].color, background: REGIME_CONFIG[r].bg } : { borderColor: THEME_TOKENS.selectorInactiveBorder, color: THEME_TOKENS.selectorInactiveText }}
               >
                 {r.toUpperCase()}
               </button>
@@ -732,7 +750,7 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
       <div className="card" style={{ marginBottom: 14 }}>
         <div className="label">Portfolio Value</div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div className="big-num" style={{ color: "var(--green)", flex: 1 }}>{formatINR(portfolio)}</div>
+          <div className="big-num" style={{ color: THEME_TOKENS.portfolioValue, flex: 1 }}>{formatINR(portfolio)}</div>
           <button className="btn-ghost" style={{ padding: "8px 14px", fontSize: 12 }}
             onClick={() => {
               const v = prompt("Enter portfolio value:", portfolio);
@@ -747,14 +765,14 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
       <div className="grid-2" style={{ marginBottom: 14 }}>
         <div className="card-sm">
           <div className="label">Open Risk</div>
-          <div style={{ fontFamily: "var(--mono)", fontSize: 18, color: totalRisk > 0 ? "var(--amber)" : "var(--text2)", marginTop: 4 }}>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 18, color: THEME_TOKENS.openRiskValue, marginTop: 4 }}>
             {formatINR(totalRisk)}
           </div>
           <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>{pct(totalRisk, portfolio) || "0.0"}% of portfolio</div>
         </div>
         <div className="card-sm">
           <div className="label">Heat</div>
-          <div style={{ fontFamily: "var(--mono)", fontSize: 18, color: heat > 5 ? "var(--red)" : heat > 2 ? "var(--amber)" : "var(--text2)", marginTop: 4 }}>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 18, color: getHeatColor(heat), marginTop: 4 }}>
             {heat}%
           </div>
           <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>{formatINR(totalRisk)} deployed</div>
