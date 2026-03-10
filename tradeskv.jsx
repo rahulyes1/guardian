@@ -101,7 +101,7 @@ function isMarketOpen() {
 async function fetchIndexData(encodedSymbol) {
   const yUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodedSymbol}`;
   const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(yUrl)}`;
-  for (const url of [yUrl, proxyUrl]) {
+  for (const url of [proxyUrl, yUrl]) {
     try {
       const res = await fetch(url, { headers: { Accept: "application/json" } });
       if (!res.ok) continue;
@@ -116,6 +116,58 @@ async function fetchIndexData(encodedSymbol) {
     } catch {}
   }
   return null;
+}
+
+// ─── SYMBOL SEARCH ───────────────────────────────────────────────────────────
+async function searchSymbols(query) {
+  if (!query || query.length < 2) return [];
+  const yUrl = `https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&lang=en-US&region=IN&quotesCount=8&newsCount=0`;
+  const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(yUrl)}`;
+  for (const url of [proxyUrl, yUrl]) {
+    try {
+      const res = await fetch(url, { headers: { Accept: "application/json" } });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const quotes = data?.finance?.result?.[0]?.quotes || data?.quotes || [];
+      return quotes
+        .filter(q => q.symbol && (q.symbol.endsWith(".NS") || q.exchDisp === "NSE" || q.exchange === "NSI"))
+        .slice(0, 6)
+        .map(q => ({
+          symbol: q.symbol.replace(".NS", ""),
+          name: q.shortname || q.longname || q.symbol,
+          exchDisp: q.exchDisp || "NSE",
+        }));
+    } catch {}
+  }
+  return [];
+}
+
+function SymbolSuggestions({ suggestions, onSelect, visible }) {
+  if (!visible || suggestions.length === 0) return null;
+  return (
+    <div style={{
+      position: "absolute", top: "100%", left: 0, right: 0, zIndex: 300,
+      background: "var(--bg3)", border: "1.5px solid var(--border2)",
+      borderRadius: "0 0 10px 10px", overflow: "hidden", marginTop: 2,
+    }}>
+      {suggestions.map((s, i) => (
+        <div key={i}
+          onMouseDown={(e) => { e.preventDefault(); onSelect(s); }}
+          style={{
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            padding: "9px 12px", cursor: "pointer",
+            borderBottom: i < suggestions.length - 1 ? "1px solid var(--border)" : "none",
+            transition: "background 0.1s",
+          }}
+          onMouseEnter={e => e.currentTarget.style.background = "var(--bg4)"}
+          onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+        >
+          <span style={{ fontFamily: "var(--display)", fontSize: 15, letterSpacing: "0.04em", color: "var(--text)" }}>{s.symbol}</span>
+          <span style={{ fontSize: 11, color: "var(--text3)", fontFamily: "var(--mono)", maxWidth: "60%", overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 // ─── DAYS HELD UTILS ─────────────────────────────────────────────────────────
@@ -179,24 +231,33 @@ function NiftyStrip() {
 
   return (
     <div style={{
+      position: "sticky", top: 49, zIndex: 99,
       background: "var(--bg2)", borderBottom: "1px solid var(--border)",
       padding: "5px 16px", display: "flex", alignItems: "center", gap: 16,
       fontFamily: "var(--mono)", fontSize: 11, overflowX: "auto", whiteSpace: "nowrap",
     }}>
-      {nsei && (
-        <span>
-          <span style={{ color: "var(--text3)", marginRight: 4 }}>NIFTY 50</span>
-          <span style={{ color: "var(--text)" }}>{fmtPrice(nsei.price)}</span>
-          {" "}<span style={{ color: pctColor(nsei.changePct) }}>{fmtPct(nsei.changePct)}</span>
-        </span>
-      )}
-      {cnx500 && (
-        <span>
-          <span style={{ color: "var(--text3)", marginRight: 4 }}>NIFTY 500</span>
-          <span style={{ color: "var(--text)" }}>{fmtPrice(cnx500.price)}</span>
-          {" "}<span style={{ color: pctColor(cnx500.changePct) }}>{fmtPct(cnx500.changePct)}</span>
-        </span>
-      )}
+      <span>
+        <span style={{ color: "var(--text3)", marginRight: 4 }}>NIFTY 50</span>
+        {nsei ? (
+          <>
+            <span style={{ color: "var(--text)" }}>{fmtPrice(nsei.price)}</span>
+            {" "}<span style={{ color: pctColor(nsei.changePct) }}>{fmtPct(nsei.changePct)}</span>
+          </>
+        ) : (
+          <span style={{ color: "var(--text3)" }}>—</span>
+        )}
+      </span>
+      <span>
+        <span style={{ color: "var(--text3)", marginRight: 4 }}>NIFTY 500</span>
+        {cnx500 ? (
+          <>
+            <span style={{ color: "var(--text)" }}>{fmtPrice(cnx500.price)}</span>
+            {" "}<span style={{ color: pctColor(cnx500.changePct) }}>{fmtPct(cnx500.changePct)}</span>
+          </>
+        ) : (
+          <span style={{ color: "var(--text3)" }}>—</span>
+        )}
+      </span>
       <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 5 }}>
         {open ? (
           <>
@@ -538,6 +599,7 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
   const [refreshing, setRefreshing] = useState(false);
 
   const refreshPrices = async () => {
+    if (openTrades.length === 0) return;
     setRefreshing(true);
     const symbols = [...new Set(openTrades.map(t => t.symbol))];
     const results = await Promise.all(symbols.map(async sym => [sym, await fetchStockPrice(sym)]));
@@ -546,6 +608,27 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
     setLivePrices(map);
     setRefreshing(false);
   };
+
+  useEffect(() => {
+    refreshPrices();
+    if (!isMarketOpen()) return;
+    const iv = setInterval(refreshPrices, 30000);
+    return () => clearInterval(iv);
+  }, []);
+
+  const today = new Date().toDateString();
+  const closedTrades = trades.filter(t => t.status === "closed").map(normalizeTrade);
+  const todayPnl = closedTrades
+    .filter(t => {
+      const lastExit = (t.exits || []).slice(-1)[0];
+      return lastExit && new Date(lastExit.date).toDateString() === today;
+    })
+    .reduce((s, t) => s + (t.pnl || 0), 0);
+  const overallPnl = closedTrades.reduce((s, t) => s + (t.pnl || 0), 0);
+  const hasTodayActivity = closedTrades.some(t => {
+    const lastExit = (t.exits || []).slice(-1)[0];
+    return lastExit && new Date(lastExit.date).toDateString() === today;
+  });
 
   const totalUnrealized = openTrades.reduce((s, t) => {
     const lp = livePrices[t.symbol];
@@ -628,6 +711,20 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
             <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>{pct(totalUnrealized, portfolio)}% of portfolio</div>
           </div>
         )}
+        <div className="card-sm">
+          <div className="label">Today P&amp;L</div>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 18, color: hasTodayActivity ? (todayPnl >= 0 ? "var(--green)" : "var(--red)") : "var(--text3)", marginTop: 4 }}>
+            {hasTodayActivity ? `${todayPnl >= 0 ? "+" : ""}${formatINR(todayPnl)}` : "—"}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>closed today</div>
+        </div>
+        <div className="card-sm">
+          <div className="label">Overall P&amp;L</div>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 18, color: closedTrades.length > 0 ? (overallPnl >= 0 ? "var(--green)" : "var(--red)") : "var(--text3)", marginTop: 4 }}>
+            {closedTrades.length > 0 ? `${overallPnl >= 0 ? "+" : ""}${formatINR(overallPnl)}` : "—"}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>{closedTrades.length} closed trades</div>
+        </div>
       </div>
 
       {/* Open Positions */}
@@ -750,6 +847,8 @@ function CalcPage({ portfolio, onSendToJournal }) {
   const [symbol, setSymbol] = useState("");
   const [symbolInfo, setSymbolInfo] = useState(null);
   const [fetchingSym, setFetchingSym] = useState(false);
+  const [suggestions, setSuggestions] = useState([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
   const symDebounce = useRef(null);
 
   const [entry, setEntry] = useState("");
@@ -780,14 +879,29 @@ function CalcPage({ portfolio, onSendToJournal }) {
     const sym = val.toUpperCase();
     setSymbol(sym);
     setSymbolInfo(null);
+    setSuggestions([]);
     if (symDebounce.current) clearTimeout(symDebounce.current);
-    if (sym.length < 2) return;
+    if (sym.length < 2) { setShowSuggestions(false); return; }
+    setShowSuggestions(true);
     symDebounce.current = setTimeout(async () => {
-      setFetchingSym(true);
-      const result = await fetchStockPrice(sym);
+      const [suggs, priceResult] = await Promise.all([
+        searchSymbols(sym),
+        fetchStockPrice(sym),
+      ]);
+      setSuggestions(suggs);
       setFetchingSym(false);
-      if (result) setSymbolInfo(result);
-    }, 700);
+      if (priceResult) setSymbolInfo(priceResult);
+    }, 400);
+  };
+
+  const selectSuggestion = async (s) => {
+    setSymbol(s.symbol);
+    setSuggestions([]);
+    setShowSuggestions(false);
+    setFetchingSym(true);
+    const result = await fetchStockPrice(s.symbol);
+    setFetchingSym(false);
+    if (result) setSymbolInfo(result);
   };
 
   return (
@@ -800,16 +914,22 @@ function CalcPage({ portfolio, onSendToJournal }) {
       {/* Symbol */}
       <div className="card" style={{ marginBottom: 12 }}>
         <div className="label" style={{ marginBottom: 8 }}>Stock Symbol</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input placeholder="e.g. RELIANCE, TATASTEEL" value={symbol}
-            onChange={e => handleSymbolChange(e.target.value)}
-            style={{ textTransform: "uppercase", fontFamily: "var(--display)", fontSize: 18, letterSpacing: "0.04em", flex: 1 }} />
-          {symbolInfo && (
-            <button className="btn-ghost" style={{ padding: "10px 14px", fontSize: 12, whiteSpace: "nowrap" }}
-              onClick={() => setEntry(String(symbolInfo.price.toFixed(2)))}>
-              Use ₹
-            </button>
-          )}
+        <div style={{ position: "relative" }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input placeholder="e.g. RELIANCE, TATASTEEL" value={symbol}
+              onChange={e => handleSymbolChange(e.target.value)}
+              onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+              onFocus={() => suggestions.length > 0 && setShowSuggestions(true)}
+              onKeyDown={e => e.key === "Escape" && setShowSuggestions(false)}
+              style={{ textTransform: "uppercase", fontFamily: "var(--display)", fontSize: 18, letterSpacing: "0.04em", flex: 1 }} />
+            {symbolInfo && (
+              <button className="btn-ghost" style={{ padding: "10px 14px", fontSize: 12, whiteSpace: "nowrap" }}
+                onClick={() => setEntry(String(symbolInfo.price.toFixed(2)))}>
+                Use ₹
+              </button>
+            )}
+          </div>
+          <SymbolSuggestions suggestions={suggestions} onSelect={selectSuggestion} visible={showSuggestions} />
         </div>
         <PriceBadge info={symbolInfo} loading={fetchingSym} />
       </div>
@@ -960,6 +1080,8 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
   const [form, setForm] = useState(emptyForm);
   const [symbolInfo, setSymbolInfo] = useState(null);
   const [fetchingSym, setFetchingSym] = useState(false);
+  const [suggestions, setSuggestions] = useState([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
   const symDebounce = useRef(null);
 
   useEffect(() => {
@@ -983,14 +1105,29 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
     const sym = val.toUpperCase();
     setForm(f => ({ ...f, symbol: sym }));
     setSymbolInfo(null);
+    setSuggestions([]);
     if (symDebounce.current) clearTimeout(symDebounce.current);
-    if (sym.length < 2) return;
+    if (sym.length < 2) { setShowSuggestions(false); return; }
+    setShowSuggestions(true);
     symDebounce.current = setTimeout(async () => {
-      setFetchingSym(true);
-      const result = await fetchStockPrice(sym);
+      const [suggs, priceResult] = await Promise.all([
+        searchSymbols(sym),
+        fetchStockPrice(sym),
+      ]);
+      setSuggestions(suggs);
       setFetchingSym(false);
-      if (result) setSymbolInfo(result);
-    }, 700);
+      if (priceResult) setSymbolInfo(priceResult);
+    }, 400);
+  };
+
+  const selectSuggestion = async (s) => {
+    setForm(f => ({ ...f, symbol: s.symbol }));
+    setSuggestions([]);
+    setShowSuggestions(false);
+    setFetchingSym(true);
+    const result = await fetchStockPrice(s.symbol);
+    setFetchingSym(false);
+    if (result) setSymbolInfo(result);
   };
 
   const updateEntry = (i, field, val) => {
@@ -1080,19 +1217,25 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
       {/* Symbol */}
       <div className="card" style={{ marginBottom: 12 }}>
         <div className="label" style={{ marginBottom: 8 }}>Symbol</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input placeholder="e.g. RELIANCE, TATASTEEL" value={form.symbol}
-            onChange={e => handleSymbolChange(e.target.value)}
-            style={{ textTransform: "uppercase", fontFamily: "var(--display)", fontSize: 20, letterSpacing: "0.04em", flex: 1 }} />
-          {symbolInfo && (
-            <button className="btn-ghost" style={{ padding: "10px 12px", fontSize: 12, whiteSpace: "nowrap" }}
-              onClick={() => {
-                const entries = form.entries.map((e, i) => i === 0 ? { ...e, price: String(symbolInfo.price.toFixed(2)) } : e);
-                setForm(f => ({ ...f, entries }));
-              }}>
-              Use ₹
-            </button>
-          )}
+        <div style={{ position: "relative" }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input placeholder="e.g. RELIANCE, TATASTEEL" value={form.symbol}
+              onChange={e => handleSymbolChange(e.target.value)}
+              onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+              onFocus={() => suggestions.length > 0 && setShowSuggestions(true)}
+              onKeyDown={e => e.key === "Escape" && setShowSuggestions(false)}
+              style={{ textTransform: "uppercase", fontFamily: "var(--display)", fontSize: 20, letterSpacing: "0.04em", flex: 1 }} />
+            {symbolInfo && (
+              <button className="btn-ghost" style={{ padding: "10px 12px", fontSize: 12, whiteSpace: "nowrap" }}
+                onClick={() => {
+                  const entries = form.entries.map((e, i) => i === 0 ? { ...e, price: String(symbolInfo.price.toFixed(2)) } : e);
+                  setForm(f => ({ ...f, entries }));
+                }}>
+                Use ₹
+              </button>
+            )}
+          </div>
+          <SymbolSuggestions suggestions={suggestions} onSelect={selectSuggestion} visible={showSuggestions} />
         </div>
         <PriceBadge info={symbolInfo} loading={fetchingSym} />
       </div>
