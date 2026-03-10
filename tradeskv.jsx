@@ -116,62 +116,37 @@ function isMarketOpen() {
   return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
 }
 
-async function fetchIndexData(encodedSymbol) {
-  const yUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodedSymbol}`;
-  const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(yUrl)}`;
-  for (const url of [proxyUrl, yUrl]) {
-    try {
-      const res = await fetch(url, { headers: { Accept: "application/json" } });
-      if (!res.ok) continue;
-      const data = await res.json();
-      const meta = data?.chart?.result?.[0]?.meta;
-      if (meta?.regularMarketPrice) {
-        const price = meta.regularMarketPrice;
-        const prev = meta.previousClose || meta.chartPreviousClose || price;
-        const changePct = ((price - prev) / prev) * 100;
-        return { price, changePct };
-      }
-    } catch {}
+async function fetchIndicesData() {
+  try {
+    const res = await fetch("/api/indices", {
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
   }
-  return null;
 }
 
 // ─── SYMBOL SEARCH ───────────────────────────────────────────────────────────
+const SEARCH_API_DEBOUNCE_MS = 300;
+
 async function searchSymbols(query) {
   if (!query || query.length < 2) return [];
-  const yUrl = `https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&lang=en-US&region=IN&quotesCount=8&newsCount=0&enableFuzzyQuery=false`;
-  const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(yUrl)}`;
-  const proxy2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(yUrl)}`;
-  for (const url of [proxyUrl, proxy2, yUrl]) {
-    try {
-      const res = await fetch(url, { headers: { Accept: "application/json" } });
-      if (!res.ok) continue;
-      const data = await res.json();
-      // Yahoo wraps search results under finance.result[0].quotes
-      const quotes = data?.finance?.result?.[0]?.quotes
-        || data?.finance?.result?.quotes
-        || data?.quotes
-        || [];
-      const filtered = quotes.filter(q => q.symbol && (
-        q.symbol.endsWith(".NS") ||
-        q.exchDisp === "NSE" ||
-        q.exchange === "NSI" ||
-        q.exchange === "NSE"
-      ));
-      if (filtered.length === 0 && quotes.length > 0) {
-        // fallback: if no NSE filter match, take all equity results
-        return quotes
-          .filter(q => q.symbol && q.quoteType === "EQUITY")
-          .slice(0, 6)
-          .map(q => ({ symbol: q.symbol.replace(".NS", ""), name: q.shortname || q.longname || q.symbol }));
-      }
-      return filtered.slice(0, 6).map(q => ({
-        symbol: q.symbol.replace(".NS", ""),
-        name: q.shortname || q.longname || q.symbol,
-      }));
-    } catch {}
+  try {
+    const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`, {
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
   }
-  return [];
+}
+
+function formatSuggestionLtp(ltp) {
+  return typeof ltp === "number" && Number.isFinite(ltp) ? `₹${ltp.toFixed(2)}` : "—";
 }
 
 function SymbolSuggestions({ suggestions, onSelect, visible }) {
@@ -179,27 +154,134 @@ function SymbolSuggestions({ suggestions, onSelect, visible }) {
   return (
     <div style={{
       position: "absolute", top: "100%", left: 0, right: 0, zIndex: 300,
-      background: "var(--bg3)", border: "1.5px solid var(--border2)",
-      borderRadius: "0 0 10px 10px", overflow: "hidden", marginTop: 2,
+      background: "var(--bg2)", border: "1px solid var(--border2)",
+      borderRadius: 14, overflow: "hidden", marginTop: 6,
+      boxShadow: "0 12px 28px rgba(0,0,0,0.35)",
     }}>
       {suggestions.map((s, i) => (
         <div key={i}
           onMouseDown={(e) => { e.preventDefault(); onSelect(s); }}
           style={{
             display: "flex", justifyContent: "space-between", alignItems: "center",
-            padding: "9px 12px", cursor: "pointer",
+            gap: 12, padding: "10px 12px", cursor: "pointer",
             borderBottom: i < suggestions.length - 1 ? "1px solid var(--border)" : "none",
             transition: "background 0.1s",
           }}
           onMouseEnter={e => e.currentTarget.style.background = "var(--bg4)"}
           onMouseLeave={e => e.currentTarget.style.background = "transparent"}
         >
-          <span style={{ fontFamily: "var(--display)", fontSize: 15, letterSpacing: "0.04em", color: "var(--text)" }}>{s.symbol}</span>
-          <span style={{ fontSize: 11, color: "var(--text3)", fontFamily: "var(--mono)", maxWidth: "60%", overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</span>
+          <div style={{ minWidth: 0, display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            {s.from_watchlist ? (
+              <span style={{
+                width: 8, height: 8, borderRadius: "50%",
+                background: "#30D158", flex: "0 0 auto",
+              }} />
+            ) : null}
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontFamily: "var(--display)", fontSize: 15, fontWeight: 700, letterSpacing: "0.01em", color: "var(--text)" }}>
+                {s.symbol}
+              </div>
+              <div style={{
+                fontSize: 11, color: "var(--text3)", fontFamily: "var(--body)",
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              }}>
+                {s.name}
+              </div>
+            </div>
+          </div>
+          <span style={{ fontSize: 11, color: "var(--text2)", fontFamily: "var(--mono)", flex: "0 0 auto" }}>
+            {formatSuggestionLtp(s.ltp)}
+          </span>
         </div>
       ))}
     </div>
   );
+}
+
+function useSymbolLookup({ onSymbolChange, onSymbolInfo, onLtpSelect }) {
+  const [suggestions, setSuggestions] = useState([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [fetchingSym, setFetchingSym] = useState(false);
+  const containerRef = useRef(null);
+  const debounceRef = useRef(null);
+
+  useEffect(() => {
+    const handlePointerDown = (event) => {
+      if (containerRef.current && !containerRef.current.contains(event.target)) {
+        setShowSuggestions(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, []);
+
+  useEffect(() => () => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+  }, []);
+
+  const handleSymbolChange = (value) => {
+    const sym = value.toUpperCase();
+    onSymbolChange(sym);
+    onSymbolInfo(null);
+    setSuggestions([]);
+
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (sym.length < 2) {
+      setFetchingSym(false);
+      setShowSuggestions(false);
+      return;
+    }
+
+    setFetchingSym(true);
+    setShowSuggestions(true);
+    debounceRef.current = setTimeout(async () => {
+      const results = await searchSymbols(sym);
+      setSuggestions(results);
+      setShowSuggestions(results.length > 0);
+      setFetchingSym(false);
+    }, SEARCH_API_DEBOUNCE_MS);
+  };
+
+  const selectSuggestion = async (suggestion) => {
+    onSymbolChange(suggestion.symbol);
+    setSuggestions([]);
+    setShowSuggestions(false);
+
+    if (typeof suggestion.ltp === "number" && Number.isFinite(suggestion.ltp)) {
+      onSymbolInfo({
+        name: suggestion.name,
+        price: suggestion.ltp,
+        changePct: null,
+      });
+      if (onLtpSelect) onLtpSelect(suggestion.ltp);
+      return;
+    }
+
+    setFetchingSym(true);
+    const result = await fetchStockPrice(suggestion.symbol);
+    setFetchingSym(false);
+    if (result) {
+      onSymbolInfo(result);
+      if (onLtpSelect && typeof result.price === "number") onLtpSelect(result.price);
+    }
+  };
+
+  return {
+    containerRef,
+    fetchingSym,
+    handleInputFocus: () => suggestions.length > 0 && setShowSuggestions(true),
+    handleInputKeyDown: (event) => {
+      if (event.key === "Escape") {
+        setShowSuggestions(false);
+        event.currentTarget.blur();
+      }
+    },
+    handleSymbolChange,
+    selectSuggestion,
+    showSuggestions,
+    suggestions,
+  };
 }
 
 // ─── DAYS HELD UTILS ─────────────────────────────────────────────────────────
@@ -241,12 +323,19 @@ function NiftyStrip() {
   const [cnx500, setCnx500] = useState(null);
 
   const fetchAll = async () => {
-    const [n, c] = await Promise.all([
-      fetchIndexData("%5ENSEI"),
-      fetchIndexData("%5ECNX500"),
-    ]);
-    if (n) setNsei(n);
-    if (c) setCnx500(c);
+    const data = await fetchIndicesData();
+    if (data?.nifty50) {
+      setNsei({
+        price: data.nifty50.price,
+        changePct: data.nifty50.change_pct,
+      });
+    }
+    if (data?.nifty500) {
+      setCnx500({
+        price: data.nifty500.price,
+        changePct: data.nifty500.change_pct,
+      });
+    }
   };
 
   useEffect(() => {
@@ -607,16 +696,19 @@ function PriceBadge({ info, loading }) {
     </div>
   );
   if (!info) return null;
-  const up = info.changePct >= 0;
+  const hasChange = typeof info.changePct === "number" && Number.isFinite(info.changePct);
+  const up = hasChange ? info.changePct >= 0 : false;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
       <span style={{ fontSize: 12, color: "var(--text2)", fontFamily: "var(--mono)" }}>{info.name}</span>
       <span style={{ fontFamily: "var(--mono)", fontSize: 13, color: "var(--text)", fontWeight: 500 }}>
         ₹{info.price.toFixed(2)}
       </span>
-      <span style={{ fontSize: 11, color: up ? "var(--green)" : "var(--red)", fontFamily: "var(--mono)" }}>
-        {up ? "▲" : "▼"} {Math.abs(info.changePct).toFixed(2)}%
-      </span>
+      {hasChange ? (
+        <span style={{ fontSize: 11, color: up ? "var(--green)" : "var(--red)", fontFamily: "var(--mono)" }}>
+          {up ? "▲" : "▼"} {Math.abs(info.changePct).toFixed(2)}%
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -924,10 +1016,6 @@ function OpenTradeCard({ trade, livePrice }) {
 function CalcPage({ portfolio, onSendToJournal }) {
   const [symbol, setSymbol] = useState("");
   const [symbolInfo, setSymbolInfo] = useState(null);
-  const [fetchingSym, setFetchingSym] = useState(false);
-  const [suggestions, setSuggestions] = useState([]);
-  const [showSuggestions, setShowSuggestions] = useState(false);
-  const symDebounce = useRef(null);
 
   const [entry, setEntry] = useState("");
   const [stop, setStop] = useState("");
@@ -953,34 +1041,20 @@ function CalcPage({ portfolio, onSendToJournal }) {
   const stt = posValue * 0.001;
   const totalCharges = (brokerage + stt + posValue * 0.00015).toFixed(0);
 
-  const handleSymbolChange = (val) => {
-    const sym = val.toUpperCase();
-    setSymbol(sym);
-    setSymbolInfo(null);
-    setSuggestions([]);
-    if (symDebounce.current) clearTimeout(symDebounce.current);
-    if (sym.length < 2) { setShowSuggestions(false); return; }
-    setShowSuggestions(true);
-    symDebounce.current = setTimeout(async () => {
-      const [suggs, priceResult] = await Promise.all([
-        searchSymbols(sym),
-        fetchStockPrice(sym),
-      ]);
-      setSuggestions(suggs);
-      setFetchingSym(false);
-      if (priceResult) setSymbolInfo(priceResult);
-    }, 400);
-  };
-
-  const selectSuggestion = async (s) => {
-    setSymbol(s.symbol);
-    setSuggestions([]);
-    setShowSuggestions(false);
-    setFetchingSym(true);
-    const result = await fetchStockPrice(s.symbol);
-    setFetchingSym(false);
-    if (result) setSymbolInfo(result);
-  };
+  const {
+    containerRef,
+    fetchingSym,
+    handleInputFocus,
+    handleInputKeyDown,
+    handleSymbolChange,
+    selectSuggestion,
+    showSuggestions,
+    suggestions,
+  } = useSymbolLookup({
+    onSymbolChange: setSymbol,
+    onSymbolInfo: setSymbolInfo,
+    onLtpSelect: (ltp) => setEntry(String(ltp.toFixed(2))),
+  });
 
   return (
     <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
@@ -992,13 +1066,12 @@ function CalcPage({ portfolio, onSendToJournal }) {
       {/* Symbol */}
       <div className="card" style={{ marginBottom: 12 }}>
         <div className="label" style={{ marginBottom: 8 }}>Stock Symbol</div>
-        <div style={{ position: "relative" }}>
+        <div ref={containerRef} style={{ position: "relative" }}>
           <div style={{ display: "flex", gap: 8 }}>
             <input placeholder="e.g. RELIANCE, TATASTEEL" value={symbol}
               onChange={e => handleSymbolChange(e.target.value)}
-              onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
-              onFocus={() => suggestions.length > 0 && setShowSuggestions(true)}
-              onKeyDown={e => e.key === "Escape" && setShowSuggestions(false)}
+              onFocus={handleInputFocus}
+              onKeyDown={handleInputKeyDown}
               style={{ textTransform: "uppercase", fontFamily: "var(--display)", fontSize: 18, letterSpacing: "0.04em", flex: 1 }} />
             {symbolInfo && (
               <button className="btn-ghost" style={{ padding: "10px 14px", fontSize: 12, whiteSpace: "nowrap" }}
@@ -1157,10 +1230,6 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
   };
   const [form, setForm] = useState(emptyForm);
   const [symbolInfo, setSymbolInfo] = useState(null);
-  const [fetchingSym, setFetchingSym] = useState(false);
-  const [suggestions, setSuggestions] = useState([]);
-  const [showSuggestions, setShowSuggestions] = useState(false);
-  const symDebounce = useRef(null);
 
   useEffect(() => {
     if (prefill) {
@@ -1179,34 +1248,23 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
     }
   }, [prefill]);
 
-  const handleSymbolChange = (val) => {
-    const sym = val.toUpperCase();
-    setForm(f => ({ ...f, symbol: sym }));
-    setSymbolInfo(null);
-    setSuggestions([]);
-    if (symDebounce.current) clearTimeout(symDebounce.current);
-    if (sym.length < 2) { setShowSuggestions(false); return; }
-    setShowSuggestions(true);
-    symDebounce.current = setTimeout(async () => {
-      const [suggs, priceResult] = await Promise.all([
-        searchSymbols(sym),
-        fetchStockPrice(sym),
-      ]);
-      setSuggestions(suggs);
-      setFetchingSym(false);
-      if (priceResult) setSymbolInfo(priceResult);
-    }, 400);
-  };
-
-  const selectSuggestion = async (s) => {
-    setForm(f => ({ ...f, symbol: s.symbol }));
-    setSuggestions([]);
-    setShowSuggestions(false);
-    setFetchingSym(true);
-    const result = await fetchStockPrice(s.symbol);
-    setFetchingSym(false);
-    if (result) setSymbolInfo(result);
-  };
+  const {
+    containerRef,
+    fetchingSym,
+    handleInputFocus,
+    handleInputKeyDown,
+    handleSymbolChange,
+    selectSuggestion,
+    showSuggestions,
+    suggestions,
+  } = useSymbolLookup({
+    onSymbolChange: (symbol) => setForm(f => ({ ...f, symbol })),
+    onSymbolInfo: setSymbolInfo,
+    onLtpSelect: (ltp) => setForm(f => ({
+      ...f,
+      entries: f.entries.map((entry, index) => index === 0 ? { ...entry, price: String(ltp.toFixed(2)) } : entry),
+    })),
+  });
 
   const updateEntry = (i, field, val) => {
     const entries = form.entries.map((e, idx) => idx === i ? { ...e, [field]: val } : e);
@@ -1295,13 +1353,12 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
       {/* Symbol */}
       <div className="card" style={{ marginBottom: 12 }}>
         <div className="label" style={{ marginBottom: 8 }}>Symbol</div>
-        <div style={{ position: "relative" }}>
+        <div ref={containerRef} style={{ position: "relative" }}>
           <div style={{ display: "flex", gap: 8 }}>
             <input placeholder="e.g. RELIANCE, TATASTEEL" value={form.symbol}
               onChange={e => handleSymbolChange(e.target.value)}
-              onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
-              onFocus={() => suggestions.length > 0 && setShowSuggestions(true)}
-              onKeyDown={e => e.key === "Escape" && setShowSuggestions(false)}
+              onFocus={handleInputFocus}
+              onKeyDown={handleInputKeyDown}
               style={{ textTransform: "uppercase", fontFamily: "var(--display)", fontSize: 20, letterSpacing: "0.04em", flex: 1 }} />
             {symbolInfo && (
               <button className="btn-ghost" style={{ padding: "10px 12px", fontSize: 12, whiteSpace: "nowrap" }}
