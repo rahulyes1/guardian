@@ -2,9 +2,9 @@ import { useState, useEffect, useRef } from "react";
 
 // ─── THEME & CONSTANTS ───────────────────────────────────────────────────────
 const REGIME_CONFIG = {
-  bull: { label: "BULL", color: "#00FF88", glow: "0 0 20px #00FF8855", bg: "#00FF8815", text: "Participation is healthy. Focus on clean risk and strong follow-through." },
-  bear: { label: "BEAR", color: "#FF4466", glow: "0 0 20px #FF446655", bg: "#FF446615", text: "Stay defensive. Reduce size. Only high-conviction setups." },
-  sideways: { label: "SIDE", color: "#FFAA00", glow: "0 0 20px #FFAA0055", bg: "#FFAA0015", text: "Range-bound. Wait for breakout confirmation before adding risk." },
+  bull:     { label: "BULL", color: "#00E8B0", glow: "0 0 28px #00E8B066", bg: "#00E8B010", text: "Water flows freely. Participation is healthy — ride clean setups with full conviction." },
+  bear:     { label: "BEAR", color: "#FF4520", glow: "0 0 28px #FF452066", bg: "#FF452010", text: "Flames consume the careless. Stay defensive. Only high-conviction cuts through the smoke." },
+  sideways: { label: "SIDE", color: "#FFD43B", glow: "0 0 28px #FFD43B66", bg: "#FFD43B10", text: "Thunder waits for the right moment. Range-bound — wait for the break before striking." },
 };
 
 const SETUP_TYPES = ["Breakout", "Pullback", "U&R", "Range Break", "Momentum"];
@@ -34,8 +34,9 @@ async function fetchStockPrice(symbol) {
 
   const yUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${ticker}`;
   const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(yUrl)}`;
+  const proxy2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(yUrl)}`;
 
-  for (const url of [yUrl, proxyUrl]) {
+  for (const url of [proxyUrl, proxy2, yUrl]) {
     try {
       const res = await fetch(url, { headers: { Accept: "application/json" } });
       if (!res.ok) continue;
@@ -121,22 +122,36 @@ async function fetchIndexData(encodedSymbol) {
 // ─── SYMBOL SEARCH ───────────────────────────────────────────────────────────
 async function searchSymbols(query) {
   if (!query || query.length < 2) return [];
-  const yUrl = `https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&lang=en-US&region=IN&quotesCount=8&newsCount=0`;
+  const yUrl = `https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&lang=en-US&region=IN&quotesCount=8&newsCount=0&enableFuzzyQuery=false`;
   const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(yUrl)}`;
-  for (const url of [proxyUrl, yUrl]) {
+  const proxy2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(yUrl)}`;
+  for (const url of [proxyUrl, proxy2, yUrl]) {
     try {
       const res = await fetch(url, { headers: { Accept: "application/json" } });
       if (!res.ok) continue;
       const data = await res.json();
-      const quotes = data?.finance?.result?.[0]?.quotes || data?.quotes || [];
-      return quotes
-        .filter(q => q.symbol && (q.symbol.endsWith(".NS") || q.exchDisp === "NSE" || q.exchange === "NSI"))
-        .slice(0, 6)
-        .map(q => ({
-          symbol: q.symbol.replace(".NS", ""),
-          name: q.shortname || q.longname || q.symbol,
-          exchDisp: q.exchDisp || "NSE",
-        }));
+      // Yahoo wraps search results under finance.result[0].quotes
+      const quotes = data?.finance?.result?.[0]?.quotes
+        || data?.finance?.result?.quotes
+        || data?.quotes
+        || [];
+      const filtered = quotes.filter(q => q.symbol && (
+        q.symbol.endsWith(".NS") ||
+        q.exchDisp === "NSE" ||
+        q.exchange === "NSI" ||
+        q.exchange === "NSE"
+      ));
+      if (filtered.length === 0 && quotes.length > 0) {
+        // fallback: if no NSE filter match, take all equity results
+        return quotes
+          .filter(q => q.symbol && q.quoteType === "EQUITY")
+          .slice(0, 6)
+          .map(q => ({ symbol: q.symbol.replace(".NS", ""), name: q.shortname || q.longname || q.symbol }));
+      }
+      return filtered.slice(0, 6).map(q => ({
+        symbol: q.symbol.replace(".NS", ""),
+        name: q.shortname || q.longname || q.symbol,
+      }));
     } catch {}
   }
   return [];
@@ -232,27 +247,31 @@ function NiftyStrip() {
   return (
     <div style={{
       position: "sticky", top: 49, zIndex: 99,
-      background: "var(--bg2)", borderBottom: "1px solid var(--border)",
+      background: "rgba(12,0,32,0.98)", backdropFilter: "blur(12px)",
+      borderBottom: "1px solid var(--border2)",
+      boxShadow: "0 2px 16px rgba(80,0,180,0.12)",
       padding: "5px 16px", display: "flex", alignItems: "center", gap: 16,
       fontFamily: "var(--mono)", fontSize: 11, overflowX: "auto", whiteSpace: "nowrap",
     }}>
-      <span>
-        <span style={{ color: "var(--text3)", marginRight: 4 }}>NIFTY 50</span>
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <span style={{ color: "var(--text3)" }}>NIFTY 50</span>
+        {!open && nsei && <span style={{ color: "var(--text3)", fontSize: 9, opacity: 0.7 }}>EOD</span>}
         {nsei ? (
           <>
             <span style={{ color: "var(--text)" }}>{fmtPrice(nsei.price)}</span>
-            {" "}<span style={{ color: pctColor(nsei.changePct) }}>{fmtPct(nsei.changePct)}</span>
+            <span style={{ color: pctColor(nsei.changePct) }}>{fmtPct(nsei.changePct)}</span>
           </>
         ) : (
           <span style={{ color: "var(--text3)" }}>—</span>
         )}
       </span>
-      <span>
-        <span style={{ color: "var(--text3)", marginRight: 4 }}>NIFTY 500</span>
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <span style={{ color: "var(--text3)" }}>NIFTY 500</span>
+        {!open && cnx500 && <span style={{ color: "var(--text3)", fontSize: 9, opacity: 0.7 }}>EOD</span>}
         {cnx500 ? (
           <>
             <span style={{ color: "var(--text)" }}>{fmtPrice(cnx500.price)}</span>
-            {" "}<span style={{ color: pctColor(cnx500.changePct) }}>{fmtPct(cnx500.changePct)}</span>
+            <span style={{ color: pctColor(cnx500.changePct) }}>{fmtPct(cnx500.changePct)}</span>
           </>
         ) : (
           <span style={{ color: "var(--text3)" }}>—</span>
@@ -280,23 +299,31 @@ const GlobalStyle = () => (
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --bg: #080C0F;
-      --bg2: #0D1318;
-      --bg3: #131B22;
-      --bg4: #1A2430;
-      --border: #1E2D3D;
-      --border2: #243545;
-      --text: #E8F0F8;
-      --text2: #7A99B8;
-      --text3: #4A6480;
-      --green: #00E87A;
-      --green2: #00B85E;
-      --red: #FF3D5A;
-      --amber: #FFB020;
-      --blue: #3D9EFF;
-      --mono: 'DM Mono', monospace;
+      /* ── Demon Slayer void backgrounds ── */
+      --bg:      #06000F;
+      --bg2:     #0C0020;
+      --bg3:     #130030;
+      --bg4:     #1C0048;
+      /* ── Violet-edge borders ── */
+      --border:  #2A0E60;
+      --border2: #3D1880;
+      /* ── Text: pale lavender → deep muted ── */
+      --text:    #EDE0FF;
+      --text2:   #9A7EC4;
+      --text3:   #5A3D80;
+      /* ── Water Breathing teal-green (profit) ── */
+      --green:   #00E8B0;
+      --green2:  #00BF92;
+      /* ── Flame orange-red (loss / Rengoku) ── */
+      --red:     #FF4520;
+      /* ── Thunder gold (caution / Zenitsu) ── */
+      --amber:   #FFD43B;
+      /* ── Void violet (primary accent) ── */
+      --blue:    #9D4EDD;
+      --violet:  #C77DFF;
+      --mono:    'DM Mono', monospace;
       --display: 'Bebas Neue', sans-serif;
-      --body: 'DM Sans', sans-serif;
+      --body:    'DM Sans', sans-serif;
     }
 
     html, body {
@@ -320,8 +347,8 @@ const GlobalStyle = () => (
       transition: border-color 0.2s, box-shadow 0.2s;
     }
     input:focus, select:focus {
-      border-color: var(--green);
-      box-shadow: 0 0 0 3px #00E87A18;
+      border-color: var(--violet);
+      box-shadow: 0 0 0 3px #9D4EDD1A;
     }
     input::placeholder { color: var(--text3); }
 
@@ -340,11 +367,23 @@ const GlobalStyle = () => (
     ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
 
     .fade-in {
-      animation: fadeIn 0.3s ease forwards;
+      animation: fadeIn 0.35s ease forwards;
     }
     @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(8px); }
-      to { opacity: 1; transform: translateY(0); }
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Blade slash shimmer — sweeps across regime banner */
+    @keyframes shimmer {
+      0%   { transform: translateX(-100%) skewX(-15deg); }
+      100% { transform: translateX(300%)  skewX(-15deg); }
+    }
+
+    /* Breathing glow for key numbers */
+    @keyframes breathe {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.75; }
     }
 
     .pulse-dot {
@@ -352,22 +391,24 @@ const GlobalStyle = () => (
       animation: pulse 2s infinite;
     }
     @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.5; transform: scale(0.8); }
+      0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 0 currentColor; }
+      50%       { opacity: 0.7; transform: scale(0.85); }
     }
 
     .card {
-      background: var(--bg2);
+      background: linear-gradient(145deg, var(--bg2) 0%, var(--bg) 100%);
       border: 1.5px solid var(--border);
       border-radius: 16px;
       padding: 16px;
+      box-shadow: 0 4px 32px rgba(80, 0, 180, 0.08);
     }
 
     .card-sm {
-      background: var(--bg3);
+      background: linear-gradient(145deg, var(--bg3) 0%, var(--bg2) 100%);
       border: 1.5px solid var(--border);
       border-radius: 12px;
       padding: 12px 14px;
+      box-shadow: 0 2px 16px rgba(80, 0, 180, 0.06);
     }
 
     .label {
@@ -399,15 +440,16 @@ const GlobalStyle = () => (
     }
 
     .btn-primary {
-      background: var(--green);
-      color: #000;
+      background: linear-gradient(135deg, var(--violet) 0%, var(--blue) 100%);
+      color: #fff;
       font-weight: 700;
       font-size: 14px;
       padding: 14px 24px;
       border-radius: 12px;
       letter-spacing: 0.04em;
+      box-shadow: 0 2px 12px #9D4EDD33;
     }
-    .btn-primary:hover { background: var(--green2); box-shadow: 0 4px 20px #00E87A33; }
+    .btn-primary:hover { box-shadow: 0 4px 24px #C77DFF55; filter: brightness(1.1); }
 
     .btn-ghost {
       background: transparent;
@@ -417,7 +459,7 @@ const GlobalStyle = () => (
       border-radius: 12px;
       border: 1.5px solid var(--border2);
     }
-    .btn-ghost:hover { border-color: var(--green); color: var(--green); }
+    .btn-ghost:hover { border-color: var(--violet); color: var(--violet); box-shadow: 0 0 12px #9D4EDD22; }
 
     .btn-danger {
       background: transparent;
@@ -425,9 +467,9 @@ const GlobalStyle = () => (
       font-size: 13px;
       padding: 10px 16px;
       border-radius: 10px;
-      border: 1.5px solid #FF3D5A44;
+      border: 1.5px solid #FF452044;
     }
-    .btn-danger:hover { background: #FF3D5A12; border-color: var(--red); }
+    .btn-danger:hover { background: #FF452012; border-color: var(--red); }
 
     .nav-tab {
       flex: 1;
@@ -445,8 +487,9 @@ const GlobalStyle = () => (
       transition: all 0.2s;
     }
     .nav-tab.active {
-      color: var(--green);
-      border-top-color: var(--green);
+      color: var(--violet);
+      border-top-color: var(--violet);
+      text-shadow: 0 0 12px var(--violet);
     }
     .nav-tab svg { width: 20px; height: 20px; }
 
@@ -487,9 +530,10 @@ const GlobalStyle = () => (
       transition: all 0.15s;
     }
     .chip.active {
-      border-color: var(--green);
-      color: var(--green);
-      background: #00E87A12;
+      border-color: var(--violet);
+      color: var(--violet);
+      background: #9D4EDD15;
+      box-shadow: 0 0 8px #9D4EDD22;
     }
 
     .result-row {
@@ -504,14 +548,20 @@ const GlobalStyle = () => (
     .result-val { font-family: var(--mono); font-size: 14px; font-weight: 500; }
 
     .trade-card {
-      background: var(--bg2);
+      background: linear-gradient(145deg, var(--bg2) 0%, var(--bg) 100%);
       border: 1.5px solid var(--border);
+      border-left: 3px solid #9D4EDD33;
       border-radius: 14px;
       padding: 14px;
       margin-bottom: 10px;
-      transition: border-color 0.2s, transform 0.15s;
+      transition: border-color 0.25s, border-left-color 0.25s, box-shadow 0.25s;
+      box-shadow: 0 2px 20px rgba(80, 0, 180, 0.06);
     }
-    .trade-card:hover { border-color: var(--border2); }
+    .trade-card:hover {
+      border-color: var(--border2);
+      border-left-color: var(--violet);
+      box-shadow: 0 4px 32px #9D4EDD22;
+    }
 
     .inline-form {
       background: var(--bg3);
@@ -556,23 +606,29 @@ function TopBar({ regime, portfolio, page }) {
   return (
     <div style={{
       position: "sticky", top: 0, zIndex: 100,
-      background: "rgba(8,12,15,0.92)", backdropFilter: "blur(20px)",
+      background: "rgba(6,0,15,0.96)", backdropFilter: "blur(24px)",
       borderBottom: "1px solid var(--border)",
+      borderLeft: "3px solid var(--violet)",
       padding: "12px 16px",
       display: "flex", alignItems: "center", justifyContent: "space-between",
       gap: 12,
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <div style={{ fontFamily: "var(--display)", fontSize: 22, letterSpacing: "0.06em", color: "var(--green)", lineHeight: 1 }}>
+        <div style={{
+          fontFamily: "var(--display)", fontSize: 22, letterSpacing: "0.06em",
+          color: "var(--violet)", lineHeight: 1,
+          textShadow: "0 0 20px #C77DFF88",
+        }}>
           TRADESK
         </div>
         <div style={{
           background: cfg.bg,
-          border: `1px solid ${cfg.color}44`,
+          border: `1px solid ${cfg.color}55`,
           borderRadius: 6, padding: "3px 8px",
           fontSize: 10, fontFamily: "var(--mono)", fontWeight: 600,
           color: cfg.color, letterSpacing: "0.1em",
           boxShadow: cfg.glow,
+          textShadow: `0 0 8px ${cfg.color}88`,
         }}>
           {cfg.label}
         </div>
@@ -581,6 +637,7 @@ function TopBar({ regime, portfolio, page }) {
         background: "var(--bg3)", border: "1px solid var(--border2)",
         borderRadius: 10, padding: "6px 12px",
         fontFamily: "var(--mono)", fontSize: 13, color: "var(--text)",
+        boxShadow: "0 2px 12px rgba(80,0,180,0.15)",
       }}>
         {formatINR(portfolio)}
       </div>
@@ -1963,8 +2020,9 @@ function BottomNav({ page, setPage }) {
   return (
     <div style={{
       position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 200,
-      background: "rgba(8,12,15,0.95)", backdropFilter: "blur(20px)",
-      borderTop: "1px solid var(--border)",
+      background: "rgba(6,0,15,0.97)", backdropFilter: "blur(24px)",
+      borderTop: "1px solid var(--border2)",
+      boxShadow: "0 -4px 32px rgba(80,0,180,0.2)",
       display: "flex",
       paddingBottom: "env(safe-area-inset-bottom)",
       maxWidth: 480, margin: "0 auto",
