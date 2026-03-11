@@ -1,8 +1,7 @@
 // Vercel Node.js serverless function — single symbol quote
-// Uses yahoo-finance2 which handles Yahoo Finance auth (crumb/cookie) automatically
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
-const yahooFinance = require("yahoo-finance2").default;
+// yahoo-finance2 exports the YahooFinance class; must instantiate with new
+import YahooFinance from "yahoo-finance2";
+const yahooFinance = new YahooFinance();
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");

@@ -1,6 +1,6 @@
 {
   "builds": [
-    { "src": "api/quote.cjs", "use": "@vercel/node" },
+    { "src": "api/quote.js", "use": "@vercel/node" },
     { "src": "api/index.py", "use": "@vercel/python" },
     {
       "src": "package.json",
@@ -9,7 +9,7 @@
     }
   ],
   "routes": [
-    { "src": "/api/quote", "dest": "api/quote.cjs" },
+    { "src": "/api/quote", "dest": "api/quote.js" },
     { "src": "/api/(.*)", "dest": "api/index.py" },
     { "src": "/(.*)", "dest": "/$1" }
   ]

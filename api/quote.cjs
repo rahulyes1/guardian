@@ -1,5 +1,7 @@
 // Vercel Node.js serverless function — CJS to avoid ESM/CJS interop issues
-const yahooFinance = require("yahoo-finance2").default;
+// yahoo-finance2 CJS export — try both patterns
+const _yf = require("yahoo-finance2");
+const yahooFinance = _yf.default ?? _yf;
 
 module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
