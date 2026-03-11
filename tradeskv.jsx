@@ -23,20 +23,20 @@ const SEARCH_RESULT_LIMIT = 10;
 const LIVE_REFRESH_INTERVAL_MS = 15000;
 const CLOSED_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 const PRICE_CACHE_TTL_MS = 15000;
-const NIFTY_CACHE_KEY = "td_nifty_strip_cache_v1";
+const NIFTY_CACHE_KEY = "td_nifty_strip_cache_v2";
 const LOCAL_SYMBOLS_URL = "/nse_symbols.min.json";
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const MARKET_OPEN_MINUTES = 9 * 60 + 15;
 const MARKET_CLOSE_MINUTES = 15 * 60 + 30;
-const SEARCH_API_TIMEOUT_MS = 1200;
-const QUOTES_API_TIMEOUT_MS = 6000;
-const INDICES_API_TIMEOUT_MS = 6000;
+const SEARCH_API_TIMEOUT_MS = 9000;
+const QUOTES_API_TIMEOUT_MS = 10000;
+const INDICES_API_TIMEOUT_MS = 10000;
 const LOCAL_SYMBOLS_TIMEOUT_MS = 1800;
 const QUOTE_FALLBACK_TIMEOUT_MS = 3000;
 const SUGGESTION_PRICE_REFRESH_MS = 8000;
 const SELECTED_SYMBOL_REFRESH_MS = 15000;
 const YAHOO_RETRY_ATTEMPTS = 2;
-const LIVE_SOURCE_POLICY = "browser_yahoo_only"; // browser_yahoo_only | hybrid_api_first
+const LIVE_SOURCE_POLICY = "hybrid_api_first"; // browser_yahoo_only | hybrid_api_first
 
 function formatINR(val) {
   if (!val && val !== 0) return "—";
@@ -153,16 +153,32 @@ function parseQuoteFromApi(symbol, rawQuote) {
   };
 }
 
+async function fetchQuoteFromNode(symbol) {
+  // Fast Node.js /api/quote endpoint — same pattern as TRADR, no Python cold-start
+  const data = await fetchJsonWithTimeout(
+    `/api/quote?symbol=${encodeURIComponent(symbol)}`,
+    { headers: { Accept: "application/json" } },
+    QUOTES_API_TIMEOUT_MS,
+  );
+  if (!data || data.price == null) return null;
+  return {
+    price: data.price,
+    name: symbol,
+    change_pct: data.changePct ?? 0,
+  };
+}
+
 async function fetchQuotesFromApi(symbols) {
   if (LIVE_SOURCE_POLICY === "browser_yahoo_only") return {};
   const unique = [...new Set(symbols.map(normalizeSymbol).filter(Boolean))];
   if (unique.length === 0) return {};
-  const data = await fetchJsonWithTimeout(
-    `/api/quotes?symbols=${encodeURIComponent(unique.join(","))}`,
-    { headers: { Accept: "application/json" } },
-    QUOTES_API_TIMEOUT_MS,
+  // Call /api/quote for each symbol in parallel (same pattern as TRADR)
+  const pairs = await Promise.all(
+    unique.map(async (sym) => [sym, await fetchQuoteFromNode(sym)])
   );
-  return data?.quotes && typeof data.quotes === "object" ? data.quotes : {};
+  const out = {};
+  pairs.forEach(([sym, result]) => { if (result) out[sym] = result; });
+  return out;
 }
 
 async function fetchStockPrice(symbol, options = {}) {
@@ -201,6 +217,7 @@ async function fetchStockPrice(symbol, options = {}) {
           price: q.regularMarketPrice,
           name: q.shortName || q.longName || normalized,
           changePct: Number.isFinite(q.regularMarketChangePercent) ? q.regularMarketChangePercent : 0,
+          isEod: false,
         };
         _priceCache.set(normalized, { result, ts: Date.now() });
         return result;
@@ -210,6 +227,9 @@ async function fetchStockPrice(symbol, options = {}) {
       await waitMs(120 * (attempt + 1));
     }
   }
+  // Live fetch failed — fall back to stale cache entry so the UI always shows something
+  const staleEntry = _priceCache.get(normalized);
+  if (staleEntry?.result) return { ...staleEntry.result, isEod: true };
   return null;
 }
 
@@ -288,17 +308,23 @@ function useStorage(key, def) {
 
 // ─── MARKET UTILS ────────────────────────────────────────────────────────────
 async function fetchIndicesData() {
+  // Try Node.js /api/quote first (fast, reliable, same pattern as TRADR)
   if (LIVE_SOURCE_POLICY !== "browser_yahoo_only") {
-    const data = await fetchJsonWithTimeout(
-      "/api/indices",
-      { headers: { Accept: "application/json" } },
-      INDICES_API_TIMEOUT_MS,
-    );
-    const hasServerPrice =
-      Number.isFinite(data?.nifty50?.price) || Number.isFinite(data?.nifty500?.price);
-    if (hasServerPrice) return data;
+    const [n50, n500] = await Promise.all([
+      fetchQuoteFromNode("^NSEI"),
+      fetchQuoteFromNode("^CRSLDX"),
+    ]);
+    if (n50 || n500) {
+      return {
+        nifty50: n50 ? { price: n50.price, change_pct: n50.change_pct } : null,
+        nifty500: n500 ? { price: n500.price, change_pct: n500.change_pct } : null,
+        as_of: new Date().toISOString(),
+        is_live: isMarketOpen(),
+      };
+    }
   }
 
+  // Browser Yahoo fallback (local dev or if Node API unavailable)
   const fetchFirstWorkingQuote = async (symbols) => {
     for (const symbol of symbols) {
       const quote = await fetchStockPrice(symbol, { force: true, skipApi: true });
@@ -533,24 +559,32 @@ function useSymbolLookup({ onSymbolChange, onSymbolInfo, onLtpSelect }) {
     setFetchingSym(true);
     setShowSuggestions(true);
     debounceRef.current = setTimeout(async () => {
-      const results = await searchSymbols(sym, { enrichPrices: false });
+      // Step 1: show local results immediately (no API wait)
+      const localResults = await searchSymbolsFallback(sym);
       if (latestQueryRef.current !== sym) return;
-      setSuggestions(results);
-      setShowSuggestions(results.length > 0);
-      setFetchingSym(false);
+      if (localResults.length > 0) {
+        setSuggestions(localResults);
+        setShowSuggestions(true);
+        setFetchingSym(false);
+      }
 
-      const pendingSymbols = results
-        .filter((item) => !Number.isFinite(item.ltp))
-        .map((item) => item.symbol);
-      if (pendingSymbols.length === 0) return;
-
-      const quoteMap = await fetchQuotes(pendingSymbols, { force: true });
+      // Step 2: fetch prices from API in background — both search API (has prices
+      // built-in) and quotes API run in parallel; whichever arrives first wins
+      const [apiResults, quoteMap] = await Promise.all([
+        searchSymbolsFromApi(sym),
+        fetchQuotes(localResults.map((r) => r.symbol), { force: true }),
+      ]);
       if (latestQueryRef.current !== sym) return;
-      setSuggestions((prev) => prev.map((item) => {
-        const next = quoteMap[normalizeSymbol(item.symbol)];
-        if (!next || !Number.isFinite(next.price)) return item;
-        return { ...item, ltp: next.price, name: item.name || next.name };
+
+      // API search results take priority (richer data); merge prices
+      const base = apiResults.length > 0 ? apiResults : localResults;
+      setSuggestions(base.map((item) => {
+        const q = quoteMap[normalizeSymbol(item.symbol)];
+        const ltp = Number.isFinite(item.ltp) ? item.ltp : (q?.price ?? null);
+        return { ...item, ltp };
       }));
+      setShowSuggestions(base.length > 0);
+      setFetchingSym(false);
     }, SEARCH_API_DEBOUNCE_MS);
   };
 
@@ -1114,43 +1148,89 @@ function PriceBadge({ info, loading }) {
 }
 
 // ─── TOP BAR ────────────────────────────────────────────────────────────────
-function TopBar({ regime, portfolio, page }) {
+function TopBar({ regime, portfolio, page, indicesData }) {
   const cfg = REGIME_CONFIG[regime];
+  const open = isMarketOpen();
+  const nsei = indicesData?.nsei || null;
+  const cnx500 = indicesData?.cnx500 || null;
+  const fmtIdxPrice = (v) => v?.toLocaleString("en-IN", { maximumFractionDigits: 2 }) ?? "—";
+  const fmtIdxPct = (v) => v != null ? `${v >= 0 ? "+" : ""}${v.toFixed(2)}%` : "";
+  const pctColor = (v) => v >= 0 ? "var(--green)" : "var(--red)";
   return (
     <div style={{
       position: "sticky", top: 0, zIndex: 100,
       background: "rgba(10,10,10,0.96)", backdropFilter: "blur(24px)",
       borderBottom: "1px solid var(--border)",
       borderLeft: "0 solid transparent",
-      padding: "12px 16px",
+      padding: "10px 16px",
       display: "flex", alignItems: "center", justifyContent: "space-between",
-      gap: 12,
+      gap: 8,
     }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      {/* Left: brand + regime */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
         <div style={{
-          fontFamily: "var(--display)", fontSize: 22, letterSpacing: "0.06em",
+          fontFamily: "var(--display)", fontSize: 20, letterSpacing: "0.06em",
           color: "var(--violet)", lineHeight: 1,
-          textShadow: "none",
         }}>
           TRADESK
         </div>
         <div style={{
           background: cfg.bg,
           border: `1px solid ${cfg.color}`,
-          borderRadius: 6, padding: "3px 8px",
-          fontSize: 10, fontFamily: "var(--mono)", fontWeight: 600,
+          borderRadius: 6, padding: "2px 6px",
+          fontSize: 9, fontFamily: "var(--mono)", fontWeight: 600,
           color: cfg.color, letterSpacing: "0.1em",
-          boxShadow: cfg.glow,
           textShadow: `0 0 8px ${cfg.color}88`,
         }}>
           {cfg.label}
         </div>
       </div>
+
+      {/* Center: Nifty live prices */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 10,
+        fontFamily: "var(--mono)", fontSize: 10,
+        flex: 1, justifyContent: "center",
+      }}>
+        {/* Nifty 50 */}
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+          <span style={{ color: "var(--text3)" }}>N50</span>
+          {nsei ? (
+            <>
+              <span style={{ color: "var(--text)", fontWeight: 600 }}>{fmtIdxPrice(nsei.price)}</span>
+              <span style={{ color: pctColor(nsei.changePct), fontSize: 9 }}>{fmtIdxPct(nsei.changePct)}</span>
+              {!open && <span style={{ color: "var(--text3)", fontSize: 8, opacity: 0.7 }}>EOD</span>}
+            </>
+          ) : (
+            <span style={{ color: "var(--text3)" }}>—</span>
+          )}
+        </span>
+        <span style={{ color: "var(--border2)" }}>|</span>
+        {/* Nifty 500 */}
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+          <span style={{ color: "var(--text3)" }}>N500</span>
+          {cnx500 ? (
+            <>
+              <span style={{ color: "var(--text)", fontWeight: 600 }}>{fmtIdxPrice(cnx500.price)}</span>
+              <span style={{ color: pctColor(cnx500.changePct), fontSize: 9 }}>{fmtIdxPct(cnx500.changePct)}</span>
+              {!open && <span style={{ color: "var(--text3)", fontSize: 8, opacity: 0.7 }}>EOD</span>}
+            </>
+          ) : (
+            <span style={{ color: "var(--text3)" }}>—</span>
+          )}
+        </span>
+        {/* live dot */}
+        {open && (nsei || cnx500) && (
+          <span className="pulse-dot" style={{ background: "var(--green)", display: "inline-block" }} />
+        )}
+      </div>
+
+      {/* Right: portfolio value */}
       <div style={{
         background: "var(--bg3)", border: "1px solid var(--border2)",
-        borderRadius: 10, padding: "6px 12px",
-        fontFamily: "var(--mono)", fontSize: 13, color: "var(--text)",
-        boxShadow: "none",
+        borderRadius: 10, padding: "5px 10px",
+        fontFamily: "var(--mono)", fontSize: 12, color: "var(--text)",
+        flexShrink: 0,
       }}>
         {formatINR(portfolio)}
       </div>
@@ -1386,9 +1466,13 @@ function OpenTradeCard({ trade, livePrice }) {
           {livePrice ? (
             <div>
               <div style={{ fontFamily: "var(--mono)", fontSize: 15 }}>₹{livePrice.price.toFixed(2)}</div>
-              <div style={{ fontSize: 11, color: livePrice.changePct >= 0 ? "var(--green)" : "var(--red)" }}>
-                {livePrice.changePct >= 0 ? "▲" : "▼"} {Math.abs(livePrice.changePct).toFixed(2)}%
-              </div>
+              {livePrice.isEod ? (
+                <div style={{ fontSize: 10, color: "var(--text3)" }}>EOD</div>
+              ) : (
+                <div style={{ fontSize: 11, color: livePrice.changePct >= 0 ? "var(--green)" : "var(--red)" }}>
+                  {livePrice.changePct >= 0 ? "▲" : "▼"} {Math.abs(livePrice.changePct).toFixed(2)}%
+                </div>
+              )}
             </div>
           ) : (
             <div>
@@ -1980,6 +2064,20 @@ function JournalTradeCard({ trade, onUpdateTrade, onDelete }) {
     }
   }, [mode]);
 
+  // Auto-fetch price on mount for active trades
+  useEffect(() => {
+    if (!isActive) return;
+    let cancelled = false;
+    let timerId = null;
+    const run = async () => {
+      const result = await fetchStockPrice(trade.symbol, { force: true });
+      if (!cancelled && result) setLivePrice(result);
+      timerId = setTimeout(run, getRefreshDelayMs(LIVE_REFRESH_INTERVAL_MS, CLOSED_REFRESH_INTERVAL_MS));
+    };
+    run();
+    return () => { cancelled = true; if (timerId) clearTimeout(timerId); };
+  }, [trade.symbol, isActive]);
+
   const handleRefreshPrice = async () => {
     setFetchingPrice(true);
     const result = await fetchStockPrice(trade.symbol, { force: true });
@@ -2094,14 +2192,18 @@ function JournalTradeCard({ trade, onUpdateTrade, onDelete }) {
             livePrice ? (
               <div>
                 <div style={{ fontFamily: "var(--mono)", fontSize: 15 }}>₹{livePrice.price.toFixed(2)}</div>
-                <div style={{ fontSize: 11, color: livePrice.changePct >= 0 ? "var(--green)" : "var(--red)" }}>
-                  {livePrice.changePct >= 0 ? "▲" : "▼"} {Math.abs(livePrice.changePct).toFixed(2)}%
-                </div>
+                {livePrice.isEod ? (
+                  <div style={{ fontSize: 10, color: "var(--text3)" }}>EOD</div>
+                ) : (
+                  <div style={{ fontSize: 11, color: livePrice.changePct >= 0 ? "var(--green)" : "var(--red)" }}>
+                    {livePrice.changePct >= 0 ? "▲" : "▼"} {Math.abs(livePrice.changePct).toFixed(2)}%
+                  </div>
+                )}
               </div>
             ) : (
-              <div className="tag" style={{ background: "var(--green)15", color: "var(--green)", border: "1px solid var(--green)33" }}>
-                <span className="pulse-dot" style={{ background: "var(--green)" }}></span>
-                LIVE
+              <div style={{ fontFamily: "var(--mono)", fontSize: 13, color: "var(--text3)" }}>
+                ₹{(trade.avgEntry || trade.entry || 0).toFixed(2)}
+                <div style={{ fontSize: 10, color: "var(--text3)" }}>Entry</div>
               </div>
             )
           ) : (
@@ -2578,7 +2680,7 @@ export default function App() {
   return (
     <div style={{ maxWidth: 480, margin: "0 auto", minHeight: "100vh", background: "var(--bg)", position: "relative" }}>
       <GlobalStyle />
-      <TopBar regime={regime} portfolio={portfolio} page={page} />
+      <TopBar regime={regime} portfolio={portfolio} page={page} indicesData={indicesTicker} />
       <NiftyStrip data={indicesTicker} />
 
       {page === "today" && (
