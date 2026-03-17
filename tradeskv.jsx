@@ -2,9 +2,9 @@ import { useState, useEffect, useRef } from "react";
 import { useSyncedAppState } from "./appStateSync.js";
 // ─── THEME & CONSTANTS ───────────────────────────────────────────────────────
 const REGIME_CONFIG = {
-  bull:     { label: "BULL", color: "#DC143C", glow: "0 0 0 rgba(0,0,0,0)", bg: "rgba(220,20,60,0.06)", text: "Trend is constructive. Stay selective, press clean strength, and let quality setups do the work." },
+  bull:     { label: "BULL", color: "#4ADE80", glow: "0 0 0 rgba(0,0,0,0)", bg: "rgba(74,222,128,0.06)", text: "Trend is constructive. Stay selective, press clean strength, and let quality setups do the work." },
   bear:     { label: "BEAR", color: "#DC143C", glow: "0 0 0 rgba(0,0,0,0)", bg: "rgba(220,20,60,0.06)", text: "Flames consume the careless. Stay defensive. Only high-conviction cuts through the smoke." },
-  sideways: { label: "SIDEWAYS", color: "#DC143C", glow: "0 0 0 rgba(0,0,0,0)", bg: "rgba(220,20,60,0.06)", text: "Range-bound conditions. Stay patient, stay light, and wait for decisive expansion before committing." },
+  sideways: { label: "SIDEWAYS", color: "#2DD4BF", glow: "0 0 0 rgba(0,0,0,0)", bg: "rgba(45,212,191,0.06)", text: "Range-bound conditions. Stay patient, stay light, and wait for decisive expansion before committing." },
 };
 
 const THEME_TOKENS = {
@@ -852,8 +852,8 @@ const GlobalStyle = () => (
       --text2:   #A39C89;
       --text3:   #7E7767;
       /* ── Water Breathing teal-green (profit) ── */
-      --green:   #D4CCB6;
-      --green2:  #B8AF96;
+      --green:   #4ADE80;
+      --green2:  #22C55E;
       /* ── Flame orange-red (loss / Rengoku) ── */
       --red:     #DC143C;
       /* ── Thunder gold (caution / Zenitsu) ── */
