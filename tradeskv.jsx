@@ -2605,7 +2605,7 @@ const MQ_SIGNAL_COLOR = { INVEST: "#4ADE80", SELECTIVE: "#F59E0B", CASH: "#DC143
 const MQ_SIGNAL_BG    = { INVEST: "rgba(74,222,128,0.08)", SELECTIVE: "rgba(245,158,11,0.08)", CASH: "rgba(220,20,60,0.08)" };
 const MQ_DIM_COLOR    = { BULL: "#4ADE80", BEAR: "#DC143C", UP: "#4ADE80", DOWN: "#DC143C", RISING: "#4ADE80", FALLING: "#DC143C", HOT: "#4ADE80", WARM: "#A3E635", COOL: "#A39C89", COLD: "#DC143C" };
 const MQ_CACHE_KEY = "td_mq_v1";
-const MQ_BATCH     = 100; // symbols per spark request
+const MQ_BATCH     = 50; // symbols per spark request (keeps serverless calls within timeout)
 const NIFTY500_CSV = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv";
 const ALLORIGINS   = "https://api.allorigins.win/raw?url=";
 
