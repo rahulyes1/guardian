@@ -2600,6 +2600,506 @@ function AnalyticsPage({ trades, portfolio }) {
   );
 }
 
+// ─── MARKET QUADRANT — CLIENT-SIDE COMPUTATION ───────────────────────────────
+const MQ_SIGNAL_COLOR = { INVEST: "#4ADE80", SELECTIVE: "#F59E0B", CASH: "#DC143C" };
+const MQ_SIGNAL_BG    = { INVEST: "rgba(74,222,128,0.08)", SELECTIVE: "rgba(245,158,11,0.08)", CASH: "rgba(220,20,60,0.08)" };
+const MQ_DIM_COLOR    = { BULL: "#4ADE80", BEAR: "#DC143C", UP: "#4ADE80", DOWN: "#DC143C", RISING: "#4ADE80", FALLING: "#DC143C", HOT: "#4ADE80", WARM: "#A3E635", COOL: "#A39C89", COLD: "#DC143C" };
+const MQ_CACHE_KEY = "td_mq_v1";
+const MQ_BATCH     = 100; // symbols per spark request
+const NIFTY500_CSV = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv";
+const ALLORIGINS   = "https://api.allorigins.win/raw?url=";
+
+// Returns IST date string "YYYY-MM-DD" for cache keying
+function istDateStr() {
+  return new Date(Date.now() + 5.5 * 3600000).toISOString().slice(0, 10);
+}
+
+function getMqCache() {
+  try {
+    const raw = localStorage.getItem(MQ_CACHE_KEY);
+    if (!raw) return null;
+    const { data, date } = JSON.parse(raw);
+    // Valid for the entire calendar day (IST) — recomputes once per trading day
+    if (date === istDateStr()) return data;
+  } catch (_) {}
+  return null;
+}
+function setMqCache(data) {
+  try { localStorage.setItem(MQ_CACHE_KEY, JSON.stringify({ data, date: istDateStr() })); } catch (_) {}
+}
+
+async function fetchTextWithTimeout(url, ms = 15000) {
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.text();
+  } finally { clearTimeout(id); }
+}
+
+async function fetchNifty500Symbols() {
+  // 1. Try bundled static list first (instant, no CORS)
+  try {
+    const r = await fetch("/nifty500.json");
+    if (r.ok) {
+      const data = await r.json();
+      if (Array.isArray(data) && data.length > 100) return data;
+    }
+  } catch (_) {}
+
+  // 2. Fallback: fetch live from NSE (direct then CORS proxy)
+  for (const url of [NIFTY500_CSV, ALLORIGINS + encodeURIComponent(NIFTY500_CSV)]) {
+    try {
+      const text = await fetchTextWithTimeout(url, 12000);
+      const lines = text.split(/\r?\n/).filter(l => l.trim());
+      const syms = [];
+      for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].split(",");
+        const sym = cols[2]?.trim().replace(/"/g, "").toUpperCase();
+        if (sym && /^[A-Z0-9&_-]+$/.test(sym)) syms.push(sym);
+      }
+      if (syms.length > 100) return syms;
+    } catch (_) {}
+  }
+  return [];
+}
+
+async function fetchSparkBatch(nsTickers) {
+  // Returns { "RELIANCE.NS": [close, ...], ... }
+  const url = `https://query1.finance.yahoo.com/v8/finance/spark?symbols=${nsTickers.join(",")}&range=1y&interval=1d`;
+  const r = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      Accept: "application/json",
+      Referer: "https://finance.yahoo.com/",
+    },
+  });
+  if (!r.ok) throw new Error(`Yahoo spark HTTP ${r.status}`);
+  const json = await r.json();
+  const out = {};
+  for (const item of (json?.spark?.result ?? [])) {
+    const closes = item?.response?.[0]?.indicators?.quote?.[0]?.close;
+    if (item?.symbol && Array.isArray(closes)) out[item.symbol] = closes.map(c => (c == null ? null : +c));
+  }
+  return out;
+}
+
+// Sliding-window SMA — O(n)
+function smaSeries(arr, period, minP = Math.ceil(period * 0.75)) {
+  const out = new Array(arr.length).fill(null);
+  let sum = 0, cnt = 0;
+  const buf = new Array(period).fill(null);
+  let head = 0;
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
+    const old = buf[head];
+    buf[head] = v;
+    head = (head + 1) % period;
+    if (v != null) { sum += v; cnt++; }
+    if (old != null) { sum -= old; cnt--; }
+    if (cnt >= minP) out[i] = sum / cnt;
+  }
+  return out;
+}
+
+function rollMax(arr, period) {
+  return arr.map((_, i) => {
+    let m = null;
+    for (let j = Math.max(0, i - period + 1); j <= i; j++) {
+      if (arr[j] != null && (m === null || arr[j] > m)) m = arr[j];
+    }
+    return m;
+  });
+}
+function rollMin(arr, period) {
+  return arr.map((_, i) => {
+    let m = null;
+    for (let j = Math.max(0, i - period + 1); j <= i; j++) {
+      if (arr[j] != null && (m === null || arr[j] < m)) m = arr[j];
+    }
+    return m;
+  });
+}
+
+async function computeMarketQuadrant(onProgress) {
+  const cached = getMqCache();
+  if (cached) return cached;
+
+  onProgress("Fetching Nifty 500 index list…", 5);
+  const symbols = await fetchNifty500Symbols();
+  if (symbols.length < 100) throw new Error("Could not fetch Nifty 500 list — check internet connection.");
+
+  const tickers = symbols.map(s => `${s}.NS`);
+  const batches = [];
+  for (let i = 0; i < tickers.length; i += MQ_BATCH) batches.push(tickers.slice(i, i + MQ_BATCH));
+
+  const allData = {};
+  let done = 0;
+  await Promise.all(batches.map(async (batch) => {
+    const result = await fetchSparkBatch(batch);
+    Object.assign(allData, result);
+    done++;
+    onProgress(`Downloading data (${done}/${batches.length} batches)…`, 10 + done * 65 / batches.length);
+  }));
+
+  onProgress("Computing breadth metrics…", 78);
+
+  // Filter: >= 150 valid closes
+  const stocks = Object.entries(allData)
+    .filter(([, closes]) => closes.filter(c => c != null).length >= 150)
+    .map(([ticker, closes]) => {
+      const s200 = smaSeries(closes, 200, 150);
+      const s50  = smaSeries(closes, 50,  40);
+      const s10  = smaSeries(closes, 10,  8);
+      const h252 = rollMax(closes, 252); const l252 = rollMin(closes, 252);
+      const h20  = rollMax(closes, 20);  const l20  = rollMin(closes, 20);
+      const h65  = rollMax(closes, 65);  const l65  = rollMin(closes, 65);
+      return { ticker, closes, s200, s50, s10, h252, l252, h20, l20, h65, l65 };
+    });
+
+  const N = stocks.length;
+  if (N < 50) throw new Error(`Too few valid stocks (${N}). Yahoo Finance may be throttling — try again later.`);
+
+  function pctAboveAt(field, idx) {
+    let cnt = 0, tot = 0;
+    for (const s of stocks) {
+      const c = s.closes[idx], sm = s[field][idx];
+      if (c != null && sm != null) { tot++; if (c > sm) cnt++; }
+    }
+    return tot > 0 ? cnt / tot * 100 : 0;
+  }
+
+  const nRows = Math.min(...stocks.map(s => s.closes.length));
+  const pct200 = +pctAboveAt("s200", nRows - 1).toFixed(1);
+  const pct50  = +pctAboveAt("s50",  nRows - 1).toFixed(1);
+  const pct10  = +pctAboveAt("s10",  nRows - 1).toFixed(1);
+
+  let above200 = 0, above50 = 0, above10 = 0;
+  let newHighs = 0, newLows = 0;
+  let nnh20h = 0, nnh20l = 0, nnh65h = 0, nnh65l = 0;
+  for (const s of stocks) {
+    const i = nRows - 1, c = s.closes[i];
+    if (c == null) continue;
+    if (s.s200[i] != null && c > s.s200[i]) above200++;
+    if (s.s50[i]  != null && c > s.s50[i])  above50++;
+    if (s.s10[i]  != null && c > s.s10[i])  above10++;
+    if (s.h252[i] != null && c >= s.h252[i] * 0.99) newHighs++;
+    if (s.l252[i] != null && c <= s.l252[i] * 1.01) newLows++;
+    if (s.h20[i]  != null && c >= s.h20[i]  * 0.99) nnh20h++;
+    if (s.l20[i]  != null && c <= s.l20[i]  * 1.01) nnh20l++;
+    if (s.h65[i]  != null && c >= s.h65[i]  * 0.99) nnh65h++;
+    if (s.l65[i]  != null && c <= s.l65[i]  * 1.01) nnh65l++;
+  }
+
+  const nnh52w = newHighs - newLows;
+  const nnh20  = nnh20h - nnh20l;
+  const nnh65  = nnh65h - nnh65l;
+  const bias  = pct200 >= 50 ? "BULL" : "BEAR";
+  const trend = (pct50 >= 50 && nnh52w > 0) ? "UP" : "DOWN";
+  const swing = pct10 >= 70 ? "HOT" : pct10 >= 50 ? "WARM" : pct10 >= 30 ? "COOL" : "COLD";
+
+  // Momentum: weekly pct_above_50 snapshots, 4-week ROC
+  const wpts = [];
+  for (let i = 0; i < 14; i++) {
+    const idx = nRows - 1 - i * 5;
+    if (idx < 49) break;
+    wpts.unshift(pctAboveAt("s50", idx));
+  }
+  const roc = wpts.slice(4).map((v, i) => v - wpts[i]);
+  let momentum = "FALLING", momRaw = 0, momMa9 = 0, momentumChange = 0;
+  if (roc.length) {
+    momMa9 = roc.reduce((a, b) => a + b, 0) / roc.length;
+    momRaw = roc[roc.length - 1];
+    momentum = momRaw > momMa9 ? "RISING" : "FALLING";
+    momentumChange = +(momRaw - momMa9).toFixed(1);
+  }
+
+  const bulls = (bias === "BULL" ? 1 : 0) + (trend === "UP" ? 1 : 0) + (pct10 >= 50 ? 1 : 0) + (momentum === "RISING" ? 1 : 0);
+  const overall = bulls >= 3 ? "INVEST" : bulls === 2 ? "SELECTIVE" : "CASH";
+
+  // Breadth Thrust
+  let thrustDetected = false;
+  if (pct10 > 40) {
+    for (let i = 1; i <= 12; i++) {
+      if (pctAboveAt("s10", nRows - 1 - i) < 25) { thrustDetected = true; break; }
+    }
+  }
+
+  // Swing Confidence
+  let score = Math.min(pct10 * 0.40, 40);
+  if (nnh20 > 0) score += 20;
+  if (nnh65 > 0) score += 20;
+  if (momentum === "RISING") score += 20;
+  const swingConfidence = Math.round(score);
+
+  // Phase Duration
+  function signalAt(rowIdx) {
+    if (rowIdx < 199) return null;
+    const p200 = pctAboveAt("s200", rowIdx);
+    const p50  = pctAboveAt("s50",  rowIdx);
+    const p10  = pctAboveAt("s10",  rowIdx);
+    let nh = 0, nl = 0;
+    for (const s of stocks) {
+      const c = s.closes[rowIdx];
+      if (c == null) continue;
+      if (s.h252[rowIdx] != null && c >= s.h252[rowIdx] * 0.99) nh++;
+      if (s.l252[rowIdx] != null && c <= s.l252[rowIdx] * 1.01) nl++;
+    }
+    const wpts2 = [];
+    for (let i = 0; i < 14; i++) { const idx = rowIdx - i * 5; if (idx < 49) break; wpts2.unshift(pctAboveAt("s50", idx)); }
+    const roc2 = wpts2.slice(4).map((v, i) => v - wpts2[i]);
+    const wmom = roc2.length && roc2[roc2.length - 1] > roc2.reduce((a, b) => a + b, 0) / roc2.length ? "RISING" : "FALLING";
+    const b = (p200 >= 50 ? 1 : 0) + ((p50 >= 50 && (nh - nl) > 0) ? 1 : 0) + (p10 >= 50 ? 1 : 0) + (wmom === "RISING" ? 1 : 0);
+    return b >= 3 ? "INVEST" : b === 2 ? "SELECTIVE" : "CASH";
+  }
+  let phaseWeeks = 0;
+  for (let w = 1; w <= 52; w++) {
+    const idx = nRows - 1 - w * 5;
+    if (signalAt(idx) === overall) phaseWeeks++; else break;
+  }
+
+  // To Upgrade
+  const toUpgrade = [];
+  const investConds = () => {
+    const c = [];
+    if (pct200 < 50) c.push({ metric: "Long-term breadth (200-SMA)", current: pct200, needs: 50.0, gap: +(50 - pct200).toFixed(1) });
+    if (pct50  < 50) c.push({ metric: "Medium breadth (50-SMA)",      current: pct50,  needs: 50.0, gap: +(50 - pct50).toFixed(1) });
+    if (nnh52w <= 0) c.push({ metric: "Net New Highs (52-week)",       current: nnh52w, needs: "> 0", gap: Math.abs(nnh52w) });
+    return c;
+  };
+  if (overall === "CASH") {
+    const sc = [];
+    if (pct10 < 50) sc.push({ metric: "Swing breadth (10-SMA)", current: pct10, needs: 50.0, gap: +(50 - pct10).toFixed(1) });
+    if (momentum !== "RISING") sc.push({ metric: "Momentum", current: +momRaw.toFixed(1), needs: `RISING (> ${+momMa9.toFixed(1)})`, gap: +(momMa9 - momRaw + 0.1).toFixed(1) });
+    if (sc.length) toUpgrade.push({ to: "SELECTIVE", conditions: sc });
+    const ic = investConds(); if (ic.length) toUpgrade.push({ to: "INVEST", conditions: ic });
+  } else if (overall === "SELECTIVE") {
+    const ic = investConds(); if (ic.length) toUpgrade.push({ to: "INVEST", conditions: ic });
+  }
+
+  const result = {
+    bias, trend, swing, momentum,
+    swing_confidence: swingConfidence, momentum_change: momentumChange,
+    pct_above_200: pct200, pct_above_50: pct50, pct_above_10: pct10,
+    above_200: above200, above_50: above50, above_10: above10, total: N,
+    nnh_20: nnh20, nnh_65: nnh65, nnh_52w: nnh52w,
+    new_highs: newHighs, new_lows: newLows,
+    overall, phase_weeks: phaseWeeks, thrust_detected: thrustDetected,
+    to_upgrade: toUpgrade,
+    updated_at: new Date().toISOString(),
+  };
+  setMqCache(result);
+  return result;
+}
+
+function BreadthBar({ label, pct, count, total }) {
+  const fill = pct >= 50 ? "#4ADE80" : pct >= 30 ? "#A39C89" : "#DC143C";
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+        <span style={{ fontSize: 12, color: "var(--text2)" }}>{label}</span>
+        <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text)" }}>
+          {pct.toFixed(1)}% <span style={{ color: "var(--text3)" }}>({count}/{total})</span>
+        </span>
+      </div>
+      <div style={{ height: 4, background: "var(--border)", borderRadius: 4, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${Math.min(pct, 100)}%`, background: fill, borderRadius: 4, transition: "width 0.6s ease" }} />
+      </div>
+    </div>
+  );
+}
+
+function NNHBadge({ label, value }) {
+  const color = value > 0 ? "#4ADE80" : value < 0 ? "#DC143C" : "var(--text3)";
+  return (
+    <div style={{ textAlign: "center" }}>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 3 }}>{label}</div>
+      <div style={{ fontFamily: "var(--mono)", fontSize: 15, fontWeight: 700, color }}>
+        {value > 0 ? "+" : ""}{value}
+      </div>
+    </div>
+  );
+}
+
+function MarketQuadrantPage() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [progress, setProgress] = useState("Initialising…");
+  const [error, setError] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const run = async (forceRefresh = false) => {
+    setError(null);
+    if (forceRefresh) {
+      try { localStorage.removeItem(MQ_CACHE_KEY); } catch (_) {}
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
+    try {
+      const result = await computeMarketQuadrant((msg) => setProgress(msg));
+      setData(result);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => { run(); }, []);
+
+  if (loading) return (
+    <div className="fade-in" style={{ padding: "20px 16px 100px" }}>
+      <div style={{ fontSize: 11, color: "var(--text3)", letterSpacing: "0.15em", marginBottom: 16, fontWeight: 700 }}>MARKET QUADRANT</div>
+      <div style={{ textAlign: "center", padding: "60px 0", color: "var(--text3)", fontSize: 13 }}>
+        <div style={{ marginBottom: 8 }}>{progress}</div>
+        <div style={{ fontSize: 11 }}>First run fetches 500 stocks — may take 30–60 s</div>
+      </div>
+    </div>
+  );
+
+  if (error) return (
+    <div className="fade-in" style={{ padding: "20px 16px 100px" }}>
+      <div style={{ fontSize: 11, color: "var(--text3)", letterSpacing: "0.15em", marginBottom: 16, fontWeight: 700 }}>MARKET QUADRANT</div>
+      <div style={{ background: "rgba(220,20,60,0.06)", border: "1px solid rgba(220,20,60,0.2)", borderRadius: 12, padding: 16, color: "var(--red)", fontSize: 13 }}>
+        {error}
+      </div>
+      <button className="btn-ghost" style={{ width: "100%", marginTop: 12 }} onClick={() => run()}>Retry</button>
+    </div>
+  );
+
+  if (!data) return null;
+
+  const sigColor = MQ_SIGNAL_COLOR[data.overall] || "var(--text)";
+  const sigBg    = MQ_SIGNAL_BG[data.overall]    || "var(--bg2)";
+
+  const updatedAt = data.updated_at ? (() => {
+    try {
+      const d = new Date(data.updated_at);
+      return d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" }) + " IST";
+    } catch (_) { return data.updated_at; }
+  })() : null;
+
+  const swingConfLabel = data.swing_confidence >= 60 ? "HIGH" : data.swing_confidence >= 40 ? "MEDIUM" : data.swing_confidence >= 20 ? "LOW" : "ZERO";
+  const swingConfColor = data.swing_confidence >= 60 ? "#4ADE80" : data.swing_confidence >= 40 ? "#F59E0B" : "var(--text3)";
+
+  const posRule = data.overall === "INVEST"
+    ? "Full size · all A-grade setups · sectors HOT/WARM"
+    : data.overall === "SELECTIVE"
+    ? "Half size · highest RS only · skip COLD sectors"
+    : "No new entries · hold only if stop not hit";
+
+  return (
+    <div className="fade-in" style={{ padding: "20px 16px 100px" }}>
+      <div style={{ fontSize: 11, color: "var(--text3)", letterSpacing: "0.15em", marginBottom: 16, fontWeight: 700 }}>MARKET QUADRANT</div>
+
+      {/* ── Overall Signal ── */}
+      <div style={{ background: sigBg, border: `1px solid ${sigColor}33`, borderRadius: 18, padding: "20px 16px", marginBottom: 14, textAlign: "center" }}>
+        <div style={{ fontSize: 11, color: "var(--text3)", letterSpacing: "0.14em", marginBottom: 8 }}>OVERALL SIGNAL</div>
+        <div style={{ fontSize: 40, fontWeight: 800, color: sigColor, letterSpacing: "-0.03em", lineHeight: 1, fontFamily: "var(--display)" }}>
+          {data.overall}
+        </div>
+        <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 8 }}>
+          Nifty 500 · {data.total} stocks · {data.phase_weeks > 0 ? `${data.phase_weeks}w phase` : "new phase"}
+        </div>
+        <div style={{ fontSize: 11, color: sigColor, marginTop: 6, fontWeight: 600 }}>{posRule}</div>
+        {data.thrust_detected && (
+          <div style={{ marginTop: 10, background: "rgba(74,222,128,0.12)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 8, padding: "6px 10px", fontSize: 11, color: "#4ADE80", fontWeight: 700, letterSpacing: "0.1em" }}>
+            ⚡ BREADTH THRUST DETECTED
+          </div>
+        )}
+      </div>
+
+      {/* ── Four Dimensions ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
+        {[
+          { label: "BIAS", value: data.bias, sub: `${data.pct_above_200}% above 200-SMA` },
+          { label: "TREND", value: data.trend, sub: `${data.pct_above_50}% above 50-SMA` },
+          { label: "SWING", value: data.swing, sub: `${data.pct_above_10}% above 10-SMA` },
+          { label: "MOMENTUM", value: data.momentum, sub: `Δ ${data.momentum_change > 0 ? "+" : ""}${data.momentum_change}%` },
+        ].map(({ label, value, sub }) => (
+          <div key={label} style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: "14px 12px" }}>
+            <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.14em", marginBottom: 6, fontWeight: 700 }}>{label}</div>
+            <div style={{ fontSize: 20, fontWeight: 800, color: MQ_DIM_COLOR[value] || "var(--text)", letterSpacing: "-0.02em", lineHeight: 1 }}>{value}</div>
+            <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 5, fontFamily: "var(--mono)" }}>{sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Breadth Bars ── */}
+      <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: "14px 14px 10px", marginBottom: 14 }}>
+        <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.14em", marginBottom: 12, fontWeight: 700 }}>BREADTH</div>
+        <BreadthBar label="Above 200-SMA (long-term)" pct={data.pct_above_200} count={data.above_200} total={data.total} />
+        <BreadthBar label="Above 50-SMA (medium)"    pct={data.pct_above_50}  count={data.above_50}  total={data.total} />
+        <BreadthBar label="Above 10-SMA (short-term)" pct={data.pct_above_10}  count={data.above_10}  total={data.total} />
+      </div>
+
+      {/* ── Net New Highs ── */}
+      <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: "14px 14px", marginBottom: 14 }}>
+        <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.14em", marginBottom: 12, fontWeight: 700 }}>NET NEW HIGHS</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
+          <NNHBadge label="20-day"  value={data.nnh_20}  />
+          <NNHBadge label="65-day"  value={data.nnh_65}  />
+          <NNHBadge label="52-week" value={data.nnh_52w} />
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 3 }}>52w H/L</div>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 12, fontWeight: 700 }}>
+              <span style={{ color: "#4ADE80" }}>{data.new_highs}</span>
+              <span style={{ color: "var(--text3)" }}> / </span>
+              <span style={{ color: "#DC143C" }}>{data.new_lows}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Swing Confidence ── */}
+      <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: "14px", marginBottom: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.14em", fontWeight: 700, marginBottom: 4 }}>SWING CONFIDENCE</div>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 22, fontWeight: 800, color: swingConfColor }}>{data.swing_confidence}<span style={{ fontSize: 12, fontWeight: 400, color: "var(--text3)" }}>/100</span></div>
+          </div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: swingConfColor, letterSpacing: "0.08em" }}>{swingConfLabel}</div>
+        </div>
+      </div>
+
+      {/* ── To Upgrade ── */}
+      {data.to_upgrade?.length > 0 && (
+        <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: "14px", marginBottom: 14 }}>
+          <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.14em", fontWeight: 700, marginBottom: 12 }}>TO UPGRADE</div>
+          {data.to_upgrade.map((upgrade, i) => (
+            <div key={i} style={{ marginBottom: i < data.to_upgrade.length - 1 ? 16 : 0 }}>
+              <div style={{ fontSize: 11, color: MQ_SIGNAL_COLOR[upgrade.to] || "var(--text2)", fontWeight: 700, marginBottom: 8 }}>→ {upgrade.to}</div>
+              {upgrade.conditions.map((c, j) => (
+                <div key={j} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", paddingBottom: 8, marginBottom: 8, borderBottom: j < upgrade.conditions.length - 1 ? "1px solid var(--border)" : "none" }}>
+                  <div style={{ fontSize: 12, color: "var(--text2)", flex: 1, marginRight: 8 }}>{c.metric}</div>
+                  <div style={{ textAlign: "right", flexShrink: 0 }}>
+                    <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--red)" }}>{typeof c.current === "number" ? `${c.current}%` : c.current}</span>
+                    <span style={{ color: "var(--text3)", fontSize: 12 }}> → </span>
+                    <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "#4ADE80" }}>{typeof c.needs === "number" ? `${c.needs}%` : c.needs}</span>
+                    <div style={{ fontSize: 10, color: "var(--text3)", fontFamily: "var(--mono)", marginTop: 1 }}>gap {c.gap}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Footer: refresh + timestamp ── */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
+        <button className="btn-ghost" style={{ fontSize: 12, padding: "8px 14px" }}
+          onClick={() => run(true)} disabled={refreshing}>
+          {refreshing ? "Refreshing…" : "↻ Refresh"}
+        </button>
+        {updatedAt && <span style={{ fontSize: 11, color: "var(--text3)" }}>Updated {updatedAt}</span>}
+      </div>
+    </div>
+  );
+}
+
 // ─── BOTTOM NAV ──────────────────────────────────────────────────────────────
 function BottomNav({ page, setPage }) {
   const tabs = [
@@ -2621,6 +3121,11 @@ function BottomNav({ page, setPage }) {
     { id: "analytics", label: "STATS", icon: (
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
         <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="2" y1="20" x2="22" y2="20"/>
+      </svg>
+    )},
+    { id: "quadrant", label: "QUAD", icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/>
       </svg>
     )},
   ];
@@ -2694,6 +3199,9 @@ export default function App() {
       )}
       {page === "analytics" && (
         <AnalyticsPage trades={trades} portfolio={portfolio} />
+      )}
+      {page === "quadrant" && (
+        <MarketQuadrantPage />
       )}
 
       <BottomNav page={page} setPage={setPage} />
