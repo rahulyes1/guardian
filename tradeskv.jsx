@@ -2667,15 +2667,10 @@ async function fetchNifty500Symbols() {
 
 async function fetchSparkBatch(nsTickers) {
   // Returns { "RELIANCE.NS": [close, ...], ... }
-  const url = `https://query1.finance.yahoo.com/v8/finance/spark?symbols=${nsTickers.join(",")}&range=1y&interval=1d`;
-  const r = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      Accept: "application/json",
-      Referer: "https://finance.yahoo.com/",
-    },
-  });
-  if (!r.ok) throw new Error(`Yahoo spark HTTP ${r.status}`);
+  // Routes through /api/spark (Vercel serverless) to avoid browser CORS restrictions
+  const url = `/api/spark?symbols=${encodeURIComponent(nsTickers.join(","))}&range=1y&interval=1d`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`Spark API HTTP ${r.status}`);
   const json = await r.json();
   const out = {};
   for (const item of (json?.spark?.result ?? [])) {
