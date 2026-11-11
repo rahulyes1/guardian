@@ -2604,8 +2604,11 @@ function AnalyticsPage({ trades, portfolio }) {
 const MQ_SIGNAL_COLOR = { INVEST: "#4ADE80", SELECTIVE: "#F59E0B", CASH: "#DC143C" };
 const MQ_SIGNAL_BG    = { INVEST: "rgba(74,222,128,0.08)", SELECTIVE: "rgba(245,158,11,0.08)", CASH: "rgba(220,20,60,0.08)" };
 const MQ_DIM_COLOR    = { BULL: "#4ADE80", BEAR: "#DC143C", UP: "#4ADE80", DOWN: "#DC143C", RISING: "#4ADE80", FALLING: "#DC143C", HOT: "#4ADE80", WARM: "#A3E635", COOL: "#A39C89", COLD: "#DC143C" };
-const MQ_CACHE_KEY = "td_mq_v1";
-const MQ_BATCH     = 50; // symbols per spark request (keeps serverless calls within timeout)
+const MQ_CACHE_KEY = "td_mq_v2"; // v2: date-aligned series, 2y history (v1 results were misaligned)
+const MQ_BATCH     = 50;   // symbols per spark request (server caps at 50)
+const MQ_PARALLEL  = 3;    // spark requests in flight at once (avoids Yahoo 429s)
+const MQ_RANGE     = "2y"; // need >1y so 200-SMA / 52w history exists for past rows (phase duration)
+const MQ_MIN_COVERAGE = 0.9; // refuse to compute (and cache) on <90% of the index
 const NIFTY500_CSV = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv";
 const ALLORIGINS   = "https://api.allorigins.win/raw?url=";
 
@@ -2665,19 +2668,58 @@ async function fetchNifty500Symbols() {
   return [];
 }
 
+// Unix seconds → IST trading-day key "YYYY-MM-DD"
+function istDayKey(ts) {
+  return new Date((ts + 19800) * 1000).toISOString().slice(0, 10);
+}
+
 async function fetchSparkBatch(nsTickers) {
-  // Returns { "RELIANCE.NS": [close, ...], ... }
+  // Returns { "RELIANCE.NS": { "2025-01-02": close, ... }, ... }
   // Routes through /api/spark (Vercel serverless) to avoid browser CORS restrictions
-  const url = `/api/spark?symbols=${encodeURIComponent(nsTickers.join(","))}&range=1y&interval=1d`;
+  const url = `/api/spark?symbols=${encodeURIComponent(nsTickers.join(","))}&range=${MQ_RANGE}&interval=1d`;
   const r = await fetch(url);
   if (!r.ok) throw new Error(`Spark API HTTP ${r.status}`);
   const json = await r.json();
   const out = {};
   for (const item of (json?.spark?.result ?? [])) {
-    const closes = item?.response?.[0]?.indicators?.quote?.[0]?.close;
-    if (item?.symbol && Array.isArray(closes)) out[item.symbol] = closes.map(c => (c == null ? null : +c));
+    const resp = item?.response?.[0];
+    const ts = resp?.timestamp;
+    const closes = resp?.indicators?.quote?.[0]?.close;
+    if (!item?.symbol || !Array.isArray(ts) || !Array.isArray(closes)) continue;
+    const byDay = {};
+    for (let i = 0; i < ts.length; i++) {
+      if (closes[i] != null) byDay[istDayKey(ts[i])] = +closes[i]; // last bar of a day wins
+    }
+    out[item.symbol] = byDay;
   }
   return out;
+}
+
+// Runs fn over items with at most `limit` in flight; never rejects (errors → null)
+async function mapLimited(items, limit, fn) {
+  const results = new Array(items.length).fill(null);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      try { results[i] = await fn(items[i], i); } catch (_) { results[i] = null; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+// Builds a common date axis and maps every stock onto it (null where it has no bar).
+// Dates present for fewer than half the stocks (e.g. a stray partial bar) are dropped.
+function alignByDate(allData) {
+  const counts = {};
+  const entries = Object.entries(allData);
+  for (const [, byDay] of entries) for (const d in byDay) counts[d] = (counts[d] || 0) + 1;
+  const minCount = entries.length * 0.5;
+  const axis = Object.keys(counts).filter(d => counts[d] >= minCount).sort();
+  const aligned = {};
+  for (const [ticker, byDay] of entries) aligned[ticker] = axis.map(d => byDay[d] ?? null);
+  return { axis, aligned };
 }
 
 // Sliding-window SMA — O(n)
@@ -2731,17 +2773,35 @@ async function computeMarketQuadrant(onProgress) {
 
   const allData = {};
   let done = 0;
-  await Promise.all(batches.map(async (batch) => {
+  await mapLimited(batches, MQ_PARALLEL, async (batch) => {
     const result = await fetchSparkBatch(batch);
     Object.assign(allData, result);
     done++;
-    onProgress(`Downloading data (${done}/${batches.length} batches)…`, 10 + done * 65 / batches.length);
-  }));
+    onProgress(`Downloading data (${done}/${batches.length} batches)…`, 10 + done * 60 / batches.length);
+  });
+
+  // One retry pass for anything that failed (whole batch errors or per-symbol misses)
+  const missing = tickers.filter(t => !allData[t]);
+  if (missing.length) {
+    onProgress(`Retrying ${missing.length} symbols…`, 72);
+    const retryBatches = [];
+    for (let i = 0; i < missing.length; i += MQ_BATCH) retryBatches.push(missing.slice(i, i + MQ_BATCH));
+    await mapLimited(retryBatches, MQ_PARALLEL, async (batch) => Object.assign(allData, await fetchSparkBatch(batch)));
+  }
+
+  const got = tickers.filter(t => allData[t]).length;
+  if (got < tickers.length * MQ_MIN_COVERAGE) {
+    // Don't compute (or cache) breadth on a biased subset of the index
+    throw new Error(`Only got data for ${got}/${tickers.length} stocks. Yahoo Finance may be throttling — try again in a few minutes.`);
+  }
 
   onProgress("Computing breadth metrics…", 78);
 
+  // Put every stock on the same date axis so index i means the same day for all of them
+  const { aligned } = alignByDate(allData);
+
   // Filter: >= 150 valid closes
-  const stocks = Object.entries(allData)
+  const stocks = Object.entries(aligned)
     .filter(([, closes]) => closes.filter(c => c != null).length >= 150)
     .map(([ticker, closes]) => {
       const s200 = smaSeries(closes, 200, 150);
@@ -2765,7 +2825,7 @@ async function computeMarketQuadrant(onProgress) {
     return tot > 0 ? cnt / tot * 100 : 0;
   }
 
-  const nRows = Math.min(...stocks.map(s => s.closes.length));
+  const nRows = stocks[0].closes.length; // all series share the aligned date axis
   const pct200 = +pctAboveAt("s200", nRows - 1).toFixed(1);
   const pct50  = +pctAboveAt("s50",  nRows - 1).toFixed(1);
   const pct10  = +pctAboveAt("s10",  nRows - 1).toFixed(1);
