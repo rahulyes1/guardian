@@ -81,10 +81,15 @@ export default async function handler(req, res) {
     const ok = results.filter(Boolean);
     const failed = symbolList.filter((_, i) => !results[i]);
 
-    // Only let the CDN cache responses that are (nearly) complete
+    // Only let the CDN cache responses that are (nearly) complete; keep it short while
+    // the market is open so the post-close recompute doesn't get intraday bars
+    const ist = new Date(Date.now() + 5.5 * 3600 * 1000);
+    const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+    const weekday = ist.getUTCDay() >= 1 && ist.getUTCDay() <= 5;
+    const ttl = weekday && mins >= 9 * 60 && mins < 16 * 60 ? 300 : 3600;
     res.setHeader(
       "Cache-Control",
-      ok.length >= symbolList.length * MIN_OK_RATIO ? "public, max-age=3600, s-maxage=3600" : "no-store"
+      ok.length >= symbolList.length * MIN_OK_RATIO ? `public, max-age=${ttl}, s-maxage=${ttl}` : "no-store"
     );
     res.json({ spark: { result: ok }, failed });
   } catch (e) {

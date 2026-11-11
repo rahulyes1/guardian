@@ -1,4 +1,8 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Fragment } from "react";
+import { getSupabaseClient } from "./supabaseClient.js";
+import {
+  MQ_SIGNALS, loadMarketQuadrant, getLastMarketQuadrant, subscribeProgress, signalOnDate, configureSharedStore,
+} from "./marketQuadrant.js";
 import { useSyncedAppState } from "./appStateSync.js";
 // ─── THEME & CONSTANTS ───────────────────────────────────────────────────────
 const REGIME_CONFIG = {
@@ -1511,7 +1515,7 @@ function OpenTradeCard({ trade, livePrice }) {
 }
 
 // ─── CALCULATOR PAGE ─────────────────────────────────────────────────────────
-function CalcPage({ portfolio, onSendToJournal }) {
+function CalcPage({ portfolio, onSendToJournal, onOpenQuadrant }) {
   const [symbol, setSymbol] = useState("");
   const [symbolInfo, setSymbolInfo] = useState(null);
 
@@ -1567,6 +1571,8 @@ function CalcPage({ portfolio, onSendToJournal }) {
         <div className="section-title">Calculator</div>
         <div style={{ fontSize: 13, color: "var(--text3)", marginTop: 4 }}>Plan the trade. Know the risk before entry.</div>
       </div>
+
+      <MarketSignalBanner onOpen={onOpenQuadrant} />
 
       {/* Symbol */}
       <div className="card" style={{ marginBottom: 12 }}>
@@ -1827,6 +1833,7 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
       notes: form.notes,
       status: "open",
       date: new Date().toISOString(),
+      marketSignal: currentMarketSignal(), // QUAD signal at entry (null if no recent data)
       entries,
       currentStop,
       targets,
@@ -2562,6 +2569,8 @@ function AnalyticsPage({ trades, portfolio }) {
         </div>
       </div>
 
+      <MarketSignalStats closed={closed} />
+
       {/* By Setup */}
       {setupStats.length > 0 && (
         <div className="card">
@@ -2600,362 +2609,90 @@ function AnalyticsPage({ trades, portfolio }) {
   );
 }
 
-// ─── MARKET QUADRANT — CLIENT-SIDE COMPUTATION ───────────────────────────────
+// ─── MARKET QUADRANT — UI (data/compute lives in marketQuadrant.js) ──────────
 const MQ_SIGNAL_COLOR = { INVEST: "#4ADE80", SELECTIVE: "#F59E0B", CASH: "#DC143C" };
 const MQ_SIGNAL_BG    = { INVEST: "rgba(74,222,128,0.08)", SELECTIVE: "rgba(245,158,11,0.08)", CASH: "rgba(220,20,60,0.08)" };
 const MQ_DIM_COLOR    = { BULL: "#4ADE80", BEAR: "#DC143C", UP: "#4ADE80", DOWN: "#DC143C", RISING: "#4ADE80", FALLING: "#DC143C", HOT: "#4ADE80", WARM: "#A3E635", COOL: "#A39C89", COLD: "#DC143C" };
-const MQ_CACHE_KEY = "td_mq_v2"; // v2: date-aligned series, 2y history (v1 results were misaligned)
-const MQ_BATCH     = 50;   // symbols per spark request (server caps at 50)
-const MQ_PARALLEL  = 3;    // spark requests in flight at once (avoids Yahoo 429s)
-const MQ_RANGE     = "2y"; // need >1y so 200-SMA / 52w history exists for past rows (phase duration)
-const MQ_MIN_COVERAGE = 0.9; // refuse to compute (and cache) on <90% of the index
-const NIFTY500_CSV = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv";
-const ALLORIGINS   = "https://api.allorigins.win/raw?url=";
+// Breadth chart series — validated categorical palette for the #141414 surface (all checks pass)
+const MQ_SERIES = [
+  { key: "p200", label: "200-SMA", color: "#3987E5" },
+  { key: "p50",  label: "50-SMA",  color: "#D9632B" },
+  { key: "p10",  label: "10-SMA",  color: "#A06CD5" },
+];
+const MQ_POS_RULE = {
+  INVEST: "Full size · all A-grade setups · sectors HOT/WARM",
+  SELECTIVE: "Half size · highest RS only · skip COLD sectors",
+  CASH: "No new entries · hold only if stop not hit",
+};
 
-// Returns IST date string "YYYY-MM-DD" for cache keying
-function istDateStr() {
-  return new Date(Date.now() + 5.5 * 3600000).toISOString().slice(0, 10);
+configureSharedStore(getSupabaseClient);
+
+function mqFmtDate(d) {
+  try { return new Date(`${d}T00:00:00Z`).toLocaleDateString("en-IN", { day: "numeric", month: "short", timeZone: "UTC" }); }
+  catch (_) { return d; }
+}
+// Days between an "YYYY-MM-DD" date and today (IST)
+function mqAgeDays(asOf) {
+  if (!asOf) return Infinity;
+  const today = new Date(Date.now() + 5.5 * 3600000).toISOString().slice(0, 10);
+  return Math.round((Date.parse(today) - Date.parse(asOf)) / 86400000);
+}
+/** Market signal to stamp on a trade opened now (null if no recent data). */
+function currentMarketSignal() {
+  const d = getLastMarketQuadrant();
+  return d && mqAgeDays(d.as_of) <= 4 ? d.overall : null;
 }
 
-function getMqCache() {
-  try {
-    const raw = localStorage.getItem(MQ_CACHE_KEY);
-    if (!raw) return null;
-    const { data, date } = JSON.parse(raw);
-    // Valid for the entire calendar day (IST) — recomputes once per trading day
-    if (date === istDateStr()) return data;
-  } catch (_) {}
-  return null;
-}
-function setMqCache(data) {
-  try { localStorage.setItem(MQ_CACHE_KEY, JSON.stringify({ data, date: istDateStr() })); } catch (_) {}
-}
+function useMarketQuadrant() {
+  const [data, setData] = useState(() => getLastMarketQuadrant());
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState(null);
+  const [progress, setProgress] = useState({ msg: "Initialising…", pct: 0 });
+  const alive = useRef(true);
 
-async function fetchTextWithTimeout(url, ms = 15000) {
-  const ctrl = new AbortController();
-  const id = setTimeout(() => ctrl.abort(), ms);
-  try {
-    const r = await fetch(url, { signal: ctrl.signal });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return await r.text();
-  } finally { clearTimeout(id); }
-}
-
-async function fetchNifty500Symbols() {
-  // 1. Try bundled static list first (instant, no CORS)
-  try {
-    const r = await fetch("/nifty500.json");
-    if (r.ok) {
-      const data = await r.json();
-      if (Array.isArray(data) && data.length > 100) return data;
-    }
-  } catch (_) {}
-
-  // 2. Fallback: fetch live from NSE (direct then CORS proxy)
-  for (const url of [NIFTY500_CSV, ALLORIGINS + encodeURIComponent(NIFTY500_CSV)]) {
+  const run = async (force = false) => {
+    setError(null);
+    if (force) setRefreshing(true); else setLoading(true);
     try {
-      const text = await fetchTextWithTimeout(url, 12000);
-      const lines = text.split(/\r?\n/).filter(l => l.trim());
-      const syms = [];
-      for (let i = 1; i < lines.length; i++) {
-        const cols = lines[i].split(",");
-        const sym = cols[2]?.trim().replace(/"/g, "").toUpperCase();
-        if (sym && /^[A-Z0-9&_-]+$/.test(sym)) syms.push(sym);
-      }
-      if (syms.length > 100) return syms;
-    } catch (_) {}
-  }
-  return [];
-}
-
-// Unix seconds → IST trading-day key "YYYY-MM-DD"
-function istDayKey(ts) {
-  return new Date((ts + 19800) * 1000).toISOString().slice(0, 10);
-}
-
-async function fetchSparkBatch(nsTickers) {
-  // Returns { "RELIANCE.NS": { "2025-01-02": close, ... }, ... }
-  // Routes through /api/spark (Vercel serverless) to avoid browser CORS restrictions
-  const url = `/api/spark?symbols=${encodeURIComponent(nsTickers.join(","))}&range=${MQ_RANGE}&interval=1d`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`Spark API HTTP ${r.status}`);
-  const json = await r.json();
-  const out = {};
-  for (const item of (json?.spark?.result ?? [])) {
-    const resp = item?.response?.[0];
-    const ts = resp?.timestamp;
-    const closes = resp?.indicators?.quote?.[0]?.close;
-    if (!item?.symbol || !Array.isArray(ts) || !Array.isArray(closes)) continue;
-    const byDay = {};
-    for (let i = 0; i < ts.length; i++) {
-      if (closes[i] != null) byDay[istDayKey(ts[i])] = +closes[i]; // last bar of a day wins
-    }
-    out[item.symbol] = byDay;
-  }
-  return out;
-}
-
-// Runs fn over items with at most `limit` in flight; never rejects (errors → null)
-async function mapLimited(items, limit, fn) {
-  const results = new Array(items.length).fill(null);
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++;
-      try { results[i] = await fn(items[i], i); } catch (_) { results[i] = null; }
+      const result = await loadMarketQuadrant({ force });
+      if (alive.current) setData(result);
+    } catch (e) {
+      if (alive.current) setError(e.message || String(e));
+    } finally {
+      if (alive.current) { setLoading(false); setRefreshing(false); }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
+
+  useEffect(() => {
+    alive.current = true;
+    const unsub = subscribeProgress((msg, pct) => alive.current && setProgress({ msg, pct }));
+    run();
+    return () => { alive.current = false; unsub(); };
+  }, []);
+
+  return { data, loading, refreshing, error, progress, refresh: () => run(true), retry: () => run(false) };
 }
 
-// Builds a common date axis and maps every stock onto it (null where it has no bar).
-// Dates present for fewer than half the stocks (e.g. a stray partial bar) are dropped.
-function alignByDate(allData) {
-  const counts = {};
-  const entries = Object.entries(allData);
-  for (const [, byDay] of entries) for (const d in byDay) counts[d] = (counts[d] || 0) + 1;
-  const minCount = entries.length * 0.5;
-  const axis = Object.keys(counts).filter(d => counts[d] >= minCount).sort();
-  const aligned = {};
-  for (const [ticker, byDay] of entries) aligned[ticker] = axis.map(d => byDay[d] ?? null);
-  return { axis, aligned };
+function MqDelta({ cur, prev, digits = 1, unit = "" }) {
+  if (cur == null || prev == null) return null;
+  const d = +(cur - prev).toFixed(digits);
+  if (d === 0) return <span style={{ color: "var(--text3)", fontSize: 10, fontFamily: "var(--mono)" }}> ±0</span>;
+  return (
+    <span style={{ color: d > 0 ? "#4ADE80" : "#DC143C", fontSize: 10, fontFamily: "var(--mono)", whiteSpace: "nowrap" }}>
+      {" "}{d > 0 ? "▲ +" : "▼ "}{d}{unit}
+    </span>
+  );
 }
 
-// Sliding-window SMA — O(n)
-function smaSeries(arr, period, minP = Math.ceil(period * 0.75)) {
-  const out = new Array(arr.length).fill(null);
-  let sum = 0, cnt = 0;
-  const buf = new Array(period).fill(null);
-  let head = 0;
-  for (let i = 0; i < arr.length; i++) {
-    const v = arr[i];
-    const old = buf[head];
-    buf[head] = v;
-    head = (head + 1) % period;
-    if (v != null) { sum += v; cnt++; }
-    if (old != null) { sum -= old; cnt--; }
-    if (cnt >= minP) out[i] = sum / cnt;
-  }
-  return out;
-}
-
-function rollMax(arr, period) {
-  return arr.map((_, i) => {
-    let m = null;
-    for (let j = Math.max(0, i - period + 1); j <= i; j++) {
-      if (arr[j] != null && (m === null || arr[j] > m)) m = arr[j];
-    }
-    return m;
-  });
-}
-function rollMin(arr, period) {
-  return arr.map((_, i) => {
-    let m = null;
-    for (let j = Math.max(0, i - period + 1); j <= i; j++) {
-      if (arr[j] != null && (m === null || arr[j] < m)) m = arr[j];
-    }
-    return m;
-  });
-}
-
-async function computeMarketQuadrant(onProgress) {
-  const cached = getMqCache();
-  if (cached) return cached;
-
-  onProgress("Fetching Nifty 500 index list…", 5);
-  const symbols = await fetchNifty500Symbols();
-  if (symbols.length < 100) throw new Error("Could not fetch Nifty 500 list — check internet connection.");
-
-  const tickers = symbols.map(s => `${s}.NS`);
-  const batches = [];
-  for (let i = 0; i < tickers.length; i += MQ_BATCH) batches.push(tickers.slice(i, i + MQ_BATCH));
-
-  const allData = {};
-  let done = 0;
-  await mapLimited(batches, MQ_PARALLEL, async (batch) => {
-    const result = await fetchSparkBatch(batch);
-    Object.assign(allData, result);
-    done++;
-    onProgress(`Downloading data (${done}/${batches.length} batches)…`, 10 + done * 60 / batches.length);
-  });
-
-  // One retry pass for anything that failed (whole batch errors or per-symbol misses)
-  const missing = tickers.filter(t => !allData[t]);
-  if (missing.length) {
-    onProgress(`Retrying ${missing.length} symbols…`, 72);
-    const retryBatches = [];
-    for (let i = 0; i < missing.length; i += MQ_BATCH) retryBatches.push(missing.slice(i, i + MQ_BATCH));
-    await mapLimited(retryBatches, MQ_PARALLEL, async (batch) => Object.assign(allData, await fetchSparkBatch(batch)));
-  }
-
-  const got = tickers.filter(t => allData[t]).length;
-  if (got < tickers.length * MQ_MIN_COVERAGE) {
-    // Don't compute (or cache) breadth on a biased subset of the index
-    throw new Error(`Only got data for ${got}/${tickers.length} stocks. Yahoo Finance may be throttling — try again in a few minutes.`);
-  }
-
-  onProgress("Computing breadth metrics…", 78);
-
-  // Put every stock on the same date axis so index i means the same day for all of them
-  const { aligned } = alignByDate(allData);
-
-  // Filter: >= 150 valid closes
-  const stocks = Object.entries(aligned)
-    .filter(([, closes]) => closes.filter(c => c != null).length >= 150)
-    .map(([ticker, closes]) => {
-      const s200 = smaSeries(closes, 200, 150);
-      const s50  = smaSeries(closes, 50,  40);
-      const s10  = smaSeries(closes, 10,  8);
-      const h252 = rollMax(closes, 252); const l252 = rollMin(closes, 252);
-      const h20  = rollMax(closes, 20);  const l20  = rollMin(closes, 20);
-      const h65  = rollMax(closes, 65);  const l65  = rollMin(closes, 65);
-      return { ticker, closes, s200, s50, s10, h252, l252, h20, l20, h65, l65 };
-    });
-
-  const N = stocks.length;
-  if (N < 50) throw new Error(`Too few valid stocks (${N}). Yahoo Finance may be throttling — try again later.`);
-
-  function pctAboveAt(field, idx) {
-    let cnt = 0, tot = 0;
-    for (const s of stocks) {
-      const c = s.closes[idx], sm = s[field][idx];
-      if (c != null && sm != null) { tot++; if (c > sm) cnt++; }
-    }
-    return tot > 0 ? cnt / tot * 100 : 0;
-  }
-
-  const nRows = stocks[0].closes.length; // all series share the aligned date axis
-  const pct200 = +pctAboveAt("s200", nRows - 1).toFixed(1);
-  const pct50  = +pctAboveAt("s50",  nRows - 1).toFixed(1);
-  const pct10  = +pctAboveAt("s10",  nRows - 1).toFixed(1);
-
-  let above200 = 0, above50 = 0, above10 = 0;
-  let newHighs = 0, newLows = 0;
-  let nnh20h = 0, nnh20l = 0, nnh65h = 0, nnh65l = 0;
-  for (const s of stocks) {
-    const i = nRows - 1, c = s.closes[i];
-    if (c == null) continue;
-    if (s.s200[i] != null && c > s.s200[i]) above200++;
-    if (s.s50[i]  != null && c > s.s50[i])  above50++;
-    if (s.s10[i]  != null && c > s.s10[i])  above10++;
-    if (s.h252[i] != null && c >= s.h252[i] * 0.99) newHighs++;
-    if (s.l252[i] != null && c <= s.l252[i] * 1.01) newLows++;
-    if (s.h20[i]  != null && c >= s.h20[i]  * 0.99) nnh20h++;
-    if (s.l20[i]  != null && c <= s.l20[i]  * 1.01) nnh20l++;
-    if (s.h65[i]  != null && c >= s.h65[i]  * 0.99) nnh65h++;
-    if (s.l65[i]  != null && c <= s.l65[i]  * 1.01) nnh65l++;
-  }
-
-  const nnh52w = newHighs - newLows;
-  const nnh20  = nnh20h - nnh20l;
-  const nnh65  = nnh65h - nnh65l;
-  const bias  = pct200 >= 50 ? "BULL" : "BEAR";
-  const trend = (pct50 >= 50 && nnh52w > 0) ? "UP" : "DOWN";
-  const swing = pct10 >= 70 ? "HOT" : pct10 >= 50 ? "WARM" : pct10 >= 30 ? "COOL" : "COLD";
-
-  // Momentum: weekly pct_above_50 snapshots, 4-week ROC
-  const wpts = [];
-  for (let i = 0; i < 14; i++) {
-    const idx = nRows - 1 - i * 5;
-    if (idx < 49) break;
-    wpts.unshift(pctAboveAt("s50", idx));
-  }
-  const roc = wpts.slice(4).map((v, i) => v - wpts[i]);
-  let momentum = "FALLING", momRaw = 0, momMa9 = 0, momentumChange = 0;
-  if (roc.length) {
-    momMa9 = roc.reduce((a, b) => a + b, 0) / roc.length;
-    momRaw = roc[roc.length - 1];
-    momentum = momRaw > momMa9 ? "RISING" : "FALLING";
-    momentumChange = +(momRaw - momMa9).toFixed(1);
-  }
-
-  const bulls = (bias === "BULL" ? 1 : 0) + (trend === "UP" ? 1 : 0) + (pct10 >= 50 ? 1 : 0) + (momentum === "RISING" ? 1 : 0);
-  const overall = bulls >= 3 ? "INVEST" : bulls === 2 ? "SELECTIVE" : "CASH";
-
-  // Breadth Thrust
-  let thrustDetected = false;
-  if (pct10 > 40) {
-    for (let i = 1; i <= 12; i++) {
-      if (pctAboveAt("s10", nRows - 1 - i) < 25) { thrustDetected = true; break; }
-    }
-  }
-
-  // Swing Confidence
-  let score = Math.min(pct10 * 0.40, 40);
-  if (nnh20 > 0) score += 20;
-  if (nnh65 > 0) score += 20;
-  if (momentum === "RISING") score += 20;
-  const swingConfidence = Math.round(score);
-
-  // Phase Duration
-  function signalAt(rowIdx) {
-    if (rowIdx < 199) return null;
-    const p200 = pctAboveAt("s200", rowIdx);
-    const p50  = pctAboveAt("s50",  rowIdx);
-    const p10  = pctAboveAt("s10",  rowIdx);
-    let nh = 0, nl = 0;
-    for (const s of stocks) {
-      const c = s.closes[rowIdx];
-      if (c == null) continue;
-      if (s.h252[rowIdx] != null && c >= s.h252[rowIdx] * 0.99) nh++;
-      if (s.l252[rowIdx] != null && c <= s.l252[rowIdx] * 1.01) nl++;
-    }
-    const wpts2 = [];
-    for (let i = 0; i < 14; i++) { const idx = rowIdx - i * 5; if (idx < 49) break; wpts2.unshift(pctAboveAt("s50", idx)); }
-    const roc2 = wpts2.slice(4).map((v, i) => v - wpts2[i]);
-    const wmom = roc2.length && roc2[roc2.length - 1] > roc2.reduce((a, b) => a + b, 0) / roc2.length ? "RISING" : "FALLING";
-    const b = (p200 >= 50 ? 1 : 0) + ((p50 >= 50 && (nh - nl) > 0) ? 1 : 0) + (p10 >= 50 ? 1 : 0) + (wmom === "RISING" ? 1 : 0);
-    return b >= 3 ? "INVEST" : b === 2 ? "SELECTIVE" : "CASH";
-  }
-  let phaseWeeks = 0;
-  for (let w = 1; w <= 52; w++) {
-    const idx = nRows - 1 - w * 5;
-    if (signalAt(idx) === overall) phaseWeeks++; else break;
-  }
-
-  // To Upgrade
-  const toUpgrade = [];
-  const investConds = () => {
-    const c = [];
-    if (pct200 < 50) c.push({ metric: "Long-term breadth (200-SMA)", current: pct200, needs: 50.0, gap: +(50 - pct200).toFixed(1) });
-    if (pct50  < 50) c.push({ metric: "Medium breadth (50-SMA)",      current: pct50,  needs: 50.0, gap: +(50 - pct50).toFixed(1) });
-    if (nnh52w <= 0) c.push({ metric: "Net New Highs (52-week)",       current: nnh52w, needs: "> 0", gap: Math.abs(nnh52w) });
-    return c;
-  };
-  if (overall === "CASH") {
-    const sc = [];
-    if (pct10 < 50) sc.push({ metric: "Swing breadth (10-SMA)", current: pct10, needs: 50.0, gap: +(50 - pct10).toFixed(1) });
-    if (momentum !== "RISING") sc.push({ metric: "Momentum", current: +momRaw.toFixed(1), needs: `RISING (> ${+momMa9.toFixed(1)})`, gap: +(momMa9 - momRaw + 0.1).toFixed(1) });
-    if (sc.length) toUpgrade.push({ to: "SELECTIVE", conditions: sc });
-    const ic = investConds(); if (ic.length) toUpgrade.push({ to: "INVEST", conditions: ic });
-  } else if (overall === "SELECTIVE") {
-    const ic = investConds(); if (ic.length) toUpgrade.push({ to: "INVEST", conditions: ic });
-  }
-
-  const result = {
-    bias, trend, swing, momentum,
-    swing_confidence: swingConfidence, momentum_change: momentumChange,
-    pct_above_200: pct200, pct_above_50: pct50, pct_above_10: pct10,
-    above_200: above200, above_50: above50, above_10: above10, total: N,
-    nnh_20: nnh20, nnh_65: nnh65, nnh_52w: nnh52w,
-    new_highs: newHighs, new_lows: newLows,
-    overall, phase_weeks: phaseWeeks, thrust_detected: thrustDetected,
-    to_upgrade: toUpgrade,
-    updated_at: new Date().toISOString(),
-  };
-  setMqCache(result);
-  return result;
-}
-
-function BreadthBar({ label, pct, count, total }) {
+function BreadthBar({ label, pct, prev, count, total }) {
   const fill = pct >= 50 ? "#4ADE80" : pct >= 30 ? "#A39C89" : "#DC143C";
   return (
     <div style={{ marginBottom: 10 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, gap: 8 }}>
         <span style={{ fontSize: 12, color: "var(--text2)" }}>{label}</span>
-        <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text)" }}>
-          {pct.toFixed(1)}% <span style={{ color: "var(--text3)" }}>({count}/{total})</span>
+        <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text)", textAlign: "right" }}>
+          {pct.toFixed(1)}%<MqDelta cur={pct} prev={prev} /> <span style={{ color: "var(--text3)" }}>({count}/{total})</span>
         </span>
       </div>
       <div style={{ height: 4, background: "var(--border)", borderRadius: 4, overflow: "hidden" }}>
@@ -2977,78 +2714,244 @@ function NNHBadge({ label, value }) {
   );
 }
 
-function MarketQuadrantPage() {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [progress, setProgress] = useState("Initialising…");
-  const [error, setError] = useState(null);
-  const [refreshing, setRefreshing] = useState(false);
+const mqCardStyle = { background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: 14, marginBottom: 14 };
+const mqHeadStyle = { fontSize: 10, color: "var(--text3)", letterSpacing: "0.14em", fontWeight: 700 };
 
-  const run = async (forceRefresh = false) => {
-    setError(null);
-    if (forceRefresh) {
-      try { localStorage.removeItem(MQ_CACHE_KEY); } catch (_) {}
-      setRefreshing(true);
-    } else {
-      setLoading(true);
-    }
-    try {
-      const result = await computeMarketQuadrant((msg) => setProgress(msg));
-      setData(result);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
+// 52 weekly blocks, oldest → newest
+function MqSignalTimeline({ history }) {
+  const weeks = [];
+  for (let i = history.length - 1; i >= 0 && weeks.length < 52; i -= 5) weeks.unshift(history[i]);
+  const counts = { INVEST: 0, SELECTIVE: 0, CASH: 0 };
+  weeks.forEach(w => { if (w.sig) counts[w.sig]++; });
+  return (
+    <div style={mqCardStyle}>
+      <div style={{ ...mqHeadStyle, marginBottom: 10 }}>SIGNAL TIMELINE · {weeks.length} WEEKS</div>
+      <div style={{ display: "flex", gap: 2, height: 22 }}>
+        {weeks.map(w => (
+          <div key={w.d} title={`Week of ${mqFmtDate(w.d)}: ${w.sig || "—"}`}
+            style={{ flex: 1, borderRadius: 2, background: MQ_SIGNAL_COLOR[w.sig] || "var(--border)", opacity: 0.85 }} />
+        ))}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 10, color: "var(--text3)", fontFamily: "var(--mono)" }}>
+        <span>{weeks[0] ? mqFmtDate(weeks[0].d) : ""}</span>
+        <span>now</span>
+      </div>
+      <div style={{ display: "flex", gap: 12, marginTop: 8, fontSize: 11, color: "var(--text2)", flexWrap: "wrap" }}>
+        {MQ_SIGNALS.map(s => (
+          <span key={s} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: MQ_SIGNAL_COLOR[s] }} />
+            {s} <span style={{ color: "var(--text3)", fontFamily: "var(--mono)" }}>{counts[s]}w</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// % of stocks above each SMA over the last ~12 months, with a daily signal strip underneath
+function MqBreadthChart({ history }) {
+  const pts = history.slice(-250);
+  const [hover, setHover] = useState(null);
+  const W = 340, H = 140, padL = 26, padR = 6, padT = 8, padB = 4, stripH = 6;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const x = (i) => padL + (pts.length <= 1 ? 0 : (i / (pts.length - 1)) * plotW);
+  const y = (v) => padT + (1 - v / 100) * plotH;
+  const path = (key) => {
+    let d = "", pen = false;
+    pts.forEach((p, i) => {
+      if (p[key] == null) { pen = false; return; }
+      d += `${pen ? "L" : "M"}${x(i).toFixed(1)},${y(p[key]).toFixed(1)}`;
+      pen = true;
+    });
+    return d;
   };
+  const onMove = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const px = ((e.clientX - rect.left) / rect.width) * W;
+    const i = Math.round(((px - padL) / plotW) * (pts.length - 1));
+    setHover(Math.max(0, Math.min(pts.length - 1, i)));
+  };
+  const latest = pts[pts.length - 1] || {};
+  const hp = hover != null ? pts[hover] : null;
+  const tipLeftPct = hover != null ? (x(hover) / W) * 100 : 0;
 
-  useEffect(() => { run(); }, []);
+  return (
+    <div style={mqCardStyle}>
+      <div style={{ ...mqHeadStyle, marginBottom: 8 }}>BREADTH · % OF STOCKS ABOVE SMA · 12 MONTHS</div>
+      {/* Legend with latest values (direct labels) */}
+      <div style={{ display: "flex", gap: 14, marginBottom: 8, flexWrap: "wrap" }}>
+        {MQ_SERIES.map(s => (
+          <span key={s.key} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text2)" }}>
+            <span style={{ width: 12, height: 2, borderRadius: 1, background: s.color }} />
+            {s.label} <span style={{ fontFamily: "var(--mono)", color: "var(--text)" }}>{latest[s.key] ?? "—"}%</span>
+          </span>
+        ))}
+      </div>
+      <div style={{ position: "relative" }}>
+        <svg viewBox={`0 0 ${W} ${H + stripH + 4}`} width="100%" style={{ display: "block", touchAction: "pan-y" }}
+          onMouseMove={onMove} onMouseLeave={() => setHover(null)}
+          onTouchStart={(e) => onMove(e.touches[0] ? { currentTarget: e.currentTarget, clientX: e.touches[0].clientX } : e)}
+          onTouchMove={(e) => onMove(e.touches[0] ? { currentTarget: e.currentTarget, clientX: e.touches[0].clientX } : e)}
+          onTouchEnd={() => setHover(null)}
+          role="img" aria-label="Breadth history: percent of Nifty 500 stocks above their 200, 50 and 10 day moving averages">
+          {[0, 50, 100].map(v => (
+            <g key={v}>
+              <line x1={padL} x2={W - padR} y1={y(v)} y2={y(v)} stroke="var(--border)" strokeWidth="1" strokeDasharray={v === 50 ? "3 3" : undefined} />
+              <text x={padL - 4} y={y(v) + 3} textAnchor="end" fontSize="9" fill="var(--text3)" fontFamily="var(--mono)">{v}</text>
+            </g>
+          ))}
+          {MQ_SERIES.map(s => (
+            <path key={s.key} d={path(s.key)} fill="none" stroke={s.color} strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" />
+          ))}
+          {/* Daily signal strip */}
+          {pts.map((p, i) => (
+            <rect key={p.d} x={x(i) - plotW / pts.length / 2} y={H + 2} width={plotW / pts.length + 0.3} height={stripH}
+              fill={MQ_SIGNAL_COLOR[p.sig] || "var(--border)"} opacity="0.75" />
+          ))}
+          {hp && (
+            <g>
+              <line x1={x(hover)} x2={x(hover)} y1={padT} y2={H} stroke="var(--text3)" strokeWidth="1" />
+              {MQ_SERIES.map(s => hp[s.key] != null && (
+                <circle key={s.key} cx={x(hover)} cy={y(hp[s.key])} r="3.5" fill={s.color} stroke="var(--bg2)" strokeWidth="2" />
+              ))}
+            </g>
+          )}
+        </svg>
+        {hp && (
+          <div style={{
+            position: "absolute", top: 0, pointerEvents: "none",
+            left: `${tipLeftPct}%`, transform: tipLeftPct > 55 ? "translateX(calc(-100% - 8px))" : "translateX(8px)",
+            background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 8px",
+            fontSize: 11, fontFamily: "var(--mono)", color: "var(--text)", whiteSpace: "nowrap", zIndex: 2,
+          }}>
+            <div style={{ color: "var(--text3)", marginBottom: 3 }}>{mqFmtDate(hp.d)}</div>
+            {MQ_SERIES.map(s => (
+              <div key={s.key} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ width: 8, height: 2, background: s.color }} />
+                <span style={{ color: "var(--text2)" }}>{s.label}</span>
+                <span style={{ marginLeft: "auto" }}>{hp[s.key] ?? "—"}%</span>
+              </div>
+            ))}
+            <div style={{ marginTop: 3, color: MQ_SIGNAL_COLOR[hp.sig] || "var(--text3)", fontWeight: 700 }}>{hp.sig || "—"}</div>
+          </div>
+        )}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 10, color: "var(--text3)", fontFamily: "var(--mono)" }}>
+        <span>{pts[0] ? mqFmtDate(pts[0].d) : ""}</span>
+        <span>strip = daily signal</span>
+        <span>{latest.d ? mqFmtDate(latest.d) : ""}</span>
+      </div>
+    </div>
+  );
+}
 
-  if (loading) return (
+function MqSectorGrid({ sectors }) {
+  if (!sectors?.length) return null;
+  return (
+    <div style={mqCardStyle}>
+      <div style={{ ...mqHeadStyle, marginBottom: 4 }}>SECTOR BREADTH</div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 10 }}>% of stocks above 50-SMA · change vs 20 days ago</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        {sectors.map(s => {
+          const c = MQ_DIM_COLOR[s.status] || "var(--text3)";
+          return (
+            <div key={s.name} style={{ border: `1px solid ${c}33`, background: `${c}0F`, borderRadius: 10, padding: "8px 10px", minWidth: 0 }}>
+              <div style={{ fontSize: 11, color: "var(--text2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={`${s.name} · ${s.n} stocks`}>{s.name}</div>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginTop: 3, gap: 4 }}>
+                <span style={{ fontFamily: "var(--mono)", fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{s.p50 ?? "—"}%</span>
+                <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.08em", color: c }}>{s.status}</span>
+              </div>
+              <div style={{ fontSize: 10, color: "var(--text3)", fontFamily: "var(--mono)", marginTop: 2 }}>
+                {s.n} stk{s.p50_chg != null && <MqDelta cur={s.p50_chg} prev={0} />}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function MqLeaders({ leaders }) {
+  if (!leaders?.length) return null;
+  return (
+    <div style={mqCardStyle}>
+      <div style={{ ...mqHeadStyle, marginBottom: 4 }}>LEADERS</div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 10 }}>Above 10/50/200-SMA, within 5% of 52w high · ranked by 12-month return</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", columnGap: 12, rowGap: 0, fontSize: 12 }}>
+        <span style={{ fontSize: 10, color: "var(--text3)", paddingBottom: 6 }}>STOCK</span>
+        <span style={{ fontSize: 10, color: "var(--text3)", textAlign: "right" }}>12M</span>
+        <span style={{ fontSize: 10, color: "var(--text3)", textAlign: "right" }}>FROM HIGH</span>
+        {leaders.map(l => (
+          <Fragment key={l.sym}>
+            <div style={{ padding: "6px 0", borderTop: "1px solid var(--border)", minWidth: 0 }}>
+              <div style={{ fontFamily: "var(--display)", fontWeight: 700, letterSpacing: "0.02em" }}>{l.sym}</div>
+              <div style={{ fontSize: 10, color: "var(--text3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{l.sector}</div>
+            </div>
+            <div style={{ padding: "6px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: (l.ret12m ?? 0) >= 0 ? "#4ADE80" : "#DC143C" }}>
+              {l.ret12m == null ? "—" : `${l.ret12m > 0 ? "+" : ""}${l.ret12m}%`}
+            </div>
+            <div style={{ padding: "6px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: "var(--text2)" }}>
+              {l.off_high}%
+            </div>
+          </Fragment>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MarketQuadrantPage() {
+  const { data, loading, refreshing, error, progress, refresh, retry } = useMarketQuadrant();
+  const header = <div style={{ fontSize: 11, color: "var(--text3)", letterSpacing: "0.15em", marginBottom: 16, fontWeight: 700 }}>MARKET QUADRANT</div>;
+
+  if (loading && !data?.history) return (
     <div className="fade-in" style={{ padding: "20px 16px 100px" }}>
-      <div style={{ fontSize: 11, color: "var(--text3)", letterSpacing: "0.15em", marginBottom: 16, fontWeight: 700 }}>MARKET QUADRANT</div>
+      {header}
       <div style={{ textAlign: "center", padding: "60px 0", color: "var(--text3)", fontSize: 13 }}>
-        <div style={{ marginBottom: 8 }}>{progress}</div>
-        <div style={{ fontSize: 11 }}>First run fetches 500 stocks — may take 30–60 s</div>
+        <div style={{ marginBottom: 12 }}>{progress.msg}</div>
+        <div style={{ height: 3, background: "var(--border)", borderRadius: 3, overflow: "hidden", maxWidth: 240, margin: "0 auto 12px" }}>
+          <div style={{ height: "100%", width: `${Math.round(progress.pct)}%`, background: "var(--text2)", transition: "width 0.4s ease" }} />
+        </div>
+        <div style={{ fontSize: 11 }}>First run of the day fetches 500 stocks — may take 10–30 s</div>
       </div>
     </div>
   );
 
-  if (error) return (
+  if (error && !data?.history) return (
     <div className="fade-in" style={{ padding: "20px 16px 100px" }}>
-      <div style={{ fontSize: 11, color: "var(--text3)", letterSpacing: "0.15em", marginBottom: 16, fontWeight: 700 }}>MARKET QUADRANT</div>
-      <div style={{ background: "rgba(220,20,60,0.06)", border: "1px solid rgba(220,20,60,0.2)", borderRadius: 12, padding: 16, color: "var(--red)", fontSize: 13 }}>
-        {error}
-      </div>
-      <button className="btn-ghost" style={{ width: "100%", marginTop: 12 }} onClick={() => run()}>Retry</button>
+      {header}
+      <div style={{ background: "rgba(220,20,60,0.06)", border: "1px solid rgba(220,20,60,0.2)", borderRadius: 12, padding: 16, color: "var(--red)", fontSize: 13 }}>{error}</div>
+      <button className="btn-ghost" style={{ width: "100%", marginTop: 12 }} onClick={retry}>Retry</button>
     </div>
   );
 
-  if (!data) return null;
+  if (!data?.history) return null;
 
+  const h = data.history;
+  const prev = h.length >= 2 ? h[h.length - 2] : null;
   const sigColor = MQ_SIGNAL_COLOR[data.overall] || "var(--text)";
   const sigBg    = MQ_SIGNAL_BG[data.overall]    || "var(--bg2)";
+  const changed  = prev?.sig && prev.sig !== data.overall;
 
-  const updatedAt = data.updated_at ? (() => {
+  const updatedAt = (() => {
     try {
-      const d = new Date(data.updated_at);
-      return d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" }) + " IST";
+      return new Date(data.updated_at).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" }) + " IST";
     } catch (_) { return data.updated_at; }
-  })() : null;
+  })();
 
   const swingConfLabel = data.swing_confidence >= 60 ? "HIGH" : data.swing_confidence >= 40 ? "MEDIUM" : data.swing_confidence >= 20 ? "LOW" : "ZERO";
   const swingConfColor = data.swing_confidence >= 60 ? "#4ADE80" : data.swing_confidence >= 40 ? "#F59E0B" : "var(--text3)";
 
-  const posRule = data.overall === "INVEST"
-    ? "Full size · all A-grade setups · sectors HOT/WARM"
-    : data.overall === "SELECTIVE"
-    ? "Half size · highest RS only · skip COLD sectors"
-    : "No new entries · hold only if stop not hit";
-
   return (
     <div className="fade-in" style={{ padding: "20px 16px 100px" }}>
-      <div style={{ fontSize: 11, color: "var(--text3)", letterSpacing: "0.15em", marginBottom: 16, fontWeight: 700 }}>MARKET QUADRANT</div>
+      {header}
+
+      {error && (
+        <div style={{ background: "rgba(220,20,60,0.06)", border: "1px solid rgba(220,20,60,0.2)", borderRadius: 10, padding: "8px 12px", color: "var(--red)", fontSize: 12, marginBottom: 12 }}>
+          Refresh failed: {error} Showing the last result.
+        </div>
+      )}
 
       {/* ── Overall Signal ── */}
       <div style={{ background: sigBg, border: `1px solid ${sigColor}33`, borderRadius: 18, padding: "20px 16px", marginBottom: 14, textAlign: "center" }}>
@@ -3056,10 +2959,15 @@ function MarketQuadrantPage() {
         <div style={{ fontSize: 40, fontWeight: 800, color: sigColor, letterSpacing: "-0.03em", lineHeight: 1, fontFamily: "var(--display)" }}>
           {data.overall}
         </div>
+        {changed && (
+          <div style={{ display: "inline-block", marginTop: 10, fontSize: 11, fontWeight: 700, color: "var(--text)", background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 20, padding: "3px 10px" }}>
+            Changed from <span style={{ color: MQ_SIGNAL_COLOR[prev.sig] }}>{prev.sig}</span> on {mqFmtDate(data.as_of)}
+          </div>
+        )}
         <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 8 }}>
-          Nifty 500 · {data.total} stocks · {data.phase_weeks > 0 ? `${data.phase_weeks}w phase` : "new phase"}
+          Nifty 500 · {data.total} stocks · {data.phase_weeks > 0 ? `${data.phase_weeks}w in this phase` : "new phase"} · as of {mqFmtDate(data.as_of)}{data.final ? "" : " (intraday)"}
         </div>
-        <div style={{ fontSize: 11, color: sigColor, marginTop: 6, fontWeight: 600 }}>{posRule}</div>
+        <div style={{ fontSize: 11, color: sigColor, marginTop: 6, fontWeight: 600 }}>{MQ_POS_RULE[data.overall]}</div>
         {data.thrust_detected && (
           <div style={{ marginTop: 10, background: "rgba(74,222,128,0.12)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 8, padding: "6px 10px", fontSize: 11, color: "#4ADE80", fontWeight: 700, letterSpacing: "0.1em" }}>
             ⚡ BREADTH THRUST DETECTED
@@ -3067,13 +2975,15 @@ function MarketQuadrantPage() {
         )}
       </div>
 
+      <MqSignalTimeline history={h} />
+
       {/* ── Four Dimensions ── */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
         {[
-          { label: "BIAS", value: data.bias, sub: `${data.pct_above_200}% above 200-SMA` },
-          { label: "TREND", value: data.trend, sub: `${data.pct_above_50}% above 50-SMA` },
-          { label: "SWING", value: data.swing, sub: `${data.pct_above_10}% above 10-SMA` },
-          { label: "MOMENTUM", value: data.momentum, sub: `Δ ${data.momentum_change > 0 ? "+" : ""}${data.momentum_change}%` },
+          { label: "BIAS", value: data.bias, sub: <>{data.pct_above_200}% &gt; 200-SMA<MqDelta cur={data.pct_above_200} prev={prev?.p200} /></> },
+          { label: "TREND", value: data.trend, sub: <>{data.pct_above_50}% &gt; 50-SMA<MqDelta cur={data.pct_above_50} prev={prev?.p50} /></> },
+          { label: "SWING", value: data.swing, sub: <>{data.pct_above_10}% &gt; 10-SMA<MqDelta cur={data.pct_above_10} prev={prev?.p10} /></> },
+          { label: "MOMENTUM", value: data.momentum, sub: <>ROC vs avg {data.momentum_change > 0 ? "+" : ""}{data.momentum_change} pts</> },
         ].map(({ label, value, sub }) => (
           <div key={label} style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: "14px 12px" }}>
             <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.14em", marginBottom: 6, fontWeight: 700 }}>{label}</div>
@@ -3083,17 +2993,19 @@ function MarketQuadrantPage() {
         ))}
       </div>
 
+      <MqBreadthChart history={h} />
+
       {/* ── Breadth Bars ── */}
-      <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: "14px 14px 10px", marginBottom: 14 }}>
-        <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.14em", marginBottom: 12, fontWeight: 700 }}>BREADTH</div>
-        <BreadthBar label="Above 200-SMA (long-term)" pct={data.pct_above_200} count={data.above_200} total={data.total} />
-        <BreadthBar label="Above 50-SMA (medium)"    pct={data.pct_above_50}  count={data.above_50}  total={data.total} />
-        <BreadthBar label="Above 10-SMA (short-term)" pct={data.pct_above_10}  count={data.above_10}  total={data.total} />
+      <div style={{ ...mqCardStyle, padding: "14px 14px 10px" }}>
+        <div style={{ ...mqHeadStyle, marginBottom: 12 }}>BREADTH TODAY <span style={{ fontWeight: 400, letterSpacing: 0 }}>· change vs previous day</span></div>
+        <BreadthBar label="Above 200-SMA (long-term)" pct={data.pct_above_200} prev={prev?.p200} count={data.above_200} total={data.total} />
+        <BreadthBar label="Above 50-SMA (medium)"     pct={data.pct_above_50}  prev={prev?.p50}  count={data.above_50}  total={data.total} />
+        <BreadthBar label="Above 10-SMA (short-term)" pct={data.pct_above_10}  prev={prev?.p10}  count={data.above_10}  total={data.total} />
       </div>
 
       {/* ── Net New Highs ── */}
-      <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: "14px 14px", marginBottom: 14 }}>
-        <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.14em", marginBottom: 12, fontWeight: 700 }}>NET NEW HIGHS</div>
+      <div style={mqCardStyle}>
+        <div style={{ ...mqHeadStyle, marginBottom: 12 }}>NET NEW HIGHS</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
           <NNHBadge label="20-day"  value={data.nnh_20}  />
           <NNHBadge label="65-day"  value={data.nnh_65}  />
@@ -3107,37 +3019,45 @@ function MarketQuadrantPage() {
             </div>
           </div>
         </div>
+        <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 10 }}>Counts stocks within 1% of their high / low.</div>
       </div>
 
       {/* ── Swing Confidence ── */}
-      <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: "14px", marginBottom: 14 }}>
+      <div style={mqCardStyle}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
-            <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.14em", fontWeight: 700, marginBottom: 4 }}>SWING CONFIDENCE</div>
+            <div style={{ ...mqHeadStyle, marginBottom: 4 }}>SWING CONFIDENCE</div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 22, fontWeight: 800, color: swingConfColor }}>{data.swing_confidence}<span style={{ fontSize: 12, fontWeight: 400, color: "var(--text3)" }}>/100</span></div>
           </div>
           <div style={{ fontSize: 12, fontWeight: 700, color: swingConfColor, letterSpacing: "0.08em" }}>{swingConfLabel}</div>
         </div>
       </div>
 
+      <MqSectorGrid sectors={data.sectors} />
+      <MqLeaders leaders={data.leaders} />
+
       {/* ── To Upgrade ── */}
       {data.to_upgrade?.length > 0 && (
-        <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: "14px", marginBottom: 14 }}>
-          <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.14em", fontWeight: 700, marginBottom: 12 }}>TO UPGRADE</div>
+        <div style={mqCardStyle}>
+          <div style={{ ...mqHeadStyle, marginBottom: 12 }}>TO UPGRADE</div>
           {data.to_upgrade.map((upgrade, i) => (
             <div key={i} style={{ marginBottom: i < data.to_upgrade.length - 1 ? 16 : 0 }}>
               <div style={{ fontSize: 11, color: MQ_SIGNAL_COLOR[upgrade.to] || "var(--text2)", fontWeight: 700, marginBottom: 8 }}>→ {upgrade.to}</div>
-              {upgrade.conditions.map((c, j) => (
-                <div key={j} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", paddingBottom: 8, marginBottom: 8, borderBottom: j < upgrade.conditions.length - 1 ? "1px solid var(--border)" : "none" }}>
-                  <div style={{ fontSize: 12, color: "var(--text2)", flex: 1, marginRight: 8 }}>{c.metric}</div>
-                  <div style={{ textAlign: "right", flexShrink: 0 }}>
-                    <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--red)" }}>{typeof c.current === "number" ? `${c.current}%` : c.current}</span>
-                    <span style={{ color: "var(--text3)", fontSize: 12 }}> → </span>
-                    <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "#4ADE80" }}>{typeof c.needs === "number" ? `${c.needs}%` : c.needs}</span>
-                    <div style={{ fontSize: 10, color: "var(--text3)", fontFamily: "var(--mono)", marginTop: 1 }}>gap {c.gap}</div>
+              {upgrade.conditions.map((c, j) => {
+                const unit = c.unit ?? "";
+                const fmt = (v) => (typeof v === "number" ? `${v}${unit}` : v);
+                return (
+                  <div key={j} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", paddingBottom: 8, marginBottom: 8, borderBottom: j < upgrade.conditions.length - 1 ? "1px solid var(--border)" : "none" }}>
+                    <div style={{ fontSize: 12, color: "var(--text2)", flex: 1, marginRight: 8 }}>{c.metric}</div>
+                    <div style={{ textAlign: "right", flexShrink: 0 }}>
+                      <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--red)" }}>{fmt(c.current)}</span>
+                      <span style={{ color: "var(--text3)", fontSize: 12 }}> → </span>
+                      <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "#4ADE80" }}>{fmt(c.needs)}</span>
+                      <div style={{ fontSize: 10, color: "var(--text3)", fontFamily: "var(--mono)", marginTop: 1 }}>gap {fmt(c.gap)}</div>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           ))}
         </div>
@@ -3145,11 +3065,87 @@ function MarketQuadrantPage() {
 
       {/* ── Footer: refresh + timestamp ── */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
-        <button className="btn-ghost" style={{ fontSize: 12, padding: "8px 14px" }}
-          onClick={() => run(true)} disabled={refreshing}>
-          {refreshing ? "Refreshing…" : "↻ Refresh"}
+        <button className="btn-ghost" style={{ fontSize: 12, padding: "8px 14px" }} onClick={refresh} disabled={refreshing}>
+          {refreshing ? `${progress.msg}` : "↻ Refresh"}
         </button>
-        {updatedAt && <span style={{ fontSize: 11, color: "var(--text3)" }}>Updated {updatedAt}</span>}
+        <span style={{ fontSize: 11, color: "var(--text3)" }}>Updated {updatedAt}</span>
+      </div>
+    </div>
+  );
+}
+
+// Compact market-signal banner for the calculator (cache only — never triggers the 500-stock download)
+function MarketSignalBanner({ onOpen }) {
+  const [data, setData] = useState(() => getLastMarketQuadrant());
+  useEffect(() => {
+    let alive = true;
+    loadMarketQuadrant({ allowCompute: false }).then(d => { if (alive && d) setData(d); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  if (!data?.overall) return null;
+  const c = MQ_SIGNAL_COLOR[data.overall];
+  const stale = mqAgeDays(data.as_of) > 4;
+  const warn = data.overall !== "INVEST";
+  return (
+    <div onClick={onOpen} role={onOpen ? "button" : undefined}
+      style={{ cursor: onOpen ? "pointer" : "default", marginBottom: 12, borderRadius: 12, padding: "10px 12px", border: `1px solid ${c}${warn ? "66" : "33"}`, background: `${c}${warn ? "1A" : "0D"}`, display: "flex", gap: 10, alignItems: "center" }}>
+      <span style={{ fontSize: 16 }}>{data.overall === "CASH" ? "⛔" : data.overall === "SELECTIVE" ? "⚠️" : "✅"}</span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: c, letterSpacing: "0.04em" }}>
+          Market {data.overall}{stale ? " (stale)" : ""}
+        </div>
+        <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 2 }}>{MQ_POS_RULE[data.overall]}</div>
+      </div>
+      <span style={{ fontSize: 10, color: "var(--text3)", fontFamily: "var(--mono)", whiteSpace: "nowrap" }}>{mqFmtDate(data.as_of)} ›</span>
+    </div>
+  );
+}
+
+// Win rate / P&L of closed trades grouped by the market signal at entry
+function MarketSignalStats({ closed }) {
+  const [mq, setMq] = useState(() => getLastMarketQuadrant());
+  useEffect(() => {
+    let alive = true;
+    loadMarketQuadrant({ allowCompute: false }).then(d => { if (alive && d) setMq(d); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  if (!closed.length) return null;
+
+  const groups = { INVEST: [], SELECTIVE: [], CASH: [], Unknown: [] };
+  for (const t of closed) {
+    const entryDate = t.entries?.[0]?.date || t.date;
+    const sig = t.marketSignal || signalOnDate(mq, entryDate) || "Unknown";
+    (groups[sig] || groups.Unknown).push(t);
+  }
+  const rows = Object.entries(groups).filter(([, ts]) => ts.length).map(([sig, ts]) => {
+    const wins = ts.filter(t => (t.pnl || 0) > 0).length;
+    const pnl = ts.reduce((s, t) => s + (t.pnl || 0), 0);
+    const rs = ts.filter(t => (t.riskAmount || 0) > 0).map(t => (t.pnl || 0) / t.riskAmount);
+    return { sig, n: ts.length, wr: Math.round((wins / ts.length) * 100), pnl, avgR: rs.length ? rs.reduce((a, b) => a + b, 0) / rs.length : null };
+  });
+
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="label" style={{ marginBottom: 4 }}>By Market Signal at Entry</div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 12 }}>
+        {mq?.history ? "From the QUAD tab's Nifty 500 breadth" : "Open the QUAD tab once to tag older trades"}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", columnGap: 12, fontSize: 12 }}>
+        {["SIGNAL", "WIN %", "AVG R", "P&L"].map((hd, i) => (
+          <span key={hd} style={{ fontSize: 10, color: "var(--text3)", paddingBottom: 6, textAlign: i ? "right" : "left" }}>{hd}</span>
+        ))}
+        {rows.map(r => (
+          <Fragment key={r.sig}>
+            <div style={{ padding: "7px 0", borderTop: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 2, background: MQ_SIGNAL_COLOR[r.sig] || "var(--border)" }} />
+              <span style={{ fontWeight: 600 }}>{r.sig}</span>
+              <span style={{ color: "var(--text3)", fontFamily: "var(--mono)", fontSize: 11 }}>{r.n}</span>
+            </div>
+            <div style={{ padding: "7px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: r.wr > 50 ? "var(--green)" : "var(--text2)" }}>{r.wr}%</div>
+            <div style={{ padding: "7px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: "var(--text2)" }}>{r.avgR == null ? "—" : `${r.avgR > 0 ? "+" : ""}${r.avgR.toFixed(2)}`}</div>
+            <div style={{ padding: "7px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: r.pnl >= 0 ? "var(--green)" : "var(--red)" }}>{r.pnl >= 0 ? "+" : ""}{formatINR(r.pnl)}</div>
+          </Fragment>
+        ))}
       </div>
     </div>
   );
@@ -3247,7 +3243,7 @@ export default function App() {
         <TodayPage regime={regime} setRegime={handleRegimeChange} regimeSince={regimeSince} portfolio={portfolio} setPortfolio={setPortfolio} trades={trades} setPage={setPage} />
       )}
       {page === "calc" && (
-        <CalcPage portfolio={portfolio} onSendToJournal={handleSendToJournal} />
+        <CalcPage portfolio={portfolio} onSendToJournal={handleSendToJournal} onOpenQuadrant={() => setPage("quadrant")} />
       )}
       {page === "journal" && (
         <JournalPage trades={trades} setTrades={setTrades} prefill={prefill} setPrefill={setPrefill} />
