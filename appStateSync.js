@@ -19,6 +19,7 @@ const DEFAULT_SNAPSHOT = {
   portfolio: 100000,
   regime: "bull",
   regimeSince: null,
+  watchlist: [],
   updatedAt: null,
 };
 
@@ -76,6 +77,14 @@ function normalizeSnapshot(input, options = {}) {
     regimeSince: typeof source.regimeSince === "string" && source.regimeSince
       ? source.regimeSince
       : null,
+    // [{ sym, addedAt, level|null }] — symbols de-duplicated, max 100
+    watchlist: Array.isArray(source.watchlist)
+      ? source.watchlist
+        .filter((w) => w && typeof w.sym === "string" && w.sym)
+        .filter((w, i, arr) => arr.findIndex((x) => x.sym === w.sym) === i)
+        .slice(0, 100)
+        .map((w) => ({ sym: w.sym.toUpperCase(), addedAt: typeof w.addedAt === "string" ? w.addedAt : null, level: Number.isFinite(w.level) && w.level > 0 ? w.level : null }))
+      : [],
     updatedAt: typeof source.updatedAt === "string" && source.updatedAt
       ? source.updatedAt
       : null,
@@ -305,6 +314,13 @@ export function useSyncedAppState() {
     }));
   }, [updateLocalSnapshot]);
 
+  const setWatchlist = useCallback((updater) => {
+    updateLocalSnapshot((previous) => ({
+      ...previous,
+      watchlist: resolveUpdater(updater, previous.watchlist || []),
+    }));
+  }, [updateLocalSnapshot]);
+
   const setRegimeSince = useCallback((updater) => {
     updateLocalSnapshot((previous) => {
       const value = resolveUpdater(updater, previous.regimeSince);
@@ -419,6 +435,8 @@ export function useSyncedAppState() {
     setPortfolio,
     trades: snapshot.trades,
     setTrades,
+    watchlist: snapshot.watchlist || [],
+    setWatchlist,
     cloudSync,
   };
 }

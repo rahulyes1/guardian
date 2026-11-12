@@ -1287,7 +1287,7 @@ function TopBar({ regime, portfolio, page, indicesData }) {
 }
 
 // ─── TODAY PAGE ─────────────────────────────────────────────────────────────
-function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, trades, setPage }) {
+function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, trades, setPage, watchlist, onOpenStock }) {
   const cfg = REGIME_CONFIG[regime];
   const openTrades = trades.filter(t => t.status === "open" || t.status === "partial").map(normalizeTrade);
   const totalRisk = openTrades.reduce((s, t) => s + (t.riskAmount || 0), 0);
@@ -1352,6 +1352,7 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
     <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
       {/* Market brief — regime and rules come from the data, not a manual toggle */}
       <MarketBrief onOpenQuad={() => setPage("quadrant")} onOpenScan={() => setPage("scan")} />
+      <WatchAlertsCard watchlist={watchlist} onOpen={onOpenStock} />
 
       {/* Portfolio Value Edit */}
       <div className="card" style={{ marginBottom: 14 }}>
@@ -3576,7 +3577,7 @@ const SCAN_SORT = {
   reclaim50: (a, b) => (b.ret3m ?? -999) - (a.ret3m ?? -999),
 };
 
-function ScanPage({ onPickStock }) {
+function ScanPage({ onPickStock, watchlist, setWatchlist }) {
   const { data, loading, error, progress, retry } = useMarketQuadrant();
   const [micro, setMicro] = useState(() => { try { return localStorage.getItem("td_scan_micro") === "1"; } catch (_) { return false; } });
   const [microData, setMicroData] = useState(null);
@@ -3629,6 +3630,7 @@ function ScanPage({ onPickStock }) {
       totals[k] = (totals[k] || 0) + ({ pivots: m.pivots_total, tight: m.tight_total, reclaim50: m.reclaim50_total, ep: m.ep_total, ipo: m.ipo_total, leaders: add.leaders.length }[k] || 0);
     }
   }
+  const isWatch = tab === "watch";
   const def = SCAN_DEFS.find(x => x.id === tab) || SCAN_DEFS[0];
   const rows = lists[def.id] || [];
   const verified = data.verification && data.verification.date === data.as_of;
@@ -3647,13 +3649,20 @@ function ScanPage({ onPickStock }) {
         {micro && microState && microState !== "loading" && <span style={{ color: "var(--red)" }}>{microState}</span>}
       </div>
       <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4, marginBottom: 10, scrollbarWidth: "none" }}>
+        <button onClick={() => pick("watch")} className="chip" aria-pressed={isWatch}
+          style={isWatch ? { borderColor: "#F59E0B", color: "#F59E0B", whiteSpace: "nowrap" } : { whiteSpace: "nowrap" }}>
+          ★ Watchlist <span style={{ fontFamily: "var(--mono)", opacity: 0.7 }}>{watchlist?.length || 0}</span>
+        </button>
         {SCAN_DEFS.map(x => (
-          <button key={x.id} onClick={() => pick(x.id)} className="chip" aria-pressed={x.id === def.id}
-            style={x.id === def.id ? { borderColor: "var(--text)", color: "var(--text)", whiteSpace: "nowrap" } : { whiteSpace: "nowrap" }}>
+          <button key={x.id} onClick={() => pick(x.id)} className="chip" aria-pressed={!isWatch && x.id === def.id}
+            style={!isWatch && x.id === def.id ? { borderColor: "var(--text)", color: "var(--text)", whiteSpace: "nowrap" } : { whiteSpace: "nowrap" }}>
             {x.label} <span style={{ fontFamily: "var(--mono)", opacity: 0.7 }}>{totals[x.id] ?? 0}</span>
           </button>
         ))}
       </div>
+      {isWatch ? (
+        <div className="card"><WatchlistPanel watchlist={watchlist} setWatchlist={setWatchlist} onPickStock={onPickStock} /></div>
+      ) : (
       <div className="card">
         <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 10, lineHeight: 1.45 }}>{def.hint}</div>
         {rows.length === 0 ? (
@@ -3688,6 +3697,7 @@ function ScanPage({ onPickStock }) {
         )}
         {micro && <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>Microcaps are thinly traded — check liquidity and spread before acting.</div>}
       </div>
+      )}
       <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 10 }}>
         Data as of {mqFmtDate(data.as_of)} {verified ? "· ✓ closes verified against NSE" : data.final ? "· awaiting NSE's official closes" : "· intraday"}. Ideas, not recommendations — check the chart and your plan.
       </div>
@@ -3816,7 +3826,7 @@ function ResultsWarning({ symbol, style }) {
   );
 }
 
-function StockPage({ symbol, onBack, onPlan }) {
+function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist }) {
   const { data: mq } = useMarketQuadrant();
   const [d, setD] = useState(null);
   const [err, setErr] = useState(null);
@@ -3883,6 +3893,7 @@ function StockPage({ symbol, onBack, onPlan }) {
           <span style={{ fontFamily: "var(--mono)", fontSize: 13, color: col(chg) }}>{pct(chg)}</span>
           <span style={{ fontSize: 11, color: "var(--text3)" }}>{mqFmtDate(d.dates[last])} close{d.verified ? (d.verified.date === d.dates[last] ? " · ✓ NSE" : "") : " · unverified"}</span>
         </div>
+        <div style={{ marginTop: 10 }}><WatchButton symbol={symbol} watchlist={watchlist} setWatchlist={setWatchlist} /></div>
         <ResultsWarning symbol={symbol} style={{ marginTop: 8 }} />
         <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 4 }}>
           {sector || "—"}{secInfo && <span style={{ color: MQ_DIM_COLOR[secInfo.status] }}> · {secInfo.status}</span>}{secInfo?.quadrant && ` · ${secInfo.quadrant.toLowerCase()}`} · {offHigh.toFixed(1)}% from 52w high
@@ -4518,6 +4529,155 @@ function EtfPanel({ lockout, onPickStock }) {
   );
 }
 
+// ─── PHASE 4: watchlist · alerts · notifications ─────────────────────────────
+
+/** Alerts for watched stocks from today's data (+ live price for level crosses). */
+function watchAlerts(watchlist, mq, micro, quotes, cal) {
+  const out = [];
+  const lists = [mq?.scans, micro?.scans].filter(Boolean);
+  const inList = (key, sym) => lists.some(sc => (sc[key] || []).some(x => x.sym === sym));
+  for (const w of watchlist || []) {
+    const sym = w.sym;
+    if (inList("pivots", sym)) out.push({ sym, kind: "pivot", text: "Pocket pivot today" });
+    if (inList("ep", sym)) out.push({ sym, kind: "ep", text: "Episodic pivot (≥8% on ≥3× volume)" });
+    if (inList("tight", sym)) out.push({ sym, kind: "tight", text: "Tight setup near highs" });
+    if (inList("reclaim50", sym)) out.push({ sym, kind: "reclaim", text: "Reclaimed its 50-day SMA" });
+    const q = quotes?.[sym];
+    if (w.level && q?.price != null && q.price >= w.level) out.push({ sym, kind: "level", text: `Price ₹${q.price.toFixed(2)} ≥ your level ₹${w.level}` });
+    const up = upcomingResults(cal, sym, 5);
+    if (up) out.push({ sym, kind: "results", text: `Results ${up.inDays === 0 ? "today" : up.inDays === 1 ? "tomorrow" : `in ${up.inDays} days`}` });
+  }
+  return out;
+}
+
+function useWatchAlerts(watchlist) {
+  const { data: mq } = useMarketQuadrant();
+  const [extra, setExtra] = useState({ quotes: {}, cal: null, micro: null });
+  const key = (watchlist || []).map(w => `${w.sym}:${w.level || ""}`).join(",");
+  useEffect(() => {
+    let alive = true;
+    if (!watchlist?.length) { setExtra({ quotes: {}, cal: null, micro: null }); return; }
+    (async () => {
+      const [quotes, cal] = await Promise.all([fetchQuotes(watchlist.map(w => w.sym), { force: true }).catch(() => ({})), fetchResultsCalendar()]);
+      let micro = null;
+      try { const e = JSON.parse(localStorage.getItem("td_mq_micro_v1") || "null"); micro = e?.data || null; } catch (_) {}
+      if (alive) setExtra({ quotes, cal, micro });
+    })();
+    return () => { alive = false; };
+  }, [key]);
+  const alerts = watchAlerts(watchlist, mq, extra.micro, extra.quotes, extra.cal);
+  return { alerts, quotes: extra.quotes, mq };
+}
+
+const ALERT_ICON = { pivot: "⚡", ep: "🚀", tight: "🎯", reclaim: "↗", level: "🔔", results: "📅" };
+
+// Browser notifications for new alerts (works while the app is open or in a background tab)
+function useAlertNotifications(alerts) {
+  useEffect(() => {
+    if (!alerts.length || typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    let seen = {};
+    const today = istDayKey(Math.floor(Date.now() / 1000));
+    try { seen = JSON.parse(localStorage.getItem("td_alerts_seen") || "{}"); } catch (_) {}
+    if (seen.day !== today) seen = { day: today, ids: [] };
+    const fresh = alerts.filter(a => !seen.ids.includes(`${a.sym}|${a.kind}`));
+    if (!fresh.length) return;
+    const body = fresh.slice(0, 4).map(a => `${a.sym}: ${a.text}`).join("\n");
+    const title = `${fresh.length} watchlist alert${fresh.length > 1 ? "s" : ""}`;
+    (navigator.serviceWorker?.getRegistration?.() || Promise.resolve(null))
+      .then(reg => (reg ? reg.showNotification(title, { body, icon: "/icon-192.png", tag: "watchlist" }) : new Notification(title, { body })))
+      .catch(() => {});
+    seen.ids.push(...fresh.map(a => `${a.sym}|${a.kind}`));
+    try { localStorage.setItem("td_alerts_seen", JSON.stringify(seen)); } catch (_) {}
+  }, [alerts.map(a => `${a.sym}|${a.kind}`).join(",")]);
+}
+
+function WatchAlertsCard({ watchlist, onOpen }) {
+  const { alerts } = useWatchAlerts(watchlist);
+  useAlertNotifications(alerts);
+  const [perm, setPerm] = useState(() => (typeof Notification === "undefined" ? "unsupported" : Notification.permission));
+  if (!watchlist?.length) return null;
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <div className="label">Watchlist alerts · {watchlist.length} watched</div>
+        {perm === "default" && (
+          <button className="chip" style={{ fontSize: 10 }} onClick={() => Notification.requestPermission().then(setPerm)}>Notify me</button>
+        )}
+      </div>
+      {alerts.length === 0 ? (
+        <div style={{ fontSize: 12, color: "var(--text3)" }}>No alerts today on your watched stocks.</div>
+      ) : alerts.map((a, i) => (
+        <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, padding: "4px 0" }}>
+          <span style={{ width: 16 }}>{ALERT_ICON[a.kind]}</span>
+          <button onClick={() => onOpen?.(a.sym)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", fontFamily: "var(--display)", fontWeight: 700, textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{a.sym}</button>
+          <span style={{ color: "var(--text2)" }}>{a.text}</span>
+        </div>
+      ))}
+      {perm === "granted" && <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>Notifications on — they arrive while the app is open or in a background tab.</div>}
+    </div>
+  );
+}
+
+function WatchButton({ symbol, watchlist, setWatchlist }) {
+  const w = (watchlist || []).find(x => x.sym === symbol);
+  const [level, setLevel] = useState(w?.level ? String(w.level) : "");
+  useEffect(() => { setLevel(w?.level ? String(w.level) : ""); }, [symbol, w?.level]);
+  const toggle = () => setWatchlist(prev => (prev || []).some(x => x.sym === symbol)
+    ? prev.filter(x => x.sym !== symbol)
+    : [...(prev || []), { sym: symbol, addedAt: new Date().toISOString(), level: null }]);
+  const saveLevel = () => {
+    const v = parseFloat(level);
+    setWatchlist(prev => (prev || []).map(x => (x.sym === symbol ? { ...x, level: Number.isFinite(v) && v > 0 ? v : null } : x)));
+  };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <button className="chip" onClick={toggle} aria-pressed={Boolean(w)} style={w ? { borderColor: "#F59E0B", color: "#F59E0B" } : {}}>
+        {w ? "★ Watching" : "☆ Watch"}
+      </button>
+      {w && (
+        <>
+          <input type="number" inputMode="decimal" placeholder="Alert at ₹" value={level} onChange={e => setLevel(e.target.value)} onBlur={saveLevel}
+            style={{ width: 110, fontSize: 12, padding: "6px 8px" }} />
+          {w.level && <span style={{ fontSize: 10, color: "var(--text3)" }}>alerts when price ≥ ₹{w.level}</span>}
+        </>
+      )}
+    </div>
+  );
+}
+
+function WatchlistPanel({ watchlist, setWatchlist, onPickStock }) {
+  const { alerts, quotes, mq } = useWatchAlerts(watchlist);
+  if (!watchlist?.length) {
+    return <div style={{ fontSize: 12, color: "var(--text3)", padding: "16px 0", textAlign: "center" }}>Nothing watched yet — open a stock and tap ☆ Watch.</div>;
+  }
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", columnGap: 12, fontSize: 12 }}>
+      {["STOCK", "PRICE", ""].map((h, i) => <span key={i} style={{ fontSize: 9, color: "var(--text3)", paddingBottom: 6, textAlign: i ? "right" : "left" }}>{h}</span>)}
+      {watchlist.map(w => {
+        const q = quotes?.[w.sym], al = alerts.filter(a => a.sym === w.sym);
+        const sector = mq?.sector_of?.[w.sym];
+        return (
+          <Fragment key={w.sym}>
+            <div style={{ padding: "7px 0", borderTop: "1px solid var(--border)", minWidth: 0 }}>
+              <button onClick={() => onPickStock?.(w.sym)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", fontFamily: "var(--display)", fontWeight: 700, textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{w.sym}</button>
+              <div style={{ fontSize: 10, color: al.length ? "#F59E0B" : "var(--text3)" }}>
+                {al.length ? al.map(a => `${ALERT_ICON[a.kind]} ${a.text}`).join(" · ") : sector || ""}{w.level ? ` · alert ≥ ₹${w.level}` : ""}
+              </div>
+            </div>
+            <div style={{ padding: "7px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>
+              {q?.price != null ? `₹${q.price.toFixed(2)}` : "—"}
+              {Number.isFinite(q?.changePct) && <div style={{ fontSize: 10, color: q.changePct >= 0 ? "#4ADE80" : "#DC143C" }}>{q.changePct >= 0 ? "+" : ""}{q.changePct.toFixed(2)}%</div>}
+            </div>
+            <div style={{ padding: "7px 0", borderTop: "1px solid var(--border)", textAlign: "right" }}>
+              <button onClick={() => setWatchlist(prev => prev.filter(x => x.sym !== w.sym))} aria-label={`Remove ${w.sym}`} style={{ background: "none", border: "none", color: "var(--text3)", cursor: "pointer", fontSize: 14 }}>×</button>
+            </div>
+          </Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
 // ─── BOTTOM NAV ──────────────────────────────────────────────────────────────
 function BottomNav({ page, setPage }) {
   const tabs = [
@@ -4581,6 +4741,8 @@ export default function App() {
     setPortfolio,
     trades,
     setTrades,
+    watchlist,
+    setWatchlist,
   } = useSyncedAppState();
   const [prefill, setPrefill] = useState(null);
   const [calcSymbol, setCalcSymbol] = useState(null); // stock picked in QUAD → opens in CALC
@@ -4631,7 +4793,8 @@ export default function App() {
       <NiftyStrip data={indicesTicker} />
 
       {page === "today" && (
-        <TodayPage regime={regime} setRegime={handleRegimeChange} regimeSince={regimeSince} portfolio={portfolio} setPortfolio={setPortfolio} trades={trades} setPage={setPage} />
+        <TodayPage regime={regime} setRegime={handleRegimeChange} regimeSince={regimeSince} portfolio={portfolio} setPortfolio={setPortfolio} trades={trades} setPage={setPage}
+          watchlist={watchlist} onOpenStock={openStock} />
       )}
       {page === "calc" && (
         <CalcPage portfolio={portfolio} trades={trades} onSendToJournal={handleSendToJournal} onOpenQuadrant={() => setPage("quadrant")}
@@ -4642,13 +4805,13 @@ export default function App() {
           journalProps={{ trades, setTrades, prefill, setPrefill }} statsProps={{ trades, portfolio }} />
       )}
       {page === "scan" && (
-        <ScanPage onPickStock={openStock} />
+        <ScanPage onPickStock={openStock} watchlist={watchlist} setWatchlist={setWatchlist} />
       )}
       {page === "quadrant" && (
         <MarketQuadrantPage onPickStock={openStock} />
       )}
       {page === "stock" && stockSym && (
-        <StockPage symbol={stockSym} onBack={() => setPage(stockBack || "scan")} onPlan={pickStock} />
+        <StockPage symbol={stockSym} onBack={() => setPage(stockBack || "scan")} onPlan={pickStock} watchlist={watchlist} setWatchlist={setWatchlist} />
       )}
 
       <BottomNav page={page} setPage={setPage} />
