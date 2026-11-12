@@ -24,7 +24,7 @@ const YF_HEADERS = {
   Origin: "https://finance.yahoo.com",
 };
 
-async function fetchOne(symbol, range, interval) {
+async function fetchOne(symbol, range, interval, volTail = 0) {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT);
@@ -38,7 +38,13 @@ async function fetchOne(symbol, range, interval) {
     if (!Array.isArray(timestamp) || !Array.isArray(rawCloses) || !timestamp.length) return null;
     // Round to 2dp to keep the payload small
     const closes = rawCloses.map((c) => (c == null ? null : Math.round(c * 100) / 100));
-    return { symbol, response: [{ timestamp, indicators: { quote: [{ close: closes }] } }] };
+    const out = { symbol, response: [{ timestamp, indicators: { quote: [{ close: closes }] } }] };
+    // Optional: volumes for the last `volTail` bars only (aligned to the tail of `timestamp`)
+    if (volTail > 0) {
+      const vols = result?.indicators?.quote?.[0]?.volume;
+      if (Array.isArray(vols)) out.volTail = vols.slice(-volTail).map((v) => (v == null ? null : Math.round(v)));
+    }
+    return out;
   } catch {
     return null;
   } finally {
@@ -50,6 +56,7 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
 
   const { symbols } = req.query;
+  const volTail = Math.max(0, Math.min(260, parseInt(req.query.vol, 10) || 0)); // ?vol=N → last N volumes
   const range = ALLOWED_RANGES.has(req.query.range) ? req.query.range : "2y";
   const interval = ALLOWED_INTERVALS.has(req.query.interval) ? req.query.interval : "1d";
 
@@ -72,7 +79,7 @@ export default async function handler(req, res) {
   const worker = async () => {
     while (next < symbolList.length && Date.now() - started < DEADLINE) {
       const i = next++;
-      results[i] = await fetchOne(symbolList[i], range, interval);
+      results[i] = await fetchOne(symbolList[i], range, interval, volTail);
     }
   };
 

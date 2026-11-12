@@ -8,7 +8,7 @@ import {
   previousSessionClose, quoteIssues, parseIndexCloseCsv, parseBhavFullCsv, parseAllIndices,
   reconcileIndex, verifyAgainstBhav, isPlaceholderSymbol, recentWeekdays, parseNseDate, istDay,
 } from "../lib/marketChecks.js";
-import { alignByDate, applyNseCloses, computeFromAligned, signalOnDate } from "../marketQuadrant.js";
+import { alignByDate, applyNseCloses, computeFromAligned, signalOnDate, computeFollowThrough } from "../marketQuadrant.js";
 
 // Unix seconds for an IST wall-clock time
 const ist = (s) => Math.floor((Date.parse(s + "Z") - 19800 * 1000) / 1000);
@@ -200,4 +200,21 @@ test("environment: steady uptrend is EASY MONEY, steady downtrend is NO MONEY", 
   const down = computeFromAligned(axis, make(-0.2), {}, Date.parse("2026-01-01"));
   assert.deepEqual([down.bias, down.trend, down.swing_state, down.environment.name], ["BEAR", "DOWN", "DOWNSWING", "NO MONEY"]);
   assert.equal(down.momentum_sign === "POSITIVE", false);
+});
+
+test("follow-through counts pocket pivots that hold above their breakout close", () => {
+  const axis = days(80);
+  const aligned = {}, volumes = {};
+  for (let s = 0; s < 60; s++) {
+    // flat at 100 on volume 1000, then a +6% pivot on 3x volume 5 sessions ago
+    const c = axis.map(() => 100), v = axis.map(() => 1000);
+    c[74] = 106; v[74] = 3000;
+    for (let i = 75; i < 80; i++) c[i] = s < 45 ? 110 : 101; // 45 of 60 keep going, 15 fall back below 106
+    aligned[`S${s}.NS`] = c; volumes[`S${s}.NS`] = v;
+  }
+  const ft = computeFollowThrough(axis, aligned, volumes);
+  assert.equal(ft.events, 60);
+  assert.equal(ft.rate, 75);
+  assert.equal(ft.label, "STRONG");
+  assert.equal(computeFollowThrough(axis, aligned, null), null); // no volume → no gauge, never a guess
 });

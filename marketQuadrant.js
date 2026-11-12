@@ -13,11 +13,18 @@ import { verifyAgainstBhav, isPlaceholderSymbol } from "./lib/marketChecks.js";
 
 export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 
-const LOCAL_KEY       = "td_mq_v5";   // v5: Nitin R framework — sustained bias, 3-state trend, environment
+const LOCAL_KEY       = "td_mq_v6";   // v6: follow-through gauge + 52-week-lows check
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
 const MIN_COVERAGE    = 0.9;          // refuse to compute on <90% of the index
+const VOL_DAYS        = 120;          // recent volumes fetched for pocket-pivot detection
+// Follow-through bands (share of last-10-session pocket pivots still above their pivot close).
+// Calibrated on Nifty 500, Jan–Nov 2026 (~200 sessions, ~2,600 new pivots): when FT ≥ 70, new
+// pivots were higher 10 sessions later 72% of the time (avg +5.2%); at 40–70 it was 46–51%
+// (≈ coin flip); below 40, 44–53%. Only the strong band carries a real edge.
+export const FT_BANDS = { weak: 40, strong: 70 };
+export const FT_CALIBRATION = { period: "Jan–Nov 2026", strongWin: 72, strongRet: 5.2, otherWin: 49 };
 const INTRADAY_TTL_MS = 20 * 60 * 1000;
 const CLOSE_MIN_IST   = 15 * 60 + 45; // treat data as final 15 min after the close
 const SHARED_TABLE    = "market_quadrant";
@@ -81,7 +88,7 @@ export function configureSharedStore(getClient) { sharedClientGetter = getClient
 
 function looksValid(d) {
   return d && MQ_SIGNALS.includes(d.overall) && Array.isArray(d.history) && typeof d.total === "number" && d.total >= 400
-    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state;
+    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d;
 }
 async function readShared() {
   const sb = sharedClientGetter?.();
@@ -147,23 +154,28 @@ async function fetchSectorMap() {
   return {};
 }
 
-// Returns { "RELIANCE.NS": { "2025-01-02": close, ... }, ... }
+// Returns { closes: { "RELIANCE.NS": { "2025-01-02": close } }, vols: { "RELIANCE.NS": { "2026-07-01": volume } } }
 async function fetchSparkBatch(nsTickers) {
-  const url = `/api/spark?symbols=${encodeURIComponent(nsTickers.join(","))}&range=${RANGE}&interval=1d`;
+  const url = `/api/spark?symbols=${encodeURIComponent(nsTickers.join(","))}&range=${RANGE}&interval=1d&vol=${VOL_DAYS}`;
   const r = await fetch(url);
   if (!r.ok) throw new Error(`Spark API HTTP ${r.status}`);
   const json = await r.json();
-  const out = {};
+  const closes = {}, vols = {};
   for (const item of (json?.spark?.result ?? [])) {
     const resp = item?.response?.[0];
     const ts = resp?.timestamp;
-    const closes = resp?.indicators?.quote?.[0]?.close;
-    if (!item?.symbol || !Array.isArray(ts) || !Array.isArray(closes)) continue;
+    const cl = resp?.indicators?.quote?.[0]?.close;
+    if (!item?.symbol || !Array.isArray(ts) || !Array.isArray(cl)) continue;
     const byDay = {};
-    for (let i = 0; i < ts.length; i++) if (closes[i] != null) byDay[istDayKey(ts[i])] = +closes[i];
-    out[item.symbol] = byDay;
+    for (let i = 0; i < ts.length; i++) if (cl[i] != null) byDay[istDayKey(ts[i])] = +cl[i];
+    closes[item.symbol] = byDay;
+    if (Array.isArray(item.volTail)) {
+      const off = ts.length - item.volTail.length, vb = {};
+      item.volTail.forEach((v, k) => { if (v != null && ts[off + k] != null) vb[istDayKey(ts[off + k])] = v; });
+      vols[item.symbol] = vb;
+    }
   }
-  return out;
+  return { closes, vols };
 }
 
 // Runs fn over items with at most `limit` in flight; never rejects (errors → null)
@@ -189,6 +201,58 @@ export function alignByDate(allData) {
   const aligned = {};
   for (const [ticker, byDay] of entries) aligned[ticker] = axis.map(d => byDay[d] ?? null);
   return { axis, aligned };
+}
+
+/** Volumes on the same date axis as the closes: { ticker: [volume|null] }. */
+export function alignVolumes(axis, allVol) {
+  const out = {};
+  for (const [t, byDay] of Object.entries(allVol || {})) out[t] = axis.map(d => byDay[d] ?? null);
+  return out;
+}
+
+/**
+ * Follow-through: do strong breakout days keep going?
+ *   Pocket pivot = close ≥ 4.5% above the previous close, on volume above both the
+ *   previous day's and the prior 50-day average.
+ *   FT rate on day t = % of pivots from sessions t-10 … t-1 still closing above their
+ *   pivot-day close on t. Also returns how many pivots there were and their average gain.
+ * Returns { rate, events, avg_gain, label, history: [{ d, rate, events, fresh }] } or null.
+ */
+export function computeFollowThrough(axis, aligned, volumes, lookback = 10, keep = 40) {
+  if (!volumes) return null;
+  const tickers = Object.keys(aligned).filter(t => volumes[t]);
+  if (tickers.length < 50) return null;
+  const n = axis.length;
+  const pivots = []; // [ticker, row]
+  for (const t of tickers) {
+    const c = aligned[t], v = volumes[t];
+    for (let i = 51; i < n; i++) {
+      if (c[i] == null || c[i - 1] == null || v[i] == null || v[i - 1] == null) continue;
+      if (c[i] / c[i - 1] - 1 < 0.045 || v[i] <= v[i - 1]) continue;
+      let sum = 0, cnt = 0;
+      for (let k = i - 50; k < i; k++) if (v[k] != null) { sum += v[k]; cnt++; }
+      if (cnt >= 20 && v[i] > sum / cnt) pivots.push([t, i]);
+    }
+  }
+  const byRow = new Map();
+  for (const p of pivots) { if (!byRow.has(p[1])) byRow.set(p[1], []); byRow.get(p[1]).push(p[0]); }
+  const firstVolRow = Math.min(...tickers.map(t => volumes[t].findIndex(x => x != null)).filter(i => i >= 0));
+  const history = [];
+  for (let t = Math.max(firstVolRow + 51 + lookback, lookback); t < n; t++) {
+    let held = 0, events = 0, gain = 0;
+    for (let i = t - lookback; i < t; i++) {
+      for (const tk of byRow.get(i) || []) {
+        const now = aligned[tk][t], piv = aligned[tk][i];
+        if (now == null || piv == null) continue;
+        events++; gain += now / piv - 1; if (now > piv) held++;
+      }
+    }
+    history.push({ d: axis[t], rate: events ? Math.round((held / events) * 100) : null, events, avg_gain: events ? Math.round((gain / events) * 1000) / 10 : null, fresh: (byRow.get(t) || []).length });
+  }
+  const lastH = history[history.length - 1];
+  if (!lastH) return null;
+  const label = lastH.rate == null ? "NO PIVOTS" : lastH.rate >= FT_BANDS.strong ? "STRONG" : lastH.rate >= FT_BANDS.weak ? "MIXED" : "WEAK";
+  return { rate: lastH.rate, events: lastH.events, avg_gain: lastH.avg_gain, fresh: lastH.fresh, label, history: history.slice(-keep) };
 }
 
 // ─── series math ─────────────────────────────────────────────────────────────
@@ -225,7 +289,7 @@ const r1 = (v) => (v == null ? null : Math.round(v * 10) / 10);
 const sectorStatus = (p) => (p == null ? "—" : p >= 70 ? "HOT" : p >= 50 ? "WARM" : p >= 30 ? "COOL" : "COLD");
 
 /** Pure computation from aligned closes. Exported for testing. */
-export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now(), verification = null) {
+export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now(), verification = null, volumes = null) {
   const stocks = Object.entries(aligned)
     .filter(([, closes]) => closes.filter(c => c != null).length >= 150)
     .map(([ticker, closes]) => ({
@@ -278,6 +342,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   // Momentum: 4-week change in % above 50-SMA. Sign = its 10-week average (POSITIVE/
   //           NEGATIVE); direction = latest 4-week change vs that average (IMPROVING/WORSENING).
   const BIAS_DAYS = 20;
+  const LOWS_OK_MAX = 5; // ≈1% of the index at 52-week lows — beyond that, no full-size positions
   const regime = new Array(nRows).fill(null), sideRun = new Array(nRows).fill(0), side = new Array(nRows).fill(null);
   {
     let cur = null, s = null, run = 0;
@@ -502,6 +567,8 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     bias_turning: biasTurning, bias_days: biasDays, bias_needed: BIAS_DAYS,
     swing_state: swingState, momentum_sign: momentumSign, momentum_dir: momentumDir,
     momentum_leaders: momentumLeaders, environment,
+    follow_through: computeFollowThrough(axis, aligned, volumes),
+    lows_ok: newLows <= LOWS_OK_MAX, lows_ok_max: LOWS_OK_MAX,
     pct_above_20: pct20,
     swing_confidence: Math.round(score), momentum_change: r1(mom.raw - mom.ma),
     pct_above_200: pct200, pct_above_50: pct50, pct_above_10: pct10,
@@ -563,10 +630,11 @@ async function computeFresh(onProgress) {
   const chunk = (list) => { const out = []; for (let i = 0; i < list.length; i += BATCH) out.push(list.slice(i, i + BATCH)); return out; };
   const batches = chunk(tickers);
 
-  const allData = {};
+  const allData = {}, allVol = {};
   let done = 0;
   await mapLimited(batches, PARALLEL, async (batch) => {
-    Object.assign(allData, await fetchSparkBatch(batch));
+    const r = await fetchSparkBatch(batch);
+    Object.assign(allData, r.closes); Object.assign(allVol, r.vols);
     done++;
     onProgress(`Downloading data (${done}/${batches.length} batches)…`, 5 + (done * 65) / batches.length);
   });
@@ -574,7 +642,7 @@ async function computeFresh(onProgress) {
   const missing = tickers.filter(t => !allData[t]);
   if (missing.length) {
     onProgress(`Retrying ${missing.length} symbols…`, 72);
-    await mapLimited(chunk(missing), PARALLEL, async (batch) => Object.assign(allData, await fetchSparkBatch(batch)));
+    await mapLimited(chunk(missing), PARALLEL, async (batch) => { const r = await fetchSparkBatch(batch); Object.assign(allData, r.closes); Object.assign(allVol, r.vols); });
   }
   const got = tickers.filter(t => allData[t]).length;
   if (got < tickers.length * MIN_COVERAGE) {
@@ -586,7 +654,7 @@ async function computeFresh(onProgress) {
   const { axis, aligned } = alignByDate(allData);
   onProgress("Verifying closes against NSE…", 85);
   const verification = applyNseCloses(axis, aligned, await bhavPromise);
-  return computeFromAligned(axis, aligned, sectorMap, Date.now(), verification);
+  return computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, alignVolumes(axis, allVol));
 }
 
 // ─── public loader (deduplicated) ────────────────────────────────────────────

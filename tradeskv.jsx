@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, Fragment } from "react";
 import { getSupabaseClient } from "./supabaseClient.js";
 import {
   MQ_SIGNALS, loadMarketQuadrant, getLastMarketQuadrant, subscribeProgress, signalOnDate, configureSharedStore,
+  FT_BANDS, FT_CALIBRATION,
 } from "./marketQuadrant.js";
 import { INDEX_KEYS, reconcileIndex } from "./lib/marketChecks.js";
 import { useSyncedAppState } from "./appStateSync.js";
@@ -1556,7 +1557,7 @@ function OpenTradeCard({ trade, livePrice }) {
 }
 
 // ─── CALCULATOR PAGE ─────────────────────────────────────────────────────────
-function CalcPage({ portfolio, onSendToJournal, onOpenQuadrant }) {
+function CalcPage({ portfolio, onSendToJournal, onOpenQuadrant, prefillSymbol, onPrefillUsed }) {
   const [symbol, setSymbol] = useState("");
   const [symbolInfo, setSymbolInfo] = useState(null);
 
@@ -1605,6 +1606,13 @@ function CalcPage({ portfolio, onSendToJournal, onOpenQuadrant }) {
       pinSelectedSymbol(symbol);
     }
   }, [symbol, showSuggestions]);
+
+  // Stock picked from QUAD: select it and fetch its live price as the entry
+  useEffect(() => {
+    if (!prefillSymbol) return;
+    selectSuggestion({ symbol: prefillSymbol, name: prefillSymbol });
+    onPrefillUsed?.();
+  }, [prefillSymbol]);
 
   return (
     <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
@@ -2794,6 +2802,56 @@ function MqEnvironment({ data }) {
   );
 }
 
+const FT_COLOR = { STRONG: "#4ADE80", MIXED: "#F59E0B", WEAK: "#DC143C", "NO PIVOTS": "#A39C89" };
+
+// Do strong breakout days keep going? (pocket-pivot follow-through) + 52-week-lows check
+function MqFollowThrough({ data }) {
+  const ft = data?.follow_through;
+  const lowsOk = data?.lows_ok;
+  const c = FT_COLOR[ft?.label] || "var(--text3)";
+  const hist = ft?.history || [];
+  return (
+    <div style={mqCardStyle}>
+      <div style={{ ...mqHeadStyle, marginBottom: 8 }}>FOLLOW-THROUGH & RISK CHECKS</div>
+      {ft ? (
+        <>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+            <span style={{ fontFamily: "var(--mono)", fontSize: 26, fontWeight: 800, color: c }}>{ft.rate ?? "—"}{ft.rate != null && <span style={{ fontSize: 13 }}>%</span>}</span>
+            <span style={{ fontSize: 12, fontWeight: 700, color: c, letterSpacing: "0.08em" }}>{ft.label}</span>
+            <span style={{ fontSize: 11, color: "var(--text3)" }}>{ft.events} breakouts in 10 sessions · avg {ft.avg_gain > 0 ? "+" : ""}{ft.avg_gain}% since</span>
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 4, lineHeight: 1.45 }}>
+            Share of recent pocket pivots (≥4.5% up on rising, above-average volume) still above their breakout close.
+          </div>
+          {/* last 40 sessions */}
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 34, marginTop: 10 }} aria-label="Follow-through, last 40 sessions">
+            {hist.map(h => (
+              <div key={h.d} title={`${mqFmtDate(h.d)}: ${h.rate ?? "—"}% of ${h.events}`}
+                style={{ flex: 1, height: `${Math.max(4, h.rate ?? 0)}%`, borderRadius: 2,
+                  background: h.rate == null ? "var(--border)" : h.rate >= FT_BANDS.strong ? "#4ADE80" : h.rate >= FT_BANDS.weak ? "#F59E0B" : "#DC143C", opacity: 0.8 }} />
+            ))}
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--text3)", fontFamily: "var(--mono)", marginTop: 3 }}>
+            <span>{hist[0] ? mqFmtDate(hist[0].d) : ""}</span><span>now</span>
+          </div>
+          <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 8, lineHeight: 1.45 }}>
+            Backtest ({FT_CALIBRATION.period}): at ≥{FT_BANDS.strong}%, new breakouts were higher 10 sessions later {FT_CALIBRATION.strongWin}% of the time (avg +{FT_CALIBRATION.strongRet}%); below that it was ≈{FT_CALIBRATION.otherWin}% — a coin flip.
+          </div>
+        </>
+      ) : (
+        <div style={{ fontSize: 11, color: "var(--text3)" }}>Volume data unavailable — tap ↻ Refresh.</div>
+      )}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+        <span style={{ fontSize: 14 }}>{lowsOk ? "✅" : "⚠️"}</span>
+        <div style={{ fontSize: 11, color: "var(--text2)" }}>
+          <b style={{ color: lowsOk ? "#4ADE80" : "#F59E0B" }}>{data.new_lows} stocks at 52-week lows</b>
+          {lowsOk ? ` — low enough for full size (≤ ${data.lows_ok_max}).` : ` — above ${data.lows_ok_max}: keep size reduced until lows dry up.`}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Says whether today's closes were checked against NSE's official bhavcopy
 function MqVerificationBadge({ data }) {
   const v = data?.verification;
@@ -2956,7 +3014,7 @@ function MqBreadthChart({ history }) {
 }
 
 // Tap a sector → its strongest stocks appear at the top of the card (tap again to close)
-function MqSectorGrid({ sectors, sectorStocks, selected, onSelect }) {
+function MqSectorGrid({ sectors, sectorStocks, selected, onSelect, onPickStock }) {
   const panelRef = useRef(null);
   useEffect(() => {
     if (selected && panelRef.current) panelRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -2980,7 +3038,7 @@ function MqSectorGrid({ sectors, sectorStocks, selected, onSelect }) {
               style={{ background: "none", border: "none", color: "var(--text3)", fontSize: 16, cursor: "pointer", padding: 0, lineHeight: 1 }}>×</button>
           </div>
           <div style={{ fontSize: 10, color: "var(--text3)", marginBottom: 6 }}>
-            Strongest first: above 50-SMA, then 3-month return
+            Strongest first: above 50-SMA, then 3-month return · tap a stock to plan it in CALC
           </div>
           {!stocks ? (
             <div style={{ fontSize: 11, color: "var(--amber)" }}>Tap ↻ Refresh below to load this sector's stocks.</div>
@@ -3000,7 +3058,8 @@ function MqSectorGrid({ sectors, sectorStocks, selected, onSelect }) {
                     <div style={{ padding: "5px 0", borderTop: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
                       <span title={st.a50 ? "Above 50-SMA" : "Below 50-SMA"}
                         style={{ width: 6, height: 6, borderRadius: 3, flexShrink: 0, background: st.a50 ? "#4ADE80" : "var(--border2)" }} />
-                      <span style={{ fontFamily: "var(--display)", fontWeight: 700, letterSpacing: "0.02em", overflow: "hidden", textOverflow: "ellipsis" }}>{st.sym}</span>
+                      <button onClick={() => onPickStock?.(st.sym)} title={`Plan a trade in ${st.sym}`}
+                        style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", font: "inherit", fontFamily: "var(--display)", fontWeight: 700, letterSpacing: "0.02em", overflow: "hidden", textOverflow: "ellipsis", textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{st.sym}</button>
                       {st.a200 && <span style={{ fontSize: 8, color: "var(--text3)" }} title="Above 200-SMA">200↑</span>}
                     </div>
                     {pctCell(st.ret1m)}
@@ -3041,7 +3100,7 @@ function MqSectorGrid({ sectors, sectorStocks, selected, onSelect }) {
   );
 }
 
-function MqLeaders({ leaders, sector, onClear }) {
+function MqLeaders({ leaders, sector, onClear, onPickStock }) {
   if (!leaders?.length) {
     return sector ? (
       <div style={{ ...mqCardStyle, fontSize: 12, color: "var(--text3)" }}>
@@ -3068,7 +3127,8 @@ function MqLeaders({ leaders, sector, onClear }) {
         {leaders.map(l => (
           <Fragment key={l.sym}>
             <div style={{ padding: "6px 0", borderTop: "1px solid var(--border)", minWidth: 0 }}>
-              <div style={{ fontFamily: "var(--display)", fontWeight: 700, letterSpacing: "0.02em" }}>{l.sym}</div>
+              <button onClick={() => onPickStock?.(l.sym)} title={`Plan a trade in ${l.sym}`}
+                style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", font: "inherit", fontFamily: "var(--display)", fontWeight: 700, letterSpacing: "0.02em", textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{l.sym}</button>
               <div style={{ fontSize: 10, color: "var(--text3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{l.sector}</div>
             </div>
             <div style={{ padding: "6px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: (l.ret12m ?? 0) >= 0 ? "#4ADE80" : "#DC143C" }}>
@@ -3084,7 +3144,7 @@ function MqLeaders({ leaders, sector, onClear }) {
   );
 }
 
-function MarketQuadrantPage() {
+function MarketQuadrantPage({ onPickStock }) {
   const { data, loading, refreshing, error, progress, refresh, retry } = useMarketQuadrant();
   const [sector, setSector] = useState(null); // tapped sector → its stocks shown first
   const header = <div style={{ fontSize: 11, color: "var(--text3)", letterSpacing: "0.15em", marginBottom: 16, fontWeight: 700 }}>MARKET QUADRANT</div>;
@@ -3160,6 +3220,7 @@ function MarketQuadrantPage() {
       </div>
 
       <MqEnvironment data={data} />
+      <MqFollowThrough data={data} />
 
       <MqVerificationBadge data={data} />
 
@@ -3241,8 +3302,8 @@ function MarketQuadrantPage() {
         </div>
       </div>
 
-      <MqSectorGrid sectors={data.sectors} sectorStocks={data.sector_stocks} selected={sector} onSelect={setSector} />
-      <MqLeaders leaders={sector ? data.leaders.filter(l => l.sector === sector) : data.leaders} sector={sector} onClear={() => setSector(null)} />
+      <MqSectorGrid sectors={data.sectors} sectorStocks={data.sector_stocks} selected={sector} onSelect={setSector} onPickStock={onPickStock} />
+      <MqLeaders leaders={sector ? data.leaders.filter(l => l.sector === sector) : data.leaders} sector={sector} onClear={() => setSector(null)} onPickStock={onPickStock} />
 
       {/* ── To Upgrade ── */}
       {data.to_upgrade?.length > 0 && (
@@ -3293,7 +3354,15 @@ function MarketSignalBanner({ onOpen }) {
   if (!data?.overall) return null;
   const c = MQ_SIGNAL_COLOR[data.overall];
   const stale = mqAgeDays(data.as_of) > 4;
-  const warn = data.overall !== "INVEST";
+  const ft = data.follow_through;
+  const ftWeak = ft && ft.label === "WEAK";
+  const cautions = [
+    ftWeak && `Breakouts failing: only ${ft.rate}% of recent pocket pivots held`,
+    ft && ft.label === "MIXED" && `Follow-through mixed (${ft.rate}%) — breakouts are a coin flip`,
+    data.lows_ok === false && `${data.new_lows} stocks at 52-week lows — reduce size`,
+    data.environment?.lockout && "Lockout rally — few clean entries",
+  ].filter(Boolean);
+  const warn = data.overall !== "INVEST" || ftWeak || data.lows_ok === false;
   return (
     <div onClick={onOpen} role={onOpen ? "button" : undefined}
       style={{ cursor: onOpen ? "pointer" : "default", marginBottom: 12, borderRadius: 12, padding: "10px 12px", border: `1px solid ${c}${warn ? "66" : "33"}`, background: `${c}${warn ? "1A" : "0D"}`, display: "flex", gap: 10, alignItems: "center" }}>
@@ -3303,6 +3372,12 @@ function MarketSignalBanner({ onOpen }) {
           Market {data.overall}{stale ? " (stale)" : ""}
         </div>
         <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 2 }}>{MQ_POS_RULE[data.overall]}</div>
+        {cautions.map(t => (
+          <div key={t} style={{ fontSize: 11, color: "#F59E0B", marginTop: 3 }}>⚠ {t}</div>
+        ))}
+        {ft?.label === "STRONG" && !cautions.length && (
+          <div style={{ fontSize: 11, color: "#4ADE80", marginTop: 3 }}>Breakouts are following through ({ft.rate}%)</div>
+        )}
       </div>
       <span style={{ fontSize: 10, color: "var(--text3)", fontFamily: "var(--mono)", whiteSpace: "nowrap" }}>{mqFmtDate(data.as_of)} ›</span>
     </div>
@@ -3424,6 +3499,7 @@ export default function App() {
     setTrades,
   } = useSyncedAppState();
   const [prefill, setPrefill] = useState(null);
+  const [calcSymbol, setCalcSymbol] = useState(null); // stock picked in QUAD → opens in CALC
   const indicesTicker = useIndicesTicker();
 
   useEffect(() => {
@@ -3451,7 +3527,8 @@ export default function App() {
         <TodayPage regime={regime} setRegime={handleRegimeChange} regimeSince={regimeSince} portfolio={portfolio} setPortfolio={setPortfolio} trades={trades} setPage={setPage} />
       )}
       {page === "calc" && (
-        <CalcPage portfolio={portfolio} onSendToJournal={handleSendToJournal} onOpenQuadrant={() => setPage("quadrant")} />
+        <CalcPage portfolio={portfolio} onSendToJournal={handleSendToJournal} onOpenQuadrant={() => setPage("quadrant")}
+          prefillSymbol={calcSymbol} onPrefillUsed={() => setCalcSymbol(null)} />
       )}
       {page === "journal" && (
         <JournalPage trades={trades} setTrades={setTrades} prefill={prefill} setPrefill={setPrefill} />
@@ -3460,7 +3537,7 @@ export default function App() {
         <AnalyticsPage trades={trades} portfolio={portfolio} />
       )}
       {page === "quadrant" && (
-        <MarketQuadrantPage />
+        <MarketQuadrantPage onPickStock={(sym) => { setCalcSymbol(sym); setPage("calc"); window.scrollTo(0, 0); }} />
       )}
 
       <BottomNav page={page} setPage={setPage} />
