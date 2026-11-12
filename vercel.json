@@ -1,18 +1,49 @@
 {
   "builds": [
-    { "src": "api/quote.js", "use": "@vercel/node" },
-    { "src": "api/spark.js", "use": "@vercel/node" },
-    { "src": "api/index.py", "use": "@vercel/python" },
+    {
+      "src": "api/quote.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/spark.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/nse.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python"
+    },
     {
       "src": "package.json",
       "use": "@vercel/static-build",
-      "config": { "distDir": "dist" }
+      "config": {
+        "distDir": "dist"
+      }
     }
   ],
   "routes": [
-    { "src": "/api/quote", "dest": "api/quote.js" },
-    { "src": "/api/spark", "dest": "api/spark.js" },
-    { "src": "/api/(.*)", "dest": "api/index.py" },
-    { "src": "/(.*)", "dest": "/$1" }
+    {
+      "src": "/api/quote",
+      "dest": "api/quote.js"
+    },
+    {
+      "src": "/api/spark",
+      "dest": "api/spark.js"
+    },
+    {
+      "src": "/api/nse",
+      "dest": "api/nse.js"
+    },
+    {
+      "src": "/api/(.*)",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/$1"
+    }
   ]
 }
