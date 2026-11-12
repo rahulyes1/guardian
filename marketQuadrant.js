@@ -13,7 +13,7 @@ import { verifyAgainstBhav, isPlaceholderSymbol } from "./lib/marketChecks.js";
 
 export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 
-const LOCAL_KEY       = "td_mq_v7";   // v7: SCAN lists + day-over-day changes
+const LOCAL_KEY       = "td_mq_v8";   // v8: daily states in history, sector rotation history
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
@@ -88,7 +88,7 @@ export function configureSharedStore(getClient) { sharedClientGetter = getClient
 
 function looksValid(d) {
   return d && MQ_SIGNALS.includes(d.overall) && Array.isArray(d.history) && typeof d.total === "number" && d.total >= 400
-    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans;
+    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history;
 }
 async function readShared() {
   const sb = sharedClientGetter?.();
@@ -256,7 +256,7 @@ export function computeFollowThrough(axis, aligned, volumes, lookback = 10, keep
 }
 
 // ─── series math ─────────────────────────────────────────────────────────────
-function smaSeries(arr, period, minP) {
+export function smaSeries(arr, period, minP = Math.ceil(period * 0.75)) {
   const out = new Array(arr.length).fill(null);
   const buf = new Array(period).fill(null);
   let sum = 0, cnt = 0, head = 0;
@@ -452,9 +452,18 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   if (mom.rising) score += 20;
 
   // ── history (every row that has a signal) ──
+  // b/t/s/m/e = bias regime, trend, swing, momentum (sign+dir), environment on that day
+  const envAt = (i) => {
+    const b = regime[i], t = trendAt(i), sw = swingAt(i);
+    return b === "BULL" && t === "UP" && sw === "UPSWING" ? "EASY MONEY" : b === "BEAR" && t === "DOWN" && sw === "DOWNSWING" ? "NO MONEY" : "HARD MONEY";
+  };
   const history = [];
   for (let i = 199; i < nRows; i++) {
-    history.push({ d: axis[i], p200: r1(p200[i]), p50: r1(p50[i]), p20: r1(p20[i]), p10: r1(p10[i]), nnh: nnh52[i], sig: signalAt(i) });
+    const m = momentumAt(i);
+    history.push({
+      d: axis[i], p200: r1(p200[i]), p50: r1(p50[i]), p20: r1(p20[i]), p10: r1(p10[i]), nnh: nnh52[i], sig: signalAt(i),
+      b: regime[i], t: trendAt(i), s: swingAt(i), m: `${m.ma > 0 ? "POSITIVE" : "NEGATIVE"} ${m.rising ? "IMPROVING" : "WORSENING"}`, e: envAt(i),
+    });
   }
   let phaseWeeks = 0;
   for (let w = 1; w <= 52; w++) {
@@ -596,6 +605,29 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   const momentumLeaders = sectors.filter(x => x.ret1m != null && x.ret1m > 0)
     .sort((x, y) => y.ret1m - x.ret1m).slice(0, 5).map(x => ({ name: x.name, ret1m: x.ret1m }));
 
+  // ── sector rotation: weekly breadth (% above 50-SMA) and 1-month return, last 13 weeks ──
+  const retFrom = (st, i, bars) => {
+    const c = st.closes[i]; if (c == null) return null;
+    for (let k = i - bars; k >= Math.max(0, i - bars - 5); k--) if (st.closes[k] != null) return c / st.closes[k] - 1;
+    return null;
+  };
+  const weekRows = [];
+  for (let k = 12; k >= 0; k--) if (last - k * 5 >= 0) weekRows.push(last - k * 5);
+  const sectorHistory = {};
+  for (const sec of sectors) {
+    const list = bySector[sec.name] || [];
+    sectorHistory[sec.name] = weekRows.map(i => {
+      const rets = list.map(st => retFrom(st, i, 21)).filter(Number.isFinite);
+      return { d: axis[i], p50: r1(pctAt("s50", i, list)), ret1m: rets.length ? r1((rets.reduce((x, y) => x + y, 0) / rets.length) * 100) : null };
+    });
+    // Rotation quadrant: breadth level (≥50) × 4-week breadth change (rising/falling)
+    const h = sectorHistory[sec.name], now = h[h.length - 1]?.p50, ago = h[h.length - 5]?.p50;
+    const rising = now != null && ago != null ? now > ago : null;
+    sec.p50_4w = now != null && ago != null ? r1(now - ago) : null;
+    sec.quadrant = now == null || rising == null ? null
+      : now >= 50 ? (rising ? "LEADING" : "WEAKENING") : (rising ? "IMPROVING" : "LAGGING");
+  }
+
   // ── per-sector rankings: the stocks carrying each sector, strongest first ──
   // Rank: above 50-SMA first, then 3-month return (relative strength), then 1-month.
   const r1n = (v) => (Number.isFinite(v) ? r1(v * 100) : null);
@@ -634,7 +666,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     new_highs: newHighs, new_lows: newLows,
     overall, phase_weeks: phaseWeeks, thrust_detected: thrustDetected,
     to_upgrade: toUpgrade,
-    history, sectors, leaders, sector_stocks: sectorStocks,
+    history, sectors, leaders, sector_stocks: sectorStocks, sector_history: sectorHistory, sector_of: Object.fromEntries(stocks.map(st => [st.sym, sectorMap[st.sym] || "Other"])),
     as_of: asOf,
     final: isFinal(asOf, now),
     verification,   // { date, checked, matched, corrected, missing, appended, source } or null
@@ -751,6 +783,19 @@ export async function loadMarketQuadrant({ force = false, allowCompute = true } 
       .finally(() => { inflight = null; });
   }
   return inflight;
+}
+
+/** History row in force on a given date (ISO string or Date): the last session on or before it. */
+export function historyOnDate(data, date) {
+  const h = data?.history;
+  if (!h?.length || !date) return null;
+  const ms = typeof date === "string" ? Date.parse(date) : +date;
+  if (!Number.isFinite(ms)) return null;
+  const day = new Date(ms + IST_MS).toISOString().slice(0, 10);
+  if (day < h[0].d) return null;
+  let lo = 0, hi = h.length - 1, ans = null;
+  while (lo <= hi) { const mid = (lo + hi) >> 1; if (h[mid].d <= day) { ans = h[mid]; lo = mid + 1; } else hi = mid - 1; }
+  return ans;
 }
 
 /** Signal in force on a given date (ISO string or Date), from a result's history. */
