@@ -13,7 +13,7 @@ import { verifyAgainstBhav, isPlaceholderSymbol } from "./lib/marketChecks.js";
 
 export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 
-const LOCAL_KEY       = "td_mq_v8";   // v8: daily states in history, sector rotation history
+const LOCAL_KEY       = "td_mq_v9";   // v9: themes + signal backtest
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
@@ -88,7 +88,7 @@ export function configureSharedStore(getClient) { sharedClientGetter = getClient
 
 function looksValid(d) {
   return d && MQ_SIGNALS.includes(d.overall) && Array.isArray(d.history) && typeof d.total === "number" && d.total >= 400
-    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history;
+    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d;
 }
 async function readShared() {
   const sb = sharedClientGetter?.();
@@ -289,7 +289,7 @@ const r1 = (v) => (v == null ? null : Math.round(v * 10) / 10);
 const sectorStatus = (p) => (p == null ? "—" : p >= 70 ? "HOT" : p >= 50 ? "WARM" : p >= 30 ? "COOL" : "COLD");
 
 /** Pure computation from aligned closes. Exported for testing. */
-export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now(), verification = null, volumes = null) {
+export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now(), verification = null, volumes = null, themeMap = null) {
   const stocks = Object.entries(aligned)
     .filter(([, closes]) => closes.filter(c => c != null).length >= 150)
     .map(([ticker, closes]) => ({
@@ -628,6 +628,20 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
       : now >= 50 ? (rising ? "LEADING" : "WEAKENING") : (rising ? "IMPROVING" : "LAGGING");
   }
 
+  // ── themes (NSE thematic indices): breadth, 1-month return, strongest members ──
+  const bySym = Object.fromEntries(stocks.map(st => [st.sym, st]));
+  const themes = Object.entries(themeMap || {}).map(([name, syms]) => {
+    const list = syms.map(x => bySym[x]).filter(Boolean);
+    if (list.length < 4) return null;
+    const tp = pctAt("s50", last, list), tpPrev = last >= 20 ? pctAt("s50", last - 20, list) : null;
+    const rets = list.map(st => retFrom(st, last, 21)).filter(Number.isFinite);
+    const top = list.filter(st => st.closes[last] != null && st.s50[last] != null && st.closes[last] > st.s50[last])
+      .map(st => ({ sym: st.sym, ret3m: r1((retFrom(st, last, 63) ?? NaN) * 100) }))
+      .filter(x => Number.isFinite(x.ret3m)).sort((a, b) => b.ret3m - a.ret3m).slice(0, 6);
+    return { name, n: list.length, p50: r1(tp), p50_chg: tp != null && tpPrev != null ? r1(tp - tpPrev) : null,
+      status: sectorStatus(tp), ret1m: rets.length ? r1((rets.reduce((x, y) => x + y, 0) / rets.length) * 100) : null, top };
+  }).filter(Boolean).sort((a, b) => (b.p50 ?? -1) - (a.p50 ?? -1));
+
   // ── per-sector rankings: the stocks carrying each sector, strongest first ──
   // Rank: above 50-SMA first, then 3-month return (relative strength), then 1-month.
   const r1n = (v) => (Number.isFinite(v) ? r1(v * 100) : null);
@@ -666,7 +680,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     new_highs: newHighs, new_lows: newLows,
     overall, phase_weeks: phaseWeeks, thrust_detected: thrustDetected,
     to_upgrade: toUpgrade,
-    history, sectors, leaders, sector_stocks: sectorStocks, sector_history: sectorHistory, sector_of: Object.fromEntries(stocks.map(st => [st.sym, sectorMap[st.sym] || "Other"])),
+    history, sectors, leaders, sector_stocks: sectorStocks, sector_history: sectorHistory, themes, sector_of: Object.fromEntries(stocks.map(st => [st.sym, sectorMap[st.sym] || "Other"])),
     as_of: asOf,
     final: isFinal(asOf, now),
     verification,   // { date, checked, matched, corrected, missing, appended, source } or null
@@ -713,6 +727,8 @@ async function computeFresh(onProgress) {
   onProgress("Fetching Nifty 500 index list…", 3);
   const [symbols, sectorMap] = await Promise.all([fetchNifty500Symbols(), fetchSectorMap()]);
   const bhavPromise = fetchBhav(); // official NSE closes, fetched while Yahoo downloads
+  const themesPromise = fetch("/themes.json").then(r => (r.ok ? r.json() : null)).catch(() => null);
+  const indexPromise = fetchSparkBatch(["^CRSLDX"]).then(r => r.closes["^CRSLDX"] || null).catch(() => null);
   if (symbols.length < 100) throw new Error("Could not fetch Nifty 500 list — check internet connection.");
 
   const tickers = symbols.map(s => `${s}.NS`);
@@ -743,7 +759,10 @@ async function computeFresh(onProgress) {
   const { axis, aligned } = alignByDate(allData);
   onProgress("Verifying closes against NSE…", 85);
   const verification = applyNseCloses(axis, aligned, await bhavPromise);
-  return computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, alignVolumes(axis, allVol));
+  const result = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, alignVolumes(axis, allVol), await themesPromise);
+  const idx = await indexPromise;
+  result.signal_backtest = idx ? backtestSignal(result.history, idx) : null;
+  return result;
 }
 
 // ─── public loader (deduplicated) ────────────────────────────────────────────
@@ -783,6 +802,38 @@ export async function loadMarketQuadrant({ force = false, allowCompute = true } 
       .finally(() => { inflight = null; });
   }
   return inflight;
+}
+
+/**
+ * Does the overall signal add value? Holds the Nifty 500 at 100% exposure on INVEST,
+ * 50% on SELECTIVE, 0% on CASH (signal at close t applied to the t→t+1 return), vs buy & hold.
+ * idxByDay: { "YYYY-MM-DD": index close }. In-sample: same rules, same period. Cash earns 0.
+ */
+export function backtestSignal(history, idxByDay) {
+  const rows = (history || []).filter(r => r.sig && idxByDay[r.d] != null);
+  if (rows.length < 40) return null;
+  const W = { INVEST: 1, SELECTIVE: 0.5, CASH: 0 };
+  let strat = 1, hold = 1, peakS = 1, peakH = 1, ddS = 0, ddH = 0, exp = 0;
+  const curve = [{ d: rows[0].d, s: 100, h: 100 }];
+  const bySig = { INVEST: [], SELECTIVE: [], CASH: [] };
+  for (let i = 1; i < rows.length; i++) {
+    const r = idxByDay[rows[i].d] / idxByDay[rows[i - 1].d] - 1, w = W[rows[i - 1].sig] ?? 0;
+    strat *= 1 + w * r; hold *= 1 + r; exp += w;
+    bySig[rows[i - 1].sig]?.push(r);
+    peakS = Math.max(peakS, strat); peakH = Math.max(peakH, hold);
+    ddS = Math.min(ddS, strat / peakS - 1); ddH = Math.min(ddH, hold / peakH - 1);
+    curve.push({ d: rows[i].d, s: Math.round(strat * 1000) / 10, h: Math.round(hold * 1000) / 10 });
+  }
+  const pct = (x) => Math.round(x * 1000) / 10;
+  const avgDay = (xs) => (xs.length ? Math.round((xs.reduce((a, b) => a + b, 0) / xs.length) * 10000) / 100 : null);
+  return {
+    from: rows[0].d, to: rows[rows.length - 1].d, sessions: rows.length,
+    strat: { ret: pct(strat - 1), maxDD: pct(ddS), exposure: Math.round((exp / (rows.length - 1)) * 100) },
+    hold: { ret: pct(hold - 1), maxDD: pct(ddH) },
+    next_day: { INVEST: avgDay(bySig.INVEST), SELECTIVE: avgDay(bySig.SELECTIVE), CASH: avgDay(bySig.CASH) },
+    days: { INVEST: bySig.INVEST.length, SELECTIVE: bySig.SELECTIVE.length, CASH: bySig.CASH.length },
+    curve: curve.filter((_, i) => i % 3 === 0 || i === curve.length - 1),
+  };
 }
 
 /** History row in force on a given date (ISO string or Date): the last session on or before it. */

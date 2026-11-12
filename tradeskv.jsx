@@ -2696,7 +2696,10 @@ function useMarketQuadrant() {
     alive.current = true;
     const unsub = subscribeProgress((msg, pct) => alive.current && setProgress({ msg, pct }));
     run();
-    return () => { alive.current = false; unsub(); };
+    // During market hours, breadth is re-checked while the app is open (results older than
+    // 20 minutes are recomputed; marked "intraday" until NSE's official close).
+    const timer = setInterval(() => { if (isMarketOpen() && alive.current) run(false); }, 10 * 60 * 1000);
+    return () => { alive.current = false; unsub(); clearInterval(timer); };
   }, []);
 
   return { data, loading, refreshing, error, progress, refresh: () => run(true), retry: () => run(false) };
@@ -2842,7 +2845,7 @@ function MqVerificationBadge({ data }) {
   } else if (!data.final) {
     color = "var(--text3)";
     text = "Intraday — live prices, not yet official";
-    detail = "Re-checked against NSE's official closes after the market closes (~6 pm IST).";
+    detail = "Updates about every 20 minutes while the market is open; re-checked against NSE's official closes after ~6 pm IST.";
   } else {
     color = "var(--amber)";
     text = "Awaiting NSE's official closes";
@@ -3195,6 +3198,7 @@ function MarketQuadrantPage({ onPickStock }) {
       </div>
 
       <MqEnvironment data={data} />
+      <EtfPanel lockout={data.environment?.lockout} onPickStock={onPickStock} />
       <MqFollowThrough data={data} />
 
       <MqVerificationBadge data={data} />
@@ -3279,6 +3283,7 @@ function MarketQuadrantPage({ onPickStock }) {
 
       <MqSectorGrid sectors={data.sectors} sectorStocks={data.sector_stocks} selected={sector} onSelect={setSector} onPickStock={onPickStock} />
       <MqSectorRotation data={data} onSelect={setSector} />
+      <MqThemes themes={data.themes} onPickStock={onPickStock} />
       <MqLeaders leaders={sector ? data.leaders.filter(l => l.sector === sector) : data.leaders} sector={sector} onClear={() => setSector(null)} onPickStock={onPickStock} />
 
       {/* ── To Upgrade ── */}
@@ -3308,6 +3313,7 @@ function MarketQuadrantPage({ onPickStock }) {
         </div>
       )}
 
+      <MqSignalBacktest bt={data.signal_backtest} />
       <MqWeeklyReport data={data} />
 
       {/* ── Footer: refresh + timestamp ── */}
@@ -4278,6 +4284,164 @@ function DisciplineStats({ closed, portfolio }) {
       </div>
       {topMiss && <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 8 }}>Most-broken rule: <b style={{ color: "var(--text2)" }}>{topMiss[0]}</b> ({topMiss[1]}×)</div>}
       <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>Checks: signal not CASH · environment not No money · sector HOT/WARM · risk within the suggested size · a stop was set. Risk % uses your current portfolio value.</div>
+    </div>
+  );
+}
+
+// ─── PHASE 2: signal backtest · themes · index ETFs ──────────────────────────
+
+function MqSignalBacktest({ bt }) {
+  const [hover, setHover] = useState(null);
+  if (!bt) return null;
+  const pts = bt.curve;
+  const W = 340, H = 110, padL = 4, padR = 34, padT = 6;
+  const vals = pts.flatMap(p => [p.s, p.h]);
+  const lo = Math.min(...vals), hi = Math.max(...vals), sp = hi - lo || 1;
+  const x = (i) => padL + (i / Math.max(1, pts.length - 1)) * (W - padL - padR);
+  const y = (v) => padT + (1 - (v - lo) / sp) * (H - padT - 4);
+  const path = (k) => pts.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p[k]).toFixed(1)}`).join("");
+  const S = { s: { label: "Follow signal", color: "#3987E5" }, h: { label: "Buy & hold N500", color: "#D9632B" } };
+  const beat = bt.strat.ret >= bt.hold.ret;
+  const verdict = beat
+    ? `Following the signal beat buy & hold (${bt.strat.ret > 0 ? "+" : ""}${bt.strat.ret}% vs ${bt.hold.ret > 0 ? "+" : ""}${bt.hold.ret}%) with a smaller worst drop.`
+    : `Following the signal returned ${bt.strat.ret > 0 ? "+" : ""}${bt.strat.ret}% vs ${bt.hold.ret > 0 ? "+" : ""}${bt.hold.ret}% for buy & hold — it did not add return. It cut the worst drop from ${bt.hold.maxDD}% to ${bt.strat.maxDD}%, mostly by being invested only ${bt.strat.exposure}% of the time.`;
+  const onMove = (e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    setHover(Math.max(0, Math.min(pts.length - 1, Math.round((((e.clientX - r.left) / r.width) * W - padL) / (W - padL - padR) * (pts.length - 1)))));
+  };
+  const hp = hover != null ? pts[hover] : null;
+  return (
+    <div style={mqCardStyle}>
+      <div style={{ ...mqHeadStyle, marginBottom: 4 }}>DOES THE SIGNAL WORK?</div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8 }}>
+        Nifty 500 held 100% on INVEST, 50% on SELECTIVE, 0% on CASH · {mqFmtDate(bt.from)} {bt.from.slice(0, 4)} – {mqFmtDate(bt.to)} {bt.to.slice(0, 4)} ({bt.sessions} sessions)
+      </div>
+      <div style={{ display: "flex", gap: 14, marginBottom: 6, flexWrap: "wrap" }}>
+        {Object.entries(S).map(([k, v]) => (
+          <span key={k} style={{ fontSize: 11, color: "var(--text2)", display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <span style={{ width: 12, height: 2, background: v.color }} />{v.label}
+            <span style={{ fontFamily: "var(--mono)", color: "var(--text)" }}>{pts[pts.length - 1][k]}</span>
+          </span>
+        ))}
+      </div>
+      <div style={{ position: "relative" }}>
+        <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: "block", touchAction: "pan-y" }} onMouseMove={onMove} onMouseLeave={() => setHover(null)}
+          onTouchMove={(e) => e.touches[0] && onMove({ currentTarget: e.currentTarget, clientX: e.touches[0].clientX })} onTouchEnd={() => setHover(null)}
+          role="img" aria-label="Growth of 100: following the signal versus buy and hold">
+          <line x1={padL} x2={W - padR} y1={y(100)} y2={y(100)} stroke="var(--border)" strokeDasharray="3 3" />
+          <text x={W - padR + 4} y={y(100) + 3} fontSize="9" fill="var(--text3)" fontFamily="var(--mono)">100</text>
+          {["h", "s"].map(k => <path key={k} d={path(k)} fill="none" stroke={S[k].color} strokeWidth="1.8" strokeLinejoin="round" />)}
+          {hp && <line x1={x(hover)} x2={x(hover)} y1={padT} y2={H} stroke="var(--text3)" />}
+          {hp && ["h", "s"].map(k => <circle key={k} cx={x(hover)} cy={y(hp[k])} r="3.5" fill={S[k].color} stroke="var(--bg2)" strokeWidth="2" />)}
+        </svg>
+        {hp && (
+          <div style={{ position: "absolute", top: 0, left: `${(x(hover) / W) * 100}%`, transform: x(hover) / W > 0.55 ? "translateX(calc(-100% - 8px))" : "translateX(8px)",
+            background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "5px 8px", fontSize: 11, fontFamily: "var(--mono)", pointerEvents: "none", whiteSpace: "nowrap" }}>
+            <div style={{ color: "var(--text3)" }}>{mqFmtDate(hp.d)}</div>
+            <div>Signal {hp.s} · Hold {hp.h}</div>
+          </div>
+        )}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", columnGap: 12, fontSize: 12, marginTop: 10, fontFamily: "var(--mono)" }}>
+        {["", "RETURN", "WORST DROP", "INVESTED"].map((h, i) => <span key={i} style={{ fontSize: 9, color: "var(--text3)", textAlign: i ? "right" : "left" }}>{h}</span>)}
+        {[["Follow signal", bt.strat.ret, bt.strat.maxDD, `${bt.strat.exposure}%`], ["Buy & hold", bt.hold.ret, bt.hold.maxDD, "100%"]].map(([l, r, dd, ex]) => (
+          <Fragment key={l}>
+            <span style={{ fontFamily: "inherit", color: "var(--text2)", paddingTop: 4 }}>{l}</span>
+            <span style={{ textAlign: "right", paddingTop: 4, color: r >= 0 ? "#4ADE80" : "#DC143C" }}>{r > 0 ? "+" : ""}{r}%</span>
+            <span style={{ textAlign: "right", paddingTop: 4, color: "#DC143C" }}>{dd}%</span>
+            <span style={{ textAlign: "right", paddingTop: 4, color: "var(--text2)" }}>{ex}</span>
+          </Fragment>
+        ))}
+      </div>
+      <div style={{ fontSize: 12, color: "var(--text)", marginTop: 10, lineHeight: 1.45 }}>{verdict}</div>
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6, lineHeight: 1.45 }}>
+        Avg next-day index move after INVEST {bt.next_day.INVEST ?? "—"}% ({bt.days.INVEST}d) · SELECTIVE {bt.next_day.SELECTIVE ?? "—"}% ({bt.days.SELECTIVE}d) · CASH {bt.next_day.CASH ?? "—"}% ({bt.days.CASH}d).
+        In-sample (same rules, same period), ~14 months, no costs, cash earns 0 — treat as a sanity check, not proof.
+      </div>
+    </div>
+  );
+}
+
+function MqThemes({ themes, onPickStock }) {
+  if (!themes?.length) return null;
+  return (
+    <div style={mqCardStyle}>
+      <div style={{ ...mqHeadStyle, marginBottom: 4 }}>THEMES</div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 10 }}>NSE thematic index members in the Nifty 500 · % above 50-SMA · 1-month return · strongest members</div>
+      {themes.map(t => (
+        <div key={t.name} style={{ padding: "7px 0", borderTop: "1px solid var(--border)" }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 700, flex: 1, minWidth: 0 }}>{t.name} <span style={{ fontSize: 10, color: "var(--text3)", fontWeight: 400 }}>{t.n}</span></span>
+            <span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{t.p50 ?? "—"}%</span>
+            <span style={{ fontSize: 9, fontWeight: 700, color: MQ_DIM_COLOR[t.status], width: 34, textAlign: "right" }}>{t.status}</span>
+            <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: (t.ret1m ?? 0) >= 0 ? "#4ADE80" : "#DC143C", width: 48, textAlign: "right" }}>{t.ret1m == null ? "—" : `${t.ret1m > 0 ? "+" : ""}${t.ret1m}%`}</span>
+          </div>
+          {t.top?.length > 0 && (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
+              {t.top.slice(0, 4).map(x => (
+                <button key={x.sym} onClick={() => onPickStock?.(x.sym)} title={`Open ${x.sym}`}
+                  style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "var(--mono)", fontSize: 10, color: "var(--text2)", textDecoration: "underline dotted", textUnderlineOffset: 3 }}>
+                  {x.sym} <span style={{ color: x.ret3m >= 0 ? "#4ADE80" : "#DC143C" }}>{x.ret3m > 0 ? "+" : ""}{x.ret3m}%</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const INDEX_ETFS = [
+  ["NIFTYBEES", "Nifty 50"], ["JUNIORBEES", "Nifty Next 50"], ["MID150BEES", "Midcap 150"],
+  ["HDFCSML250", "Smallcap 250"], ["BANKBEES", "Bank Nifty"], ["GOLDBEES", "Gold"],
+];
+let _etfCache = null;
+async function fetchEtfTrends() {
+  const day = istDayKey(Math.floor(Date.now() / 1000));
+  if (_etfCache && _etfCache.day === day && Date.now() - _etfCache.at < 20 * 60000) return _etfCache.rows;
+  const tickers = INDEX_ETFS.map(([t]) => `${t}.NS`);
+  const r = await fetch(`/api/spark?symbols=${encodeURIComponent(tickers.join(","))}&range=2y&interval=1d`).then(x => x.json());
+  const rows = [];
+  for (const [t, name] of INDEX_ETFS) {
+    const it = (r?.spark?.result || []).find(x => x.symbol === `${t}.NS`);
+    if (!it) continue;
+    const cl = it.response[0].indicators.quote[0].close.filter(v => v != null);
+    const i = cl.length - 1, c = cl[i];
+    const s50 = smaSeries(cl, 50, 40)[i], s200 = smaSeries(cl, 200, 150)[i], s10 = smaSeries(cl, 10, 8)[i];
+    const ret1m = cl[i - 21] ? (c / cl[i - 21] - 1) * 100 : null;
+    const trend = s50 && s200 ? (c > s50 && c > s200 && s50 > s200 ? "UP" : c < s50 && c < s200 ? "DOWN" : "MIXED") : "—";
+    rows.push({ sym: t, name, close: c, ret1m, above10: s10 != null && c > s10, trend });
+  }
+  _etfCache = { day, at: Date.now(), rows };
+  return rows;
+}
+
+function EtfPanel({ lockout, onPickStock }) {
+  const [rows, setRows] = useState(null);
+  useEffect(() => { let alive = true; fetchEtfTrends().then(x => alive && setRows(x)).catch(() => alive && setRows([])); return () => { alive = false; }; }, []);
+  if (!rows?.length) return null;
+  const col = { UP: "#4ADE80", DOWN: "#DC143C", MIXED: "#F59E0B" };
+  return (
+    <div style={{ ...mqCardStyle, borderColor: lockout ? "rgba(245,158,11,0.4)" : "var(--border)" }}>
+      <div style={{ ...mqHeadStyle, marginBottom: 4 }}>INDEX ETFS</div>
+      <div style={{ fontSize: 11, color: lockout ? "#F59E0B" : "var(--text3)", marginBottom: 8 }}>
+        {lockout ? "Lockout rally: index ETFs often give the cleanest risk/reward." : "Trend of the main index ETFs (vs 50 & 200-day SMA)."}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", columnGap: 12, fontSize: 12 }}>
+        {["ETF", "TREND", "1M", "10D"].map((h, i) => <span key={h} style={{ fontSize: 9, color: "var(--text3)", textAlign: i ? "right" : "left", paddingBottom: 4 }}>{h}</span>)}
+        {rows.map(r => (
+          <Fragment key={r.sym}>
+            <div style={{ padding: "6px 0", borderTop: "1px solid var(--border)", minWidth: 0 }}>
+              <button onClick={() => onPickStock?.(r.sym)} title={`Open ${r.sym}`} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", fontFamily: "var(--display)", fontWeight: 700, fontSize: 12, textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{r.sym}</button>
+              <div style={{ fontSize: 10, color: "var(--text3)" }}>{r.name}</div>
+            </div>
+            <span style={{ padding: "6px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontSize: 10, fontWeight: 700, color: col[r.trend] || "var(--text3)" }}>{r.trend}</span>
+            <span style={{ padding: "6px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: (r.ret1m ?? 0) >= 0 ? "#4ADE80" : "#DC143C" }}>{r.ret1m == null ? "—" : `${r.ret1m > 0 ? "+" : ""}${r.ret1m.toFixed(1)}%`}</span>
+            <span style={{ padding: "6px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontSize: 11, color: r.above10 ? "#4ADE80" : "#DC143C" }}>{r.above10 ? "above" : "below"}</span>
+          </Fragment>
+        ))}
+      </div>
     </div>
   );
 }

@@ -8,7 +8,7 @@ import {
   previousSessionClose, quoteIssues, parseIndexCloseCsv, parseBhavFullCsv, parseAllIndices,
   reconcileIndex, verifyAgainstBhav, isPlaceholderSymbol, recentWeekdays, parseNseDate, istDay,
 } from "../lib/marketChecks.js";
-import { alignByDate, applyNseCloses, computeFromAligned, signalOnDate, computeFollowThrough } from "../marketQuadrant.js";
+import { alignByDate, applyNseCloses, computeFromAligned, signalOnDate, computeFollowThrough, backtestSignal } from "../marketQuadrant.js";
 
 // Unix seconds for an IST wall-clock time
 const ist = (s) => Math.floor((Date.parse(s + "Z") - 19800 * 1000) / 1000);
@@ -217,4 +217,16 @@ test("follow-through counts pocket pivots that hold above their breakout close",
   assert.equal(ft.rate, 75);
   assert.equal(ft.label, "STRONG");
   assert.equal(computeFollowThrough(axis, aligned, null), null); // no volume → no gauge, never a guess
+});
+
+test("signal backtest applies yesterday's signal to today's index move", () => {
+  const h = [], idx = {};
+  const ds = days(60);
+  ds.forEach((d, i) => { h.push({ d, sig: i < 30 ? "CASH" : "INVEST" }); idx[d] = i < 30 ? 100 - i : 70 + (i - 29) * 2; });
+  const bt = backtestSignal(h, idx);
+  assert.equal(bt.sessions, 60);
+  assert.ok(bt.strat.ret > bt.hold.ret);          // sat out the fall, caught the rise
+  assert.equal(bt.strat.maxDD, 0);                 // never invested during the decline
+  assert.ok(bt.hold.maxDD < -25);
+  assert.equal(backtestSignal(h.slice(0, 10), idx), null); // too short → no verdict
 });
