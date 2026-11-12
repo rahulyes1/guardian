@@ -1,0 +1,33 @@
+name: Data audit (app vs NSE)
+
+# Runs after NSE publishes its official files (~6 pm IST). A failing run means something
+# the app shows doesn't match NSE — GitHub emails the repo owner about failed runs.
+on:
+  schedule:
+    - cron: "45 13 * * 1-5"   # 19:15 IST, Mon–Fri
+    - cron: "30 16 * * 1-5"   # 22:00 IST retry, in case NSE published late
+  workflow_dispatch:
+    inputs:
+      audit_date:
+        description: "NSE session to audit (YYYY-MM-DD, blank = today IST)"
+        required: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Unit tests
+        run: node --test tests/*.test.mjs
+      - name: Audit live app against NSE
+        env:
+          APP_URL: https://guardian-swart-theta.vercel.app
+          AUDIT_DATE: ${{ github.event.inputs.audit_date }}
+          # Optional: also check the shared QUAD result users load (Settings → Secrets → Actions)
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+        run: node scripts/audit-data.mjs

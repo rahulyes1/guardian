@@ -9,6 +9,8 @@
 //   sectors   [{ name, n, p50, p200, p10, p50_chg, status }]  sorted by p50
 //   leaders   [{ sym, sector, ret12m, ret3m, off_high }]       top RS stocks at highs
 
+import { verifyAgainstBhav, isPlaceholderSymbol } from "./lib/marketChecks.js";
+
 export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 
 const LOCAL_KEY       = "td_mq_v3";   // v3: adds history / sectors / leaders
@@ -47,9 +49,16 @@ function isFinal(asOf, now = Date.now()) {
   const asOfCutoff = Date.parse(`${asOf}T00:00:00Z`) - IST_MS + CLOSE_MIN_IST * 60000;
   return now >= asOfCutoff;
 }
+const UNVERIFIED_TTL_MS = 30 * 60 * 1000; // after the close, retry until NSE's bhavcopy is out (~6pm IST)
+export function isVerified(data) {
+  return Boolean(data?.verification && data.verification.date === data.as_of);
+}
 function isFresh(entry, now = Date.now()) {
   if (!entry?.data || !entry.savedAt) return false;
-  if (entry.data.final) return entry.savedAt >= lastCloseCutoff(now);
+  if (entry.data.final) {
+    if (entry.savedAt < lastCloseCutoff(now)) return false;
+    return isVerified(entry.data) || now - entry.savedAt < UNVERIFIED_TTL_MS;
+  }
   return now - entry.savedAt < INTRADAY_TTL_MS;
 }
 
@@ -87,7 +96,7 @@ async function readShared() {
 }
 async function writeShared(result) {
   const sb = sharedClientGetter?.();
-  if (!sb || !result.final) return;
+  if (!sb || !result.final || !isVerified(result)) return; // only share NSE-verified results
   try {
     await sb.from(SHARED_TABLE).upsert(
       { as_of: result.as_of, data: result, computed_at: result.updated_at },
@@ -112,7 +121,7 @@ async function fetchNifty500Symbols() {
     const r = await fetch("/nifty500.json");
     if (r.ok) {
       const data = await r.json();
-      if (Array.isArray(data) && data.length > 100) return data;
+      if (Array.isArray(data) && data.length > 100) return data.filter(s => !isPlaceholderSymbol(s));
     }
   } catch (_) {}
   for (const url of [NIFTY500_CSV, ALLORIGINS + encodeURIComponent(NIFTY500_CSV)]) {
@@ -121,7 +130,7 @@ async function fetchNifty500Symbols() {
       const syms = [];
       for (let i = 1; i < lines.length; i++) {
         const sym = lines[i].split(",")[2]?.trim().replace(/"/g, "").toUpperCase();
-        if (sym && /^[A-Z0-9&_-]+$/.test(sym) && !sym.startsWith("DUMMY")) syms.push(sym); // NSE uses DUMMY* placeholders
+        if (sym && /^[A-Z0-9&_-]+$/.test(sym) && !isPlaceholderSymbol(sym)) syms.push(sym); // NSE uses DUMMY* placeholders
       }
       if (syms.length > 100) return syms;
     } catch (_) {}
@@ -171,7 +180,7 @@ async function mapLimited(items, limit, fn) {
 }
 
 // Common date axis; dates present for fewer than half the stocks are dropped.
-function alignByDate(allData) {
+export function alignByDate(allData) {
   const counts = {};
   const entries = Object.entries(allData);
   for (const [, byDay] of entries) for (const d in byDay) counts[d] = (counts[d] || 0) + 1;
@@ -215,7 +224,7 @@ const r1 = (v) => (v == null ? null : Math.round(v * 10) / 10);
 const sectorStatus = (p) => (p == null ? "—" : p >= 70 ? "HOT" : p >= 50 ? "WARM" : p >= 30 ? "COOL" : "COLD");
 
 /** Pure computation from aligned closes. Exported for testing. */
-export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now()) {
+export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now(), verification = null) {
   const stocks = Object.entries(aligned)
     .filter(([, closes]) => closes.filter(c => c != null).length >= 150)
     .map(([ticker, closes]) => ({
@@ -398,13 +407,50 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     history, sectors, leaders,
     as_of: asOf,
     final: isFinal(asOf, now),
+    verification,   // { date, checked, matched, corrected, missing, appended, source } or null
     updated_at: new Date(now).toISOString(),
   };
+}
+
+/**
+ * Check the aligned Yahoo closes against NSE's official bhavcopy and correct them.
+ * If Yahoo is missing the newest session entirely, that day is added from NSE.
+ * Returns the verification summary (or null when the bhavcopy is unavailable).
+ */
+export function applyNseCloses(axis, aligned, bhav) {
+  if (!bhav?.date || !bhav.closes) return null;
+  let appended = false;
+  if (axis.length && bhav.date > axis[axis.length - 1]) {
+    axis.push(bhav.date);
+    for (const [ticker, series] of Object.entries(aligned)) {
+      const b = bhav.closes[ticker.replace(/.NS$/, "")];
+      series.push(b ? b.close : null);
+    }
+    appended = true;
+  }
+  const v = verifyAgainstBhav(axis, aligned, bhav);
+  return v ? { ...v, appended, source: "NSE bhavcopy" } : null;
+}
+
+async function fetchBhav() {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 12000);
+    const r = await fetch("/api/nse?type=bhav", { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (!j?.date || !j.closes) return null;
+    const closes = {};
+    for (const [s, v] of Object.entries(j.closes)) closes[s] = { prev: v[0], close: v[1] };
+    return { date: j.date, closes };
+  } catch (_) { return null; }
 }
 
 async function computeFresh(onProgress) {
   onProgress("Fetching Nifty 500 index list…", 3);
   const [symbols, sectorMap] = await Promise.all([fetchNifty500Symbols(), fetchSectorMap()]);
+  const bhavPromise = fetchBhav(); // official NSE closes, fetched while Yahoo downloads
   if (symbols.length < 100) throw new Error("Could not fetch Nifty 500 list — check internet connection.");
 
   const tickers = symbols.map(s => `${s}.NS`);
@@ -432,7 +478,9 @@ async function computeFresh(onProgress) {
   onProgress("Computing breadth metrics…", 80);
   await new Promise(r => setTimeout(r, 0)); // let the progress paint
   const { axis, aligned } = alignByDate(allData);
-  return computeFromAligned(axis, aligned, sectorMap);
+  onProgress("Verifying closes against NSE…", 85);
+  const verification = applyNseCloses(axis, aligned, await bhavPromise);
+  return computeFromAligned(axis, aligned, sectorMap, Date.now(), verification);
 }
 
 // ─── public loader (deduplicated) ────────────────────────────────────────────

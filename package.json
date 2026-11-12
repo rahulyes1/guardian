@@ -7,7 +7,9 @@
     "dev:api": "python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000",
     "start": "concurrently \"npm run dev:api\" \"npm run dev\"",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test tests/*.test.mjs",
+    "audit:data": "node scripts/audit-data.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.99.0",

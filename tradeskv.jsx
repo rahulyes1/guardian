@@ -3,6 +3,7 @@ import { getSupabaseClient } from "./supabaseClient.js";
 import {
   MQ_SIGNALS, loadMarketQuadrant, getLastMarketQuadrant, subscribeProgress, signalOnDate, configureSharedStore,
 } from "./marketQuadrant.js";
+import { INDEX_KEYS, reconcileIndex } from "./lib/marketChecks.js";
 import { useSyncedAppState } from "./appStateSync.js";
 // ─── THEME & CONSTANTS ───────────────────────────────────────────────────────
 const REGIME_CONFIG = {
@@ -27,7 +28,7 @@ const SEARCH_RESULT_LIMIT = 10;
 const LIVE_REFRESH_INTERVAL_MS = 15000;
 const CLOSED_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 const PRICE_CACHE_TTL_MS = 15000;
-const NIFTY_CACHE_KEY = "td_nifty_strip_cache_v2";
+const NIFTY_CACHE_KEY = "td_nifty_strip_cache_v3"; // v3: values carry source/verified (v2 could hold a wrong % change)
 const LOCAL_SYMBOLS_URL = "/nse_symbols.min.json";
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const MARKET_OPEN_MINUTES = 9 * 60 + 15;
@@ -153,7 +154,9 @@ function parseQuoteFromApi(symbol, rawQuote) {
   return {
     price: rawQuote.price,
     name: rawQuote.name || symbol,
-    changePct: Number.isFinite(rawQuote.change_pct) ? rawQuote.change_pct : 0,
+    changePct: Number.isFinite(rawQuote.change_pct) ? rawQuote.change_pct : null,
+    asOf: rawQuote.asOf || null,
+    issues: rawQuote.issues || [],
   };
 }
 
@@ -167,8 +170,11 @@ async function fetchQuoteFromNode(symbol) {
   if (!data || data.price == null) return null;
   return {
     price: data.price,
+    prevClose: data.prevClose ?? null,
     name: symbol,
-    change_pct: data.changePct ?? 0,
+    change_pct: Number.isFinite(data.changePct) ? data.changePct : null, // null = unknown, never a fake 0
+    asOf: data.asOf || null,
+    issues: Array.isArray(data.issues) ? data.issues : [],
   };
 }
 
@@ -312,39 +318,43 @@ function useStorage(key, def) {
 
 // ─── MARKET UTILS ────────────────────────────────────────────────────────────
 async function fetchIndicesData() {
-  // Try Node.js /api/quote first (fast, reliable, same pattern as TRADR)
-  if (LIVE_SOURCE_POLICY !== "browser_yahoo_only") {
-    const [n50, n500] = await Promise.all([
-      fetchQuoteFromNode("^NSEI"),
-      fetchQuoteFromNode("^CRSLDX"),
-    ]);
-    if (n50 || n500) {
-      return {
-        nifty50: n50 ? { price: n50.price, change_pct: n50.change_pct } : null,
-        nifty500: n500 ? { price: n500.price, change_pct: n500.change_pct } : null,
-        as_of: new Date().toISOString(),
-        is_live: isMarketOpen(),
-      };
+  // Three sources in parallel. NSE (live feed, then official close file) is the truth;
+  // Yahoo is a cross-check and the last-resort fallback, shown as unverified.
+  const nseGet = (type) => fetchJsonWithTimeout(`/api/nse?type=${type}`, { headers: { Accept: "application/json" } }, INDICES_API_TIMEOUT_MS)
+    .then(d => (d && !d.error ? d : null)).catch(() => null);
+  const yahooGet = async (symbols) => {
+    for (const s of symbols) {
+      const q = LIVE_SOURCE_POLICY !== "browser_yahoo_only" ? await fetchQuoteFromNode(s) : null;
+      if (q?.price != null) return { price: q.price, prevClose: q.prevClose, changePct: q.change_pct, asOf: q.asOf, issues: q.issues };
     }
-  }
-
-  // Browser Yahoo fallback (local dev or if Node API unavailable)
-  const fetchFirstWorkingQuote = async (symbols) => {
-    for (const symbol of symbols) {
-      const quote = await fetchStockPrice(symbol, { force: true, skipApi: true });
-      if (quote?.price != null) return quote;
+    for (const s of symbols) { // browser fallback (local dev / API down)
+      const q = await fetchStockPrice(s, { force: true, skipApi: true });
+      if (q?.price != null) return { price: q.price, changePct: q.changePct, asOf: null, issues: [] };
     }
     return null;
   };
 
-  const [nifty50Live, nifty500Live] = await Promise.all([
-    fetchFirstWorkingQuote(["^NSEI"]),
-    fetchFirstWorkingQuote(["^CRSLDX", "^CNX500"]),
+  const [live, eod, y50, y500] = await Promise.all([
+    nseGet("live"), nseGet("indices"),
+    yahooGet([INDEX_KEYS.nifty50.yahoo]), yahooGet([INDEX_KEYS.nifty500.yahoo, "^CNX500"]),
   ]);
-  if (!nifty50Live && !nifty500Live) return null;
+  const pick = (key, yahoo) => {
+    const k = INDEX_KEYS[key];
+    const l = live?.indices?.[k.nseLive];
+    const e = eod?.indices?.[k.nseFile];
+    return reconcileIndex({
+      live: l ? { ...l, date: live.date, time: live.time } : null,
+      eod: e ? { ...e, date: eod.date } : null,
+      yahoo,
+    });
+  };
+  const nifty50 = pick("nifty50", y50), nifty500 = pick("nifty500", y500);
+  if (!nifty50 && !nifty500) return null;
+  for (const [name, v] of [["NIFTY 50", nifty50], ["NIFTY 500", nifty500]]) {
+    if (v?.warning) console.warn(`[indices] ${name}: ${v.warning}`);
+  }
   return {
-    nifty50: nifty50Live ? { price: nifty50Live.price, change_pct: nifty50Live.changePct } : null,
-    nifty500: nifty500Live ? { price: nifty500Live.price, change_pct: nifty500Live.changePct } : null,
+    nifty50, nifty500,
     as_of: new Date().toISOString(),
     is_live: isMarketOpen(),
   };
@@ -750,9 +760,10 @@ function useIndicesTicker() {
 
       if (data?.nifty50 || data?.nifty500) {
         setState((prev) => {
+          // { price, changePct, source, verified, asOf, warning } — see reconcileIndex()
           const next = {
-            nsei: data?.nifty50 ? { price: data.nifty50.price, changePct: data.nifty50.change_pct } : prev.nsei,
-            cnx500: data?.nifty500 ? { price: data.nifty500.price, changePct: data.nifty500.change_pct } : prev.cnx500,
+            nsei: data?.nifty50 || prev.nsei,
+            cnx500: data?.nifty500 || prev.cnx500,
             asOf: data?.as_of || new Date().toISOString(),
             stale: false,
           };
@@ -774,6 +785,15 @@ function useIndicesTicker() {
   }, []);
 
   return state;
+}
+
+// Small trust mark next to an index value: ✓ = NSE official, ? = Yahoo only (unverified), ⚠ = sources disagree
+function IdxMark({ v, size = 9 }) {
+  if (!v) return null;
+  const label = v.source === "nse-live" ? `NSE live · ${v.asOf || ""}` : v.source === "nse-eod" ? `NSE official · ${v.asOf || ""}` : `Yahoo · not verified against NSE`;
+  const title = v.warning ? `${label} — ${v.warning}` : label;
+  const [sym, color] = !v.verified ? ["?", "var(--amber)"] : v.warning ? ["⚠", "var(--amber)"] : ["✓", "var(--text3)"];
+  return <span title={title} aria-label={title} style={{ color, fontSize: size, opacity: 0.85, cursor: "help" }}>{sym}</span>;
 }
 
 function NiftyStrip({ data }) {
@@ -803,6 +823,7 @@ function NiftyStrip({ data }) {
           <>
             <span style={{ color: "var(--text)" }}>{fmtPrice(nsei.price)}</span>
             <span style={{ color: pctColor(nsei.changePct) }}>{fmtPct(nsei.changePct)}</span>
+            <IdxMark v={nsei} />
           </>
         ) : (
           <span style={{ color: "var(--text3)" }}>—</span>
@@ -815,12 +836,19 @@ function NiftyStrip({ data }) {
           <>
             <span style={{ color: "var(--text)" }}>{fmtPrice(cnx500.price)}</span>
             <span style={{ color: pctColor(cnx500.changePct) }}>{fmtPct(cnx500.changePct)}</span>
+            <IdxMark v={cnx500} />
           </>
         ) : (
           <span style={{ color: "var(--text3)" }}>—</span>
         )}
       </span>
       <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 5 }}>
+        {nsei && (
+          <span style={{ color: nsei.verified ? "var(--text3)" : "var(--amber)", fontSize: 9 }}
+            title={nsei.verified ? "Index values from NSE's official feed / close file" : "NSE unreachable — showing Yahoo, not verified"}>
+            {nsei.source === "nse-live" ? `NSE ${nsei.asOf ? nsei.asOf.split(" ").pop() : ""}` : nsei.source === "nse-eod" ? "NSE close" : "UNVERIFIED"}
+          </span>
+        )}
         {open ? (
           <>
             <span className="pulse-dot" style={{ background: "var(--green)", display: "inline-block" }} />
@@ -1127,6 +1155,19 @@ const GlobalStyle = () => (
 );
 
 // ─── PRICE BADGE ─────────────────────────────────────────────────────────────
+// Day change for a live stock price; never shows a % it can't vouch for
+function LiveChange({ q }) {
+  const stale = (q?.issues || []).includes("stale");
+  if (!Number.isFinite(q?.changePct)) {
+    return <div style={{ fontSize: 10, color: "var(--amber)" }} title="Change unavailable: price failed a sanity check">— {stale ? "STALE" : "unverified"}</div>;
+  }
+  return (
+    <div style={{ fontSize: 11, color: q.changePct >= 0 ? "var(--green)" : "var(--red)" }} title={q.asOf ? `Yahoo · ${new Date(q.asOf).toLocaleString("en-IN")}` : "Yahoo"}>
+      {q.changePct >= 0 ? "▲" : "▼"} {Math.abs(q.changePct).toFixed(2)}%{stale && <span style={{ color: "var(--amber)", fontSize: 9 }}> STALE</span>}
+    </div>
+  );
+}
+
 function PriceBadge({ info, loading }) {
   if (loading) return (
     <div style={{ fontSize: 12, color: "var(--text3)", fontFamily: "var(--mono)", marginTop: 6 }}>
@@ -1203,6 +1244,7 @@ function TopBar({ regime, portfolio, page, indicesData }) {
             <>
               <span style={{ color: "var(--text)", fontWeight: 600 }}>{fmtIdxPrice(nsei.price)}</span>
               <span style={{ color: pctColor(nsei.changePct), fontSize: 9 }}>{fmtIdxPct(nsei.changePct)}</span>
+              <IdxMark v={nsei} size={8} />
               {!open && <span style={{ color: "var(--text3)", fontSize: 8, opacity: 0.7 }}>EOD</span>}
             </>
           ) : (
@@ -1217,6 +1259,7 @@ function TopBar({ regime, portfolio, page, indicesData }) {
             <>
               <span style={{ color: "var(--text)", fontWeight: 600 }}>{fmtIdxPrice(cnx500.price)}</span>
               <span style={{ color: pctColor(cnx500.changePct), fontSize: 9 }}>{fmtIdxPct(cnx500.changePct)}</span>
+              <IdxMark v={cnx500} size={8} />
               {!open && <span style={{ color: "var(--text3)", fontSize: 8, opacity: 0.7 }}>EOD</span>}
             </>
           ) : (
@@ -1473,9 +1516,7 @@ function OpenTradeCard({ trade, livePrice }) {
               {livePrice.isEod ? (
                 <div style={{ fontSize: 10, color: "var(--text3)" }}>EOD</div>
               ) : (
-                <div style={{ fontSize: 11, color: livePrice.changePct >= 0 ? "var(--green)" : "var(--red)" }}>
-                  {livePrice.changePct >= 0 ? "▲" : "▼"} {Math.abs(livePrice.changePct).toFixed(2)}%
-                </div>
+                <LiveChange q={livePrice} />
               )}
             </div>
           ) : (
@@ -2202,9 +2243,7 @@ function JournalTradeCard({ trade, onUpdateTrade, onDelete }) {
                 {livePrice.isEod ? (
                   <div style={{ fontSize: 10, color: "var(--text3)" }}>EOD</div>
                 ) : (
-                  <div style={{ fontSize: 11, color: livePrice.changePct >= 0 ? "var(--green)" : "var(--red)" }}>
-                    {livePrice.changePct >= 0 ? "▲" : "▼"} {Math.abs(livePrice.changePct).toFixed(2)}%
-                  </div>
+                  <LiveChange q={livePrice} />
                 )}
               </div>
             ) : (
@@ -2717,6 +2756,39 @@ function NNHBadge({ label, value }) {
 const mqCardStyle = { background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: 14, marginBottom: 14 };
 const mqHeadStyle = { fontSize: 10, color: "var(--text3)", letterSpacing: "0.14em", fontWeight: 700 };
 
+// Says whether today's closes were checked against NSE's official bhavcopy
+function MqVerificationBadge({ data }) {
+  const v = data?.verification;
+  const verified = v && v.date === data.as_of;
+  let color, text, detail;
+  if (verified) {
+    color = "#4ADE80";
+    text = `✓ Closes for ${mqFmtDate(v.date)} verified against NSE`;
+    detail = `${v.checked} stocks checked against NSE's official bhavcopy` +
+      (v.corrected ? ` · ${v.corrected} corrected to NSE values` : " · all matched") +
+      (v.appended ? " · latest day added from NSE" : "") +
+      (v.missing ? ` · ${v.missing} not in bhavcopy` : "");
+  } else if (!data.final) {
+    color = "var(--text3)";
+    text = "Intraday — live prices, not yet official";
+    detail = "Re-checked against NSE's official closes after the market closes (~6 pm IST).";
+  } else {
+    color = "var(--amber)";
+    text = "Awaiting NSE's official closes";
+    detail = v ? `Last verified ${mqFmtDate(v.date)}. NSE publishes the bhavcopy around 6 pm IST; this rechecks every 30 min.`
+               : "NSE bhavcopy not reachable right now; using Yahoo closes. Rechecks every 30 min.";
+  }
+  return (
+    <div style={{ ...mqCardStyle, padding: "10px 14px", borderColor: verified ? "rgba(74,222,128,0.25)" : "var(--border)" }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color }}>{text}</div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 3 }}>{detail}</div>
+      {verified && v.examples?.length > 0 && (
+        <div style={{ fontSize: 10, color: "var(--text3)", fontFamily: "var(--mono)", marginTop: 6 }}>{v.examples.slice(0, 3).join(" · ")}</div>
+      )}
+    </div>
+  );
+}
+
 // 52 weekly blocks, oldest → newest
 function MqSignalTimeline({ history }) {
   const weeks = [];
@@ -2974,6 +3046,8 @@ function MarketQuadrantPage() {
           </div>
         )}
       </div>
+
+      <MqVerificationBadge data={data} />
 
       <MqSignalTimeline history={h} />
 
