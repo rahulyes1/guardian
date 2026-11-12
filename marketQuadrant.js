@@ -13,7 +13,7 @@ import { verifyAgainstBhav, isPlaceholderSymbol } from "./lib/marketChecks.js";
 
 export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 
-const LOCAL_KEY       = "td_mq_v3";   // v3: adds history / sectors / leaders
+const LOCAL_KEY       = "td_mq_v4";   // v4: adds per-sector stock rankings (sector_stocks)
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
@@ -80,7 +80,8 @@ let sharedClientGetter = null;
 export function configureSharedStore(getClient) { sharedClientGetter = getClient; }
 
 function looksValid(d) {
-  return d && MQ_SIGNALS.includes(d.overall) && Array.isArray(d.history) && typeof d.total === "number" && d.total >= 400;
+  return d && MQ_SIGNALS.includes(d.overall) && Array.isArray(d.history) && typeof d.total === "number" && d.total >= 400
+    && d.sector_stocks && typeof d.sector_stocks === "object";
 }
 async function readShared() {
   const sb = sharedClientGetter?.();
@@ -394,6 +395,27 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     .sort((a, b) => (b.ret12m ?? b.ret3m ?? -999) - (a.ret12m ?? a.ret3m ?? -999))
     .slice(0, 15);
 
+  // ── per-sector rankings: the stocks carrying each sector, strongest first ──
+  // Rank: above 50-SMA first, then 3-month return (relative strength), then 1-month.
+  const r1n = (v) => (Number.isFinite(v) ? r1(v * 100) : null);
+  const sectorStocks = {};
+  for (const [name, list] of Object.entries(bySector)) {
+    sectorStocks[name] = list
+      .filter(s => s.closes[last] != null)
+      .map(s => {
+        const c = s.closes[last];
+        return {
+          sym: s.sym,
+          ret1m: r1n(retOver(s, 21)), ret3m: r1n(retOver(s, 63)),
+          off_high: s.h252[last] != null ? r1((c / s.h252[last] - 1) * 100) : null,
+          a50: s.s50[last] != null && c > s.s50[last],
+          a200: s.s200[last] != null && c > s.s200[last],
+        };
+      })
+      .sort((a, b) => (b.a50 - a.a50) || ((b.ret3m ?? -999) - (a.ret3m ?? -999)) || ((b.ret1m ?? -999) - (a.ret1m ?? -999)))
+      .slice(0, 10);
+  }
+
   const asOf = axis[last];
   return {
     bias, trend, swing, momentum,
@@ -404,7 +426,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     new_highs: newHighs, new_lows: newLows,
     overall, phase_weeks: phaseWeeks, thrust_detected: thrustDetected,
     to_upgrade: toUpgrade,
-    history, sectors, leaders,
+    history, sectors, leaders, sector_stocks: sectorStocks,
     as_of: asOf,
     final: isFinal(asOf, now),
     verification,   // { date, checked, matched, corrected, missing, appended, source } or null

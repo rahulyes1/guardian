@@ -2917,17 +2917,76 @@ function MqBreadthChart({ history }) {
   );
 }
 
-function MqSectorGrid({ sectors }) {
+// Tap a sector → its strongest stocks appear at the top of the card (tap again to close)
+function MqSectorGrid({ sectors, sectorStocks, selected, onSelect }) {
+  const panelRef = useRef(null);
+  useEffect(() => {
+    if (selected && panelRef.current) panelRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [selected]);
   if (!sectors?.length) return null;
+  const sel = sectors.find(s => s.name === selected);
+  const stocks = selected ? sectorStocks?.[selected] : null;
   return (
     <div style={mqCardStyle}>
       <div style={{ ...mqHeadStyle, marginBottom: 4 }}>SECTOR BREADTH</div>
-      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 10 }}>% of stocks above 50-SMA · change vs 20 days ago</div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 10 }}>% of stocks above 50-SMA · change vs 20 days ago · tap a sector for its stocks</div>
+
+      {sel && (
+        <div ref={panelRef} style={{ border: `1px solid ${(MQ_DIM_COLOR[sel.status] || "#A39C89")}55`, borderRadius: 12, padding: "10px 12px", marginBottom: 10, background: "var(--bg3)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6, gap: 8 }}>
+            <div style={{ minWidth: 0 }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{sel.name}</span>
+              <span style={{ fontSize: 10, color: MQ_DIM_COLOR[sel.status], fontWeight: 700, marginLeft: 6 }}>{sel.status}</span>
+            </div>
+            <button onClick={() => onSelect(null)} aria-label="Close sector stocks"
+              style={{ background: "none", border: "none", color: "var(--text3)", fontSize: 16, cursor: "pointer", padding: 0, lineHeight: 1 }}>×</button>
+          </div>
+          <div style={{ fontSize: 10, color: "var(--text3)", marginBottom: 6 }}>
+            Strongest first: above 50-SMA, then 3-month return
+          </div>
+          {!stocks ? (
+            <div style={{ fontSize: 11, color: "var(--amber)" }}>Tap ↻ Refresh below to load this sector's stocks.</div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", columnGap: 10, fontSize: 12 }}>
+              {["STOCK", "1M", "3M", "HIGH"].map((hd, i) => (
+                <span key={hd} style={{ fontSize: 9, color: "var(--text3)", paddingBottom: 4, textAlign: i ? "right" : "left" }}>{hd}</span>
+              ))}
+              {stocks.map(st => {
+                const pctCell = (v) => (
+                  <div style={{ padding: "5px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: v == null ? "var(--text3)" : v >= 0 ? "#4ADE80" : "#DC143C" }}>
+                    {v == null ? "—" : `${v > 0 ? "+" : ""}${v}%`}
+                  </div>
+                );
+                return (
+                  <Fragment key={st.sym}>
+                    <div style={{ padding: "5px 0", borderTop: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                      <span title={st.a50 ? "Above 50-SMA" : "Below 50-SMA"}
+                        style={{ width: 6, height: 6, borderRadius: 3, flexShrink: 0, background: st.a50 ? "#4ADE80" : "var(--border2)" }} />
+                      <span style={{ fontFamily: "var(--display)", fontWeight: 700, letterSpacing: "0.02em", overflow: "hidden", textOverflow: "ellipsis" }}>{st.sym}</span>
+                      {st.a200 && <span style={{ fontSize: 8, color: "var(--text3)" }} title="Above 200-SMA">200↑</span>}
+                    </div>
+                    {pctCell(st.ret1m)}
+                    {pctCell(st.ret3m)}
+                    <div style={{ padding: "5px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: "var(--text2)" }}>
+                      {st.off_high == null ? "—" : `${st.off_high}%`}
+                    </div>
+                  </Fragment>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
         {sectors.map(s => {
           const c = MQ_DIM_COLOR[s.status] || "var(--text3)";
+          const active = s.name === selected;
           return (
-            <div key={s.name} style={{ border: `1px solid ${c}33`, background: `${c}0F`, borderRadius: 10, padding: "8px 10px", minWidth: 0 }}>
+            <button key={s.name} onClick={() => onSelect(active ? null : s.name)} aria-pressed={active}
+              style={{ textAlign: "left", font: "inherit", color: "inherit", cursor: "pointer",
+                border: `1px solid ${active ? c : `${c}33`}`, background: active ? `${c}24` : `${c}0F`,
+                borderRadius: 10, padding: "8px 10px", minWidth: 0, boxShadow: active ? `0 0 0 1px ${c}` : "none" }}>
               <div style={{ fontSize: 11, color: "var(--text2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={`${s.name} · ${s.n} stocks`}>{s.name}</div>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginTop: 3, gap: 4 }}>
                 <span style={{ fontFamily: "var(--mono)", fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{s.p50 ?? "—"}%</span>
@@ -2936,7 +2995,7 @@ function MqSectorGrid({ sectors }) {
               <div style={{ fontSize: 10, color: "var(--text3)", fontFamily: "var(--mono)", marginTop: 2 }}>
                 {s.n} stk{s.p50_chg != null && <MqDelta cur={s.p50_chg} prev={0} />}
               </div>
-            </div>
+            </button>
           );
         })}
       </div>
@@ -2944,11 +3003,25 @@ function MqSectorGrid({ sectors }) {
   );
 }
 
-function MqLeaders({ leaders }) {
-  if (!leaders?.length) return null;
+function MqLeaders({ leaders, sector, onClear }) {
+  if (!leaders?.length) {
+    return sector ? (
+      <div style={{ ...mqCardStyle, fontSize: 12, color: "var(--text3)" }}>
+        No {sector} stock is in the Nifty 500 leaders list right now.{" "}
+        <button onClick={onClear} style={{ background: "none", border: "none", color: "var(--text2)", textDecoration: "underline", cursor: "pointer", font: "inherit", padding: 0 }}>Show all leaders</button>
+      </div>
+    ) : null;
+  }
   return (
     <div style={mqCardStyle}>
-      <div style={{ ...mqHeadStyle, marginBottom: 4 }}>LEADERS</div>
+      <div style={{ ...mqHeadStyle, marginBottom: 4, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <span>LEADERS{sector ? ` · ${sector.toUpperCase()}` : ""}</span>
+        {sector && (
+          <button onClick={onClear} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 12, color: "var(--text2)", fontSize: 10, padding: "2px 8px", cursor: "pointer", letterSpacing: 0, fontWeight: 400 }}>
+            All sectors ×
+          </button>
+        )}
+      </div>
       <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 10 }}>Above 10/50/200-SMA, within 5% of 52w high · ranked by 12-month return</div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", columnGap: 12, rowGap: 0, fontSize: 12 }}>
         <span style={{ fontSize: 10, color: "var(--text3)", paddingBottom: 6 }}>STOCK</span>
@@ -2975,6 +3048,7 @@ function MqLeaders({ leaders }) {
 
 function MarketQuadrantPage() {
   const { data, loading, refreshing, error, progress, refresh, retry } = useMarketQuadrant();
+  const [sector, setSector] = useState(null); // tapped sector → its stocks shown first
   const header = <div style={{ fontSize: 11, color: "var(--text3)", letterSpacing: "0.15em", marginBottom: 16, fontWeight: 700 }}>MARKET QUADRANT</div>;
 
   if (loading && !data?.history) return (
@@ -3107,8 +3181,8 @@ function MarketQuadrantPage() {
         </div>
       </div>
 
-      <MqSectorGrid sectors={data.sectors} />
-      <MqLeaders leaders={data.leaders} />
+      <MqSectorGrid sectors={data.sectors} sectorStocks={data.sector_stocks} selected={sector} onSelect={setSector} />
+      <MqLeaders leaders={sector ? data.leaders.filter(l => l.sector === sector) : data.leaders} sector={sector} onClear={() => setSector(null)} />
 
       {/* ── To Upgrade ── */}
       {data.to_upgrade?.length > 0 && (
