@@ -1459,6 +1459,7 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
 }
 
 function OpenTradeCard({ trade, livePrice }) {
+  const healthEl = <PositionHealth trade={trade} livePrice={livePrice} />;
   const unrealizedPnl = livePrice
     ? (livePrice.price - trade.avgEntry) * (trade.remainingQty || trade.totalQty || 0)
     : null;
@@ -1522,12 +1523,13 @@ function OpenTradeCard({ trade, livePrice }) {
           ) : null)}
         </div>
       )}
+      {healthEl}
     </div>
   );
 }
 
 // ─── CALCULATOR PAGE ─────────────────────────────────────────────────────────
-function CalcPage({ portfolio, onSendToJournal, onOpenQuadrant, prefillSymbol, onPrefillUsed }) {
+function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillSymbol, onPrefillUsed }) {
   const [symbol, setSymbol] = useState("");
   const [symbolInfo, setSymbolInfo] = useState(null);
 
@@ -1632,6 +1634,7 @@ function CalcPage({ portfolio, onSendToJournal, onOpenQuadrant, prefillSymbol, o
         <div style={{ marginTop: 8, fontFamily: "var(--mono)", fontSize: 12, color: "var(--text2)" }}>
           Risk Budget: <span style={{ color: "var(--amber)" }}>{formatINR(riskBudget)}</span>
         </div>
+        <SizingAdvice portfolio={portfolio} trades={trades} riskPct={r} onApply={(v) => { setCustomRisk(""); if ([0.5, 1, 1.5, 2].includes(v)) setRiskPct(v); else setCustomRisk(String(v)); }} />
       </div>
 
       {/* Inputs */}
@@ -2588,6 +2591,7 @@ function AnalyticsPage({ trades, portfolio }) {
       </div>
 
       <MarketContextStats closed={closed} />
+      <DisciplineStats closed={closed} portfolio={portfolio} />
 
       {/* By Setup */}
       {setupStats.length > 0 && (
@@ -4094,6 +4098,190 @@ function TradesPage({ sub, setSub, journalProps, statsProps }) {
   );
 }
 
+// ─── PHASE 1: position health · environment sizing · discipline ──────────────
+
+/** Risk per trade and total open-risk cap suggested by today's market state. */
+function suggestedRisk(d) {
+  if (!d?.environment) return null;
+  const env = d.environment.name;
+  let pct = env === "EASY MONEY" ? 1 : env === "HARD MONEY" ? 0.5 : 0;
+  const why = [env === "EASY MONEY" ? "Easy money" : env === "HARD MONEY" ? "Hard money" : "No money"];
+  if (d.overall === "CASH") { pct = 0; why.push("signal CASH"); }
+  if (pct > 0 && d.follow_through?.label === "WEAK") { pct /= 2; why.push("follow-through weak"); }
+  if (pct > 0 && d.lows_ok === false) { pct /= 2; why.push(`${d.new_lows} at 52w lows`); }
+  const heatCap = env === "EASY MONEY" ? 6 : env === "HARD MONEY" ? 3 : 0;
+  return { pct: Math.round(pct * 100) / 100, heatCap, why: why.join(" · ") };
+}
+
+/** Open risk across positions, % of portfolio (risk to current stop on remaining qty). */
+function openHeatPct(trades, portfolio) {
+  if (!portfolio) return 0;
+  const risk = trades.filter(t => t.status === "open" || t.status === "partial").map(normalizeTrade)
+    .reduce((s, t) => s + Math.max(0, ((t.avgEntry || 0) - (t.currentStop || 0)) * (t.remainingQty || t.totalQty || 0)), 0);
+  return (risk / portfolio) * 100;
+}
+
+function SizingAdvice({ portfolio, trades, riskPct, onApply }) {
+  const [d, setD] = useState(() => getLastMarketQuadrant());
+  useEffect(() => {
+    let alive = true;
+    loadMarketQuadrant({ allowCompute: false }).then(x => { if (alive && x) setD(x); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  const s = suggestedRisk(d);
+  if (!s) return null;
+  const heat = openHeatPct(trades || [], portfolio);
+  const after = heat + (riskPct || 0);
+  const over = s.heatCap === 0 ? riskPct > 0 : after > s.heatCap;
+  const above = riskPct > s.pct + 1e-9;
+  return (
+    <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 10, border: `1px solid ${over || above ? "rgba(245,158,11,0.4)" : "var(--border)"}`, background: over || above ? "rgba(245,158,11,0.06)" : "transparent" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <div style={{ fontSize: 11, color: "var(--text2)" }}>
+          Suggested: <b style={{ color: "var(--text)" }}>{s.pct}%</b> <span style={{ color: "var(--text3)" }}>({s.why})</span>
+        </div>
+        {s.pct > 0 && Math.abs(riskPct - s.pct) > 1e-9 && (
+          <button className="chip" style={{ fontSize: 10 }} onClick={() => onApply(s.pct)}>Use {s.pct}%</button>
+        )}
+      </div>
+      <div style={{ fontSize: 11, color: over ? "#F59E0B" : "var(--text3)", marginTop: 4, fontFamily: "var(--mono)" }}>
+        Portfolio heat {heat.toFixed(1)}% → {after.toFixed(1)}% after this trade · cap {s.heatCap}%
+      </div>
+      {s.pct === 0 && <div style={{ fontSize: 11, color: "#F59E0B", marginTop: 4 }}>⚠ Market rules say no new entries today.</div>}
+      {s.pct > 0 && above && <div style={{ fontSize: 11, color: "#F59E0B", marginTop: 4 }}>⚠ {riskPct}% is above today's suggested risk.</div>}
+      {s.pct > 0 && over && <div style={{ fontSize: 11, color: "#F59E0B", marginTop: 4 }}>⚠ This would take total open risk over the {s.heatCap}% cap.</div>}
+    </div>
+  );
+}
+
+// Per-stock daily trend for open positions (cached per symbol per day)
+const _trendCache = new Map();
+async function stockTrend(sym) {
+  const key = `${sym}|${istDayKey(Math.floor(Date.now() / 1000))}`;
+  if (_trendCache.has(key)) return _trendCache.get(key);
+  const p = fetchStockDetail(sym).then(d => {
+    const i = d.closes.length - 1;
+    const s20 = smaSeries(d.closes, 20, 15);
+    return { close: d.closes[i], s10: d.s10[i], s20: s20[i], s50: d.s50[i], s200: d.s200[i], date: d.dates[i] };
+  }).catch(() => null);
+  _trendCache.set(key, p);
+  return p;
+}
+
+/** Hold / Tighten / Exit for an open position, with reasons. */
+function positionHealth(t, trend, mq, livePrice) {
+  const price = livePrice?.price ?? trend?.close;
+  const reasons = [];
+  let level = 0; // 0 hold, 1 tighten, 2 exit
+  const bump = (l, why) => { level = Math.max(level, l); reasons.push({ l, why }); };
+  const stop = t.currentStop || t.stop;
+  if (price != null && stop && price <= stop) bump(2, `At/below stop ₹${stop}`);
+  if (trend?.s50 != null && trend.close < trend.s50) bump(2, "Closed below its 50-day SMA");
+  else if (trend?.s20 != null && trend.close < trend.s20) bump(1, "Closed below its 20-day SMA");
+  else if (trend?.s10 != null && trend.close < trend.s10) bump(1, "Closed below its 10-day SMA");
+  const sector = mq?.sector_of?.[normalizeSymbol(t.symbol)];
+  const sec = sector ? (mq.sectors || []).find(s => s.name === sector) : null;
+  if (sec && ["COOL", "COLD"].includes(sec.status)) bump(1, `Sector ${sector} is ${sec.status}`);
+  if (sec && sec.status_d1 && sec.status !== sec.status_d1 && ["HOT", "WARM"].includes(sec.status_d1) && !["HOT", "WARM"].includes(sec.status)) bump(1, `${sector} dropped ${sec.status_d1} → ${sec.status}`);
+  const entryTagged = t.marketTags?.sectorStatus;
+  if (entryTagged && ["HOT", "WARM"].includes(entryTagged) && sec && !["HOT", "WARM"].includes(sec.status)) bump(1, `Sector was ${entryTagged} at entry`);
+  if (mq?.environment?.name === "NO MONEY" || mq?.overall === "CASH") bump(1, "Market turned No money / CASH");
+  if (mq?.follow_through?.label === "WEAK") bump(1, "Breakouts are failing market-wide");
+  const days = calcDaysHeld(t);
+  const st = getDaysHeldStatus(t.setupType, days);
+  if (/Decision needed/.test(st.label)) bump(1, `Day ${days}: past the time limit for a ${t.setupType}`);
+  const label = ["HOLD", "TIGHTEN STOP", "EXIT"][level];
+  return { level, label, color: ["#4ADE80", "#F59E0B", "#DC143C"][level], reasons: reasons.sort((a, b) => b.l - a.l).map(r => r.why) };
+}
+
+function PositionHealth({ trade, livePrice }) {
+  const [trend, setTrend] = useState(null);
+  const [mq, setMq] = useState(() => getLastMarketQuadrant());
+  useEffect(() => {
+    let alive = true;
+    stockTrend(normalizeSymbol(trade.symbol)).then(x => alive && setTrend(x));
+    loadMarketQuadrant({ allowCompute: false }).then(x => { if (alive && x) setMq(x); }).catch(() => {});
+    return () => { alive = false; };
+  }, [trade.symbol]);
+  if (!trend && !mq) return null;
+  const h = positionHealth(trade, trend, mq, livePrice);
+  return (
+    <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.1em", color: h.color, border: `1px solid ${h.color}66`, borderRadius: 10, padding: "1px 8px" }}>{h.label}</span>
+        <span style={{ fontSize: 11, color: "var(--text3)" }}>{h.reasons.length ? h.reasons[0] : "Trend, sector and market all intact"}</span>
+      </div>
+      {h.reasons.length > 1 && (
+        <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 4, lineHeight: 1.5 }}>{h.reasons.slice(1).join(" · ")}</div>
+      )}
+      {trend && (
+        <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 4, fontFamily: "var(--mono)" }}>
+          10d {trend.s10?.toFixed(1) ?? "—"} · 20d {trend.s20?.toFixed(1) ?? "—"} · 50d {trend.s50?.toFixed(1) ?? "—"} (close {mqFmtDate(trend.date)})
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Rule-following score for a closed trade (5 checks, from conditions at entry). */
+function disciplineScore(t, mq, portfolio) {
+  const ctx = tradeContext(t, mq);
+  const entryRow = historyOnDate(mq, t.entries?.[0]?.date || t.date);
+  const sugg = suggestedRisk(entryRow ? { environment: { name: ctx.env }, overall: ctx.signal, follow_through: { label: ctx.ft } } : null);
+  const riskPct = portfolio && t.riskAmount ? (t.riskAmount / portfolio) * 100 : null;
+  const checks = [
+    ["Signal wasn't CASH", ctx.signal ? ctx.signal !== "CASH" : null],
+    ["Environment wasn't No money", ctx.env ? ctx.env !== "NO MONEY" : null],
+    ["Sector HOT/WARM", ctx.sectorStatus ? ["HOT", "WARM"].includes(ctx.sectorStatus) : null],
+    ["Risk within suggested size", sugg && riskPct != null ? riskPct <= sugg.pct + 0.1 : null],
+    ["Had a stop", (t.currentStop || t.stop) > 0],
+  ];
+  const known = checks.filter(c => c[1] != null);
+  return { score: known.filter(c => c[1]).length, of: known.length, checks };
+}
+
+function DisciplineStats({ closed, portfolio }) {
+  const [mq, setMq] = useState(() => getLastMarketQuadrant());
+  useEffect(() => {
+    let alive = true;
+    loadMarketQuadrant({ allowCompute: false }).then(d => { if (alive && d) setMq(d); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  if (!closed.length) return null;
+  const scored = closed.map(t => ({ t, ...disciplineScore(t, mq, portfolio) })).filter(x => x.of >= 3);
+  if (!scored.length) return null;
+  const good = scored.filter(x => x.score === x.of), bad = scored.filter(x => x.score < x.of);
+  const avgR = (xs) => { const rs = xs.filter(x => x.t.riskAmount > 0).map(x => (x.t.pnl || 0) / x.t.riskAmount); return rs.length ? rs.reduce((a, b) => a + b, 0) / rs.length : null; };
+  const wr = (xs) => (xs.length ? Math.round((xs.filter(x => (x.t.pnl || 0) > 0).length / xs.length) * 100) : null);
+  const avgScore = scored.reduce((a, x) => a + x.score / x.of, 0) / scored.length;
+  const misses = {};
+  for (const x of scored) for (const [name, ok] of x.checks) if (ok === false) misses[name] = (misses[name] || 0) + 1;
+  const topMiss = Object.entries(misses).sort((a, b) => b[1] - a[1])[0];
+  const fmtR = (v) => (v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(2)}R`);
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="label" style={{ marginBottom: 6 }}>Discipline</div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+        <span style={{ fontFamily: "var(--mono)", fontSize: 24, fontWeight: 800, color: avgScore >= 0.8 ? "#4ADE80" : avgScore >= 0.6 ? "#F59E0B" : "#DC143C" }}>{Math.round(avgScore * 100)}%</span>
+        <span style={{ fontSize: 11, color: "var(--text3)" }}>of the rules followed on average · {scored.length} trades</span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", columnGap: 12, fontSize: 12, marginTop: 10 }}>
+        {["", "TRADES", "WIN %", "AVG R"].map((h, i) => <span key={i} style={{ fontSize: 10, color: "var(--text3)", textAlign: i ? "right" : "left", paddingBottom: 4 }}>{h}</span>)}
+        {[["Followed every rule", good], ["Broke a rule", bad]].map(([l, xs]) => (
+          <Fragment key={l}>
+            <span style={{ padding: "6px 0", borderTop: "1px solid var(--border)" }}>{l}</span>
+            <span style={{ padding: "6px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>{xs.length}</span>
+            <span style={{ padding: "6px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>{wr(xs) ?? "—"}{xs.length ? "%" : ""}</span>
+            <span style={{ padding: "6px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: (avgR(xs) ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>{fmtR(avgR(xs))}</span>
+          </Fragment>
+        ))}
+      </div>
+      {topMiss && <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 8 }}>Most-broken rule: <b style={{ color: "var(--text2)" }}>{topMiss[0]}</b> ({topMiss[1]}×)</div>}
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>Checks: signal not CASH · environment not No money · sector HOT/WARM · risk within the suggested size · a stop was set. Risk % uses your current portfolio value.</div>
+    </div>
+  );
+}
+
 // ─── BOTTOM NAV ──────────────────────────────────────────────────────────────
 function BottomNav({ page, setPage }) {
   const tabs = [
@@ -4210,7 +4398,7 @@ export default function App() {
         <TodayPage regime={regime} setRegime={handleRegimeChange} regimeSince={regimeSince} portfolio={portfolio} setPortfolio={setPortfolio} trades={trades} setPage={setPage} />
       )}
       {page === "calc" && (
-        <CalcPage portfolio={portfolio} onSendToJournal={handleSendToJournal} onOpenQuadrant={() => setPage("quadrant")}
+        <CalcPage portfolio={portfolio} trades={trades} onSendToJournal={handleSendToJournal} onOpenQuadrant={() => setPage("quadrant")}
           prefillSymbol={calcSymbol} onPrefillUsed={() => setCalcSymbol(null)} />
       )}
       {page === "trades" && (
