@@ -1,3 +1,17 @@
+// Close of the last daily bar dated before the latest trade's (IST) date, or null.
+function previousSessionClose(result) {
+  const ts = result?.timestamp;
+  const closes = result?.indicators?.quote?.[0]?.close;
+  const lastTrade = result?.meta?.regularMarketTime;
+  if (!Array.isArray(ts) || !Array.isArray(closes) || !lastTrade) return null;
+  const istDay = (sec) => new Date((sec + 19800) * 1000).toISOString().slice(0, 10);
+  const today = istDay(lastTrade);
+  for (let i = ts.length - 1; i >= 0; i--) {
+    if (closes[i] != null && istDay(ts[i]) < today) return closes[i];
+  }
+  return null;
+}
+
 // Vercel Node.js serverless function — single symbol quote
 // Uses Yahoo Finance v8 chart API (no crumb/auth needed, unlike the quote API)
 export default async function handler(req, res) {
@@ -11,7 +25,10 @@ export default async function handler(req, res) {
       ? symbol
       : `${symbol}.NS`;
 
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSym)}?interval=1d&range=1d`;
+  // range=5d (not 1d): we take the previous close from the daily bars ourselves, because
+  // Yahoo's meta.chartPreviousClose for indices can skip a session (e.g. on 12 Nov 2026
+  // ^NSEI reported 9 Nov's close instead of 11 Nov's, showing +1.02% instead of +0.18%).
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSym)}?interval=1d&range=5d`;
 
   try {
     const response = await fetch(url, {
@@ -30,14 +47,16 @@ export default async function handler(req, res) {
     }
 
     const data = await response.json();
-    const meta = data?.chart?.result?.[0]?.meta;
+    const result = data?.chart?.result?.[0];
+    const meta = result?.meta;
 
     if (!meta || meta.regularMarketPrice == null) {
       return res.status(404).json({ error: "no data" });
     }
 
     const price = meta.regularMarketPrice;
-    const prevClose = meta.chartPreviousClose ?? meta.previousClose ?? null;
+    const rawPrev = previousSessionClose(result) ?? meta.previousClose ?? null;
+    const prevClose = rawPrev != null ? +rawPrev.toFixed(2) : null;
     const change = prevClose != null ? +(price - prevClose).toFixed(2) : null;
     const changePct =
       prevClose != null && prevClose !== 0

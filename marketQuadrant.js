@@ -121,7 +121,7 @@ async function fetchNifty500Symbols() {
       const syms = [];
       for (let i = 1; i < lines.length; i++) {
         const sym = lines[i].split(",")[2]?.trim().replace(/"/g, "").toUpperCase();
-        if (sym && /^[A-Z0-9&_-]+$/.test(sym)) syms.push(sym);
+        if (sym && /^[A-Z0-9&_-]+$/.test(sym) && !sym.startsWith("DUMMY")) syms.push(sym); // NSE uses DUMMY* placeholders
       }
       if (syms.length > 100) return syms;
     } catch (_) {}
