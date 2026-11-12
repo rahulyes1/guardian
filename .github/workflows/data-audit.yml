@@ -1,7 +1,14 @@
-name: Data audit (app vs NSE)
+name: Nightly QUAD + data audit (app vs NSE)
 
-# Runs after NSE publishes its official files (~6 pm IST). A failing run means something
-# the app shows doesn't match NSE — GitHub emails the repo owner about failed runs.
+# Runs after NSE publishes its official files (~6 pm IST):
+#   1. unit tests
+#   2. compute the Market Quadrant, verify it against NSE's bhavcopy, publish it to Supabase
+#   3. audit everything the live app shows against NSE's files
+# A failing run means something the app shows doesn't match NSE — GitHub emails the repo owner.
+#
+# Publishing needs two repository secrets (Settings → Secrets and variables → Actions):
+#   SUPABASE_URL              https://<project>.supabase.co
+#   SUPABASE_PUBLISHABLE_KEY  the publishable (anon) key — never the secret / service_role key
 on:
   schedule:
     - cron: "45 13 * * 1-5"   # 19:15 IST, Mon–Fri
@@ -13,21 +20,26 @@ on:
         required: false
 
 jobs:
-  audit:
+  nightly:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
+    env:
+      APP_URL: https://guardian-swart-theta.vercel.app
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Install
+        run: npm ci --no-audit --no-fund
       - name: Unit tests
         run: node --test tests/*.test.mjs
+      - name: Compute, verify and publish QUAD
+        if: ${{ github.event.inputs.audit_date == '' || github.event.inputs.audit_date == null }}
+        run: node scripts/nightly-quad.mjs
       - name: Audit live app against NSE
         env:
-          APP_URL: https://guardian-swart-theta.vercel.app
           AUDIT_DATE: ${{ github.event.inputs.audit_date }}
-          # Optional: also check the shared QUAD result users load (Settings → Secrets → Actions)
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
         run: node scripts/audit-data.mjs

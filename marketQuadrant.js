@@ -13,6 +13,11 @@ import { verifyAgainstBhav, isPlaceholderSymbol } from "./lib/marketChecks.js";
 
 export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 
+// Base URL for the app's own endpoints and data files. "" in the browser (same origin);
+// the nightly GitHub job sets the deployed app URL so the same code runs in Node.
+let API_BASE = "";
+export function setApiBase(url) { API_BASE = String(url || "").replace(/\/+$/, ""); }
+
 const LOCAL_KEY       = "td_mq_v10";  // v10: EP + IPO scans
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
@@ -126,7 +131,7 @@ async function fetchTextWithTimeout(url, ms = 12000) {
 
 async function fetchNifty500Symbols() {
   try {
-    const r = await fetch("/nifty500.json");
+    const r = await fetch(API_BASE + "/nifty500.json");
     if (r.ok) {
       const data = await r.json();
       if (Array.isArray(data) && data.length > 100) return data.filter(s => !isPlaceholderSymbol(s));
@@ -148,7 +153,7 @@ async function fetchNifty500Symbols() {
 
 async function fetchSectorMap() {
   try {
-    const r = await fetch("/nifty500_sectors.json");
+    const r = await fetch(API_BASE + "/nifty500_sectors.json");
     if (r.ok) return await r.json();
   } catch (_) {}
   return {};
@@ -156,7 +161,7 @@ async function fetchSectorMap() {
 
 // Returns { closes: { "RELIANCE.NS": { "2025-01-02": close } }, vols: { "RELIANCE.NS": { "2026-07-01": volume } } }
 async function fetchSparkBatch(nsTickers) {
-  const url = `/api/spark?symbols=${encodeURIComponent(nsTickers.join(","))}&range=${RANGE}&interval=1d&vol=${VOL_DAYS}`;
+  const url = `${API_BASE}/api/spark?symbols=${encodeURIComponent(nsTickers.join(","))}&range=${RANGE}&interval=1d&vol=${VOL_DAYS}`;
   const r = await fetch(url);
   if (!r.ok) throw new Error(`Spark API HTTP ${r.status}`);
   const json = await r.json();
@@ -751,7 +756,7 @@ async function fetchBhav() {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 12000);
-    const r = await fetch("/api/nse?type=bhav", { signal: ctrl.signal });
+    const r = await fetch(API_BASE + "/api/nse?type=bhav", { signal: ctrl.signal });
     clearTimeout(t);
     if (!r.ok) return null;
     const j = await r.json();
@@ -766,7 +771,7 @@ async function computeFresh(onProgress) {
   onProgress("Fetching Nifty 500 index list…", 3);
   const [symbols, sectorMap] = await Promise.all([fetchNifty500Symbols(), fetchSectorMap()]);
   const bhavPromise = fetchBhav(); // official NSE closes, fetched while Yahoo downloads
-  const themesPromise = fetch("/themes.json").then(r => (r.ok ? r.json() : null)).catch(() => null);
+  const themesPromise = fetch(API_BASE + "/themes.json").then(r => (r.ok ? r.json() : null)).catch(() => null);
   const indexPromise = fetchSparkBatch(["^CRSLDX"]).then(r => r.closes["^CRSLDX"] || null).catch(() => null);
   const eventsPromise = fetchResultsCalendar();
   if (symbols.length < 100) throw new Error("Could not fetch Nifty 500 list — check internet connection.");
@@ -811,7 +816,7 @@ let _events = null;
 export async function fetchResultsCalendar() {
   if (_events && Date.now() - _events.at < 2 * 3600000) return _events.data;
   try {
-    const r = await fetch("/api/nse?type=events");
+    const r = await fetch(API_BASE + "/api/nse?type=events");
     const data = r.ok ? await r.json() : null;
     if (data?.results) { _events = { at: Date.now(), data }; return data; }
   } catch (_) {}
@@ -839,7 +844,7 @@ export async function loadMicrocapScans({ force = false } = {}) {
   if (_microInflight) return _microInflight;
   _microInflight = (async () => {
     const [syms, sectorMap, bhav, cal] = await Promise.all([
-      fetch("/microcap250.json").then(r => r.json()), fetchSectorMap(), fetchBhav(), fetchResultsCalendar(),
+      fetch(API_BASE + "/microcap250.json").then(r => r.json()), fetchSectorMap(), fetchBhav(), fetchResultsCalendar(),
     ]);
     const tickers = syms.filter(x => !isPlaceholderSymbol(x)).map(x => `${x}.NS`);
     const allData = {}, allVol = {};
