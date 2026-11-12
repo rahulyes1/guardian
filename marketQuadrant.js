@@ -13,7 +13,7 @@ import { verifyAgainstBhav, isPlaceholderSymbol } from "./lib/marketChecks.js";
 
 export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 
-const LOCAL_KEY       = "td_mq_v9";   // v9: themes + signal backtest
+const LOCAL_KEY       = "td_mq_v10";  // v10: EP + IPO scans
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
@@ -88,7 +88,7 @@ export function configureSharedStore(getClient) { sharedClientGetter = getClient
 
 function looksValid(d) {
   return d && MQ_SIGNALS.includes(d.overall) && Array.isArray(d.history) && typeof d.total === "number" && d.total >= 400
-    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d;
+    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d && Array.isArray(d.scans.ep);
 }
 async function readShared() {
   const sb = sharedClientGetter?.();
@@ -289,7 +289,7 @@ const r1 = (v) => (v == null ? null : Math.round(v * 10) / 10);
 const sectorStatus = (p) => (p == null ? "—" : p >= 70 ? "HOT" : p >= 50 ? "WARM" : p >= 30 ? "COOL" : "COLD");
 
 /** Pure computation from aligned closes. Exported for testing. */
-export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now(), verification = null, volumes = null, themeMap = null) {
+export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now(), verification = null, volumes = null, themeMap = null, events = null) {
   const stocks = Object.entries(aligned)
     .filter(([, closes]) => closes.filter(c => c != null).length >= 150)
     .map(([ticker, closes]) => ({
@@ -591,8 +591,47 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     const c = s.closes[last], p = s.closes[last - 1];
     return c != null && p != null && s.s50[last] != null && s.s50[last - 1] != null && c > s.s50[last] && p <= s.s50[last - 1];
   }).map(s => ({ ...base(s), a200: s.s200[last] != null && s.closes[last] > s.s200[last] })).sort(byRs);
+  // 4. Episodic pivots: ≥8% up on ≥3× the 50-day average volume in the last 5 sessions,
+  //    still holding within 3% of that day's close; flagged when results were due around it.
+  const scanEp = [];
+  if (volumes) {
+    for (const [ticker, c] of Object.entries(aligned)) {
+      const v = volumes[ticker]; if (!v) continue;
+      const sym = ticker.replace(/\.NS$/, "");
+      for (let i = last; i >= Math.max(51, last - 4); i--) {
+        if (c[i] == null || c[i - 1] == null || v[i] == null) continue;
+        const chg = c[i] / c[i - 1] - 1; if (chg < 0.08) continue;
+        let sum = 0, cnt = 0; for (let k = i - 50; k < i; k++) if (v[k] != null) { sum += v[k]; cnt++; }
+        if (cnt < 20 || v[i] < 3 * (sum / cnt) || c[last] == null || c[last] < c[i] * 0.97) continue;
+        const day = axis[i];
+        const res = (events?.[sym] || []).some(d => d <= day && (Date.parse(day) - Date.parse(d)) / 86400000 <= 4);
+        const st = stocks.find(x => x.sym === sym);
+        scanEp.push({ sym, sector: sectorMap[sym] || "Other", d: day, chg: r1(chg * 100), volx: r1(v[i] / (sum / cnt)),
+          held: r1((c[last] / c[i] - 1) * 100), results: res, ret3m: st ? ret3(st) : null });
+        break;
+      }
+    }
+    scanEp.sort((a, b) => (b.results - a.results) || (b.d > a.d ? 1 : b.d < a.d ? -1 : 0) || (b.volx * b.chg - a.volx * a.chg));
+  }
+  // 5. IPO bases: listed within ~12 months (20–260 sessions of history), trading within 5% of
+  //    the highest close since listing (or breaking it today)
+  const scanIpo = [];
+  for (const [ticker, c] of Object.entries(aligned)) {
+    const first = c.findIndex(x => x != null);
+    const age = last - first;
+    if (first < 0 || age < 20 || age > 260 || c[last] == null) continue;
+    let hi = -Infinity; for (let k = first; k < last; k++) if (c[k] != null) hi = Math.max(hi, c[k]);
+    if (c[last] < hi * 0.95) continue;
+    const sym = ticker.replace(/\.NS$/, "");
+    scanIpo.push({ sym, sector: sectorMap[sym] || "Other", days: age, from_listing: r1((c[last] / c[first] - 1) * 100),
+      off_high: r1((c[last] / Math.max(hi, c[last]) - 1) * 100), breakout: c[last] > hi });
+  }
+  scanIpo.sort((a, b) => (b.breakout - a.breakout) || (b.from_listing - a.from_listing));
+
   const scans = {
     pivots: scanPivots.slice(0, 15), pivots_total: scanPivots.length,
+    ep: scanEp.slice(0, 15), ep_total: scanEp.length,
+    ipo: scanIpo.slice(0, 15), ipo_total: scanIpo.length,
     tight: scanTight.slice(0, 15), tight_total: scanTight.length,
     reclaim50: scanReclaim.slice(0, 15), reclaim50_total: scanReclaim.length,
   };
@@ -729,6 +768,7 @@ async function computeFresh(onProgress) {
   const bhavPromise = fetchBhav(); // official NSE closes, fetched while Yahoo downloads
   const themesPromise = fetch("/themes.json").then(r => (r.ok ? r.json() : null)).catch(() => null);
   const indexPromise = fetchSparkBatch(["^CRSLDX"]).then(r => r.closes["^CRSLDX"] || null).catch(() => null);
+  const eventsPromise = fetchResultsCalendar();
   if (symbols.length < 100) throw new Error("Could not fetch Nifty 500 list — check internet connection.");
 
   const tickers = symbols.map(s => `${s}.NS`);
@@ -759,10 +799,62 @@ async function computeFresh(onProgress) {
   const { axis, aligned } = alignByDate(allData);
   onProgress("Verifying closes against NSE…", 85);
   const verification = applyNseCloses(axis, aligned, await bhavPromise);
-  const result = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, alignVolumes(axis, allVol), await themesPromise);
+  const result = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, alignVolumes(axis, allVol), await themesPromise, (await eventsPromise)?.results || null);
   const idx = await indexPromise;
   result.signal_backtest = idx ? backtestSignal(result.history, idx) : null;
   return result;
+}
+
+// ─── results calendar (NSE) ───────────────────────────────────────────────────
+let _events = null;
+/** { from, to, results: { SYM: ["YYYY-MM-DD"] } } or null; cached for 2 hours. */
+export async function fetchResultsCalendar() {
+  if (_events && Date.now() - _events.at < 2 * 3600000) return _events.data;
+  try {
+    const r = await fetch("/api/nse?type=events");
+    const data = r.ok ? await r.json() : null;
+    if (data?.results) { _events = { at: Date.now(), data }; return data; }
+  } catch (_) {}
+  return null;
+}
+/** Next results date for a symbol from today (IST) within `days`, or null. */
+export function upcomingResults(cal, sym, days = 7) {
+  const today = new Date(Date.now() + IST_MS).toISOString().slice(0, 10);
+  const ds = (cal?.results?.[sym] || []).filter(d => d >= today).sort();
+  if (!ds.length) return null;
+  const inDays = Math.round((Date.parse(ds[0]) - Date.parse(today)) / 86400000);
+  return inDays <= days ? { date: ds[0], inDays } : null;
+}
+
+// ─── wider universe: NSE Microcap 250 (loaded on demand, scans only) ─────────
+const MICRO_KEY = "td_mq_micro_v1";
+let _microInflight = null;
+export async function loadMicrocapScans({ force = false } = {}) {
+  if (!force) {
+    try {
+      const e = JSON.parse(localStorage.getItem(MICRO_KEY) || "null");
+      if (isFresh(e)) return e.data;
+    } catch (_) {}
+  }
+  if (_microInflight) return _microInflight;
+  _microInflight = (async () => {
+    const [syms, sectorMap, bhav, cal] = await Promise.all([
+      fetch("/microcap250.json").then(r => r.json()), fetchSectorMap(), fetchBhav(), fetchResultsCalendar(),
+    ]);
+    const tickers = syms.filter(x => !isPlaceholderSymbol(x)).map(x => `${x}.NS`);
+    const allData = {}, allVol = {};
+    const chunks = []; for (let i = 0; i < tickers.length; i += BATCH) chunks.push(tickers.slice(i, i + BATCH));
+    await mapLimited(chunks, PARALLEL, async (b) => { const r = await fetchSparkBatch(b); Object.assign(allData, r.closes); Object.assign(allVol, r.vols); });
+    const got = Object.keys(allData).length;
+    if (got < tickers.length * 0.8) throw new Error(`Only got data for ${got}/${tickers.length} microcaps — try again shortly.`);
+    const { axis, aligned } = alignByDate(allData);
+    const verification = applyNseCloses(axis, aligned, bhav);
+    const r = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, alignVolumes(axis, allVol), null, cal?.results || null);
+    const data = { as_of: r.as_of, final: r.final, verification, total: r.total, scans: r.scans, leaders: r.leaders, sector_of: r.sector_of };
+    try { localStorage.setItem(MICRO_KEY, JSON.stringify({ data, savedAt: Date.now() })); } catch (_) {}
+    return data;
+  })().finally(() => { _microInflight = null; });
+  return _microInflight;
 }
 
 // ─── public loader (deduplicated) ────────────────────────────────────────────

@@ -2,8 +2,10 @@
 //   /api/nse?type=indices  latest ind_close_all file  → { date, indices: { "Nifty 50": {...}, "Nifty 500": {...} } }
 //   /api/nse?type=bhav     latest sec_bhavdata_full   → { date, closes: { SYMBOL: { prev, close } } }  (EQ/BE/BZ)
 //   /api/nse?type=live     NSE allIndices feed        → { date, time, indices: { "NIFTY 50": {...}, ... } }
+//   /api/nse?type=events   NSE board-meeting calendar → { from, to, results: { SYMBOL: ["YYYY-MM-DD", ...] } }
+//                          (financial results only; 10 days back to 21 days ahead)
 // Errors return { error } with a non-200 status and are never cached.
-import { parseIndexCloseCsv, parseBhavFullCsv, parseAllIndices, recentWeekdays, nseFileDate, istParts } from "../lib/marketChecks.js";
+import { parseIndexCloseCsv, parseBhavFullCsv, parseAllIndices, recentWeekdays, nseFileDate, istParts, parseNseDate } from "../lib/marketChecks.js";
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
 const KEEP_INDICES = ["Nifty 50", "Nifty 500"];
@@ -88,7 +90,23 @@ export default async function handler(req, res) {
       return res.json({ source: "nse-allIndices", date: parsed.date, time: parsed.time, indices });
     }
 
-    return fail(400, "type must be indices, bhav or live");
+    if (type === "events") {
+      const dmy = (ms) => { const d = new Date(ms + 19800000); return `${String(d.getUTCDate()).padStart(2, "0")}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${d.getUTCFullYear()}`; };
+      const from = dmy(Date.now() - 10 * 86400000), to = dmy(Date.now() + 21 * 86400000);
+      const r = await get(`https://www.nseindia.com/api/event-calendar?index=equities&from_date=${from}&to_date=${to}`, { json: true, timeout: 7000 });
+      const rows = r.status === 200 ? (Array.isArray(r.body) ? r.body : r.body?.data || []) : null;
+      if (!rows) return fail(502, `NSE event calendar unavailable (${r.status || r.error})`);
+      const results = {};
+      for (const e of rows) {
+        if (!e?.symbol || !/result/i.test(e.purpose || "")) continue;
+        const day = parseNseDate(e.date);
+        if (day) (results[e.symbol] ||= []).includes(day) || results[e.symbol].push(day);
+      }
+      res.setHeader("Cache-Control", "public, max-age=1800, s-maxage=7200");
+      return res.json({ source: "nse-event-calendar", from, to, results });
+    }
+
+    return fail(400, "type must be indices, bhav, live or events");
   } catch (e) {
     return fail(500, e.message || String(e));
   }

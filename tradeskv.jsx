@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, Fragment } from "react";
 import { getSupabaseClient } from "./supabaseClient.js";
 import {
   MQ_SIGNALS, loadMarketQuadrant, getLastMarketQuadrant, subscribeProgress, signalOnDate, configureSharedStore,
-  FT_BANDS, FT_CALIBRATION, smaSeries, historyOnDate, istDayKey,
+  FT_BANDS, FT_CALIBRATION, smaSeries, historyOnDate, istDayKey, fetchResultsCalendar, upcomingResults, loadMicrocapScans,
 } from "./marketQuadrant.js";
 import { INDEX_KEYS, reconcileIndex } from "./lib/marketChecks.js";
 import { useSyncedAppState } from "./appStateSync.js";
@@ -1615,6 +1615,7 @@ function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillS
           <SymbolSuggestions suggestions={suggestions} onSelect={selectSuggestion} visible={showSuggestions} />
         </div>
         <PriceBadge info={symbolInfo} loading={fetchingSym} />
+        <ResultsWarning symbol={symbol && symbol.length >= 2 ? symbol : null} style={{ marginTop: 8 }} />
       </div>
 
       {/* Risk % Selector */}
@@ -3558,12 +3559,37 @@ const SCAN_DEFS = [
     cols: [["12M", r => r.ret12m != null ? `${r.ret12m > 0 ? "+" : ""}${r.ret12m}%` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"], ["HIGH", r => r.off_high != null ? `${r.off_high}%` : "—"]] },
   { id: "tight", label: "Tight near highs", hint: "Above 50 & 200-SMA, within 10% of the 52-week high, last 10 closes in a ≤6% range — low-volatility setups.",
     cols: [["RANGE", r => r.range10 != null ? `${r.range10}%` : "—"], ["HIGH", r => r.off_high != null ? `${r.off_high}%` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"]] },
+  { id: "ep", label: "Earnings EP", hint: "Episodic pivots: ≥8% up on ≥3× average volume in the last 5 sessions and still holding. ★ = results were due around the move.",
+    cols: [["DAY", r => mqFmtDate(r.d)], ["MOVE", r => `+${r.chg}% ${r.volx}×`], ["SINCE", r => `${r.held > 0 ? "+" : ""}${r.held}%`]] },
+  { id: "ipo", label: "IPO bases", hint: "Listed within ~12 months and trading within 5% of the highest close since listing. ↑ = breaking above it today.",
+    cols: [["AGE", r => `${r.days}d`], ["LISTING", r => `${r.from_listing > 0 ? "+" : ""}${r.from_listing}%`], ["HIGH", r => (r.breakout ? "↑ new" : `${r.off_high}%`)]] },
   { id: "reclaim50", label: "Reclaimed 50-SMA", hint: "Closed back above the 50-day average today after being below it yesterday.",
     cols: [["200↑", r => (r.a200 ? "yes" : "no")], ["HIGH", r => r.off_high != null ? `${r.off_high}%` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"]] },
 ];
 
+const SCAN_SORT = {
+  pivots: (a, b) => b.volx * b.chg - a.volx * a.chg,
+  ep: (a, b) => (b.results - a.results) || (b.d > a.d ? 1 : b.d < a.d ? -1 : 0) || (b.volx * b.chg - a.volx * a.chg),
+  ipo: (a, b) => (b.breakout - a.breakout) || (b.from_listing - a.from_listing),
+  leaders: (a, b) => (b.ret12m ?? b.ret3m ?? -999) - (a.ret12m ?? a.ret3m ?? -999),
+  tight: (a, b) => (b.ret3m ?? -999) - (a.ret3m ?? -999),
+  reclaim50: (a, b) => (b.ret3m ?? -999) - (a.ret3m ?? -999),
+};
+
 function ScanPage({ onPickStock }) {
   const { data, loading, error, progress, retry } = useMarketQuadrant();
+  const [micro, setMicro] = useState(() => { try { return localStorage.getItem("td_scan_micro") === "1"; } catch (_) { return false; } });
+  const [microData, setMicroData] = useState(null);
+  const [microState, setMicroState] = useState(null); // null | "loading" | error text
+  useEffect(() => {
+    try { localStorage.setItem("td_scan_micro", micro ? "1" : "0"); } catch (_) {}
+    if (!micro) return;
+    let alive = true;
+    setMicroState("loading");
+    loadMicrocapScans().then(d => { if (alive) { setMicroData(d); setMicroState(null); } })
+      .catch(e => alive && setMicroState(e.message || "Microcap data unavailable"));
+    return () => { alive = false; };
+  }, [micro]);
   const [tab, setTab] = useState(() => { try { return localStorage.getItem("td_scan_tab") || "pivots"; } catch (_) { return "pivots"; } });
   const pick = (id) => { setTab(id); try { localStorage.setItem("td_scan_tab", id); } catch (_) {} };
 
@@ -3586,11 +3612,23 @@ function ScanPage({ onPickStock }) {
   }
 
   const statusOf = Object.fromEntries((data.sectors || []).map(s => [s.name, s.status]));
-  const lists = {
-    pivots: data.scans.pivots, tight: data.scans.tight, reclaim50: data.scans.reclaim50,
-    leaders: (data.leaders || []).filter(l => ["HOT", "WARM"].includes(statusOf[l.sector])),
+  const hot = (l) => ["HOT", "WARM"].includes(statusOf[l.sector]);
+  const base = {
+    pivots: data.scans.pivots || [], tight: data.scans.tight || [], reclaim50: data.scans.reclaim50 || [],
+    ep: data.scans.ep || [], ipo: data.scans.ipo || [], leaders: (data.leaders || []).filter(hot),
   };
-  const totals = { pivots: data.scans.pivots_total, tight: data.scans.tight_total, reclaim50: data.scans.reclaim50_total, leaders: lists.leaders.length };
+  const totals = { pivots: data.scans.pivots_total, tight: data.scans.tight_total, reclaim50: data.scans.reclaim50_total,
+    ep: data.scans.ep_total || 0, ipo: data.scans.ipo_total || 0, leaders: base.leaders.length };
+  const lists = { ...base };
+  if (micro && microData?.scans) {
+    const m = microData.scans, tag = (xs) => (xs || []).map(x => ({ ...x, micro: true }));
+    const add = { pivots: tag(m.pivots), tight: tag(m.tight), reclaim50: tag(m.reclaim50), ep: tag(m.ep), ipo: tag(m.ipo), leaders: tag((microData.leaders || []).filter(hot)) };
+    for (const k of Object.keys(add)) {
+      const seen = new Set(base[k].map(x => x.sym));
+      lists[k] = [...base[k], ...add[k].filter(x => !seen.has(x.sym))].sort(SCAN_SORT[k]).slice(0, 25);
+      totals[k] = (totals[k] || 0) + ({ pivots: m.pivots_total, tight: m.tight_total, reclaim50: m.reclaim50_total, ep: m.ep_total, ipo: m.ipo_total, leaders: add.leaders.length }[k] || 0);
+    }
+  }
   const def = SCAN_DEFS.find(x => x.id === tab) || SCAN_DEFS[0];
   const rows = lists[def.id] || [];
   const verified = data.verification && data.verification.date === data.as_of;
@@ -3599,6 +3637,15 @@ function ScanPage({ onPickStock }) {
     <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
       {head}
       <MarketSignalBanner />
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 11, color: "var(--text3)" }}>
+        Universe:
+        {[[false, "Nifty 500"], [true, "+ Microcap 250"]].map(([v, l]) => (
+          <button key={l} className="chip" onClick={() => setMicro(v)} aria-pressed={micro === v}
+            style={micro === v ? { borderColor: "var(--text)", color: "var(--text)" } : {}}>{l}</button>
+        ))}
+        {micro && microState === "loading" && <span>loading microcaps…</span>}
+        {micro && microState && microState !== "loading" && <span style={{ color: "var(--red)" }}>{microState}</span>}
+      </div>
       <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4, marginBottom: 10, scrollbarWidth: "none" }}>
         {SCAN_DEFS.map(x => (
           <button key={x.id} onClick={() => pick(x.id)} className="chip" aria-pressed={x.id === def.id}
@@ -3623,7 +3670,9 @@ function ScanPage({ onPickStock }) {
                     <button onClick={() => onPickStock?.(r.sym)} title={`Open ${r.sym}`}
                       style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", font: "inherit", fontFamily: "var(--display)", fontWeight: 700, letterSpacing: "0.02em", textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{r.sym}</button>
                     <div style={{ fontSize: 10, color: "var(--text3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {r.results && <span style={{ color: "#F59E0B", marginRight: 4 }} title="Results were due around this move">★</span>}
                       {r.sector}{st && st !== "—" && <span style={{ color: MQ_DIM_COLOR[st], marginLeft: 4 }}>· {st}</span>}
+                      {r.micro && <span style={{ marginLeft: 4, color: "var(--text3)", border: "1px solid var(--border)", borderRadius: 6, padding: "0 4px", fontSize: 9 }}>micro</span>}
                     </div>
                   </div>
                   {def.cols.map(([h, f]) => (
@@ -3635,8 +3684,9 @@ function ScanPage({ onPickStock }) {
           </div>
         )}
         {totals[def.id] > rows.length && (
-          <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 8 }}>Showing top {rows.length} of {totals[def.id]} (strongest 3-month relative strength first).</div>
+          <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 8 }}>Showing top {rows.length} of {totals[def.id]}.</div>
         )}
+        {micro && <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>Microcaps are thinly traded — check liquidity and spread before acting.</div>}
       </div>
       <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 10 }}>
         Data as of {mqFmtDate(data.as_of)} {verified ? "· ✓ closes verified against NSE" : data.final ? "· awaiting NSE's official closes" : "· intraday"}. Ideas, not recommendations — check the chart and your plan.
@@ -3751,6 +3801,21 @@ function StockChart({ d, from }) {
   );
 }
 
+function ResultsWarning({ symbol, style }) {
+  const [up, setUp] = useState(null);
+  useEffect(() => {
+    let alive = true; setUp(null);
+    if (symbol) fetchResultsCalendar().then(cal => alive && setUp(upcomingResults(cal, normalizeSymbol(symbol), 10)));
+    return () => { alive = false; };
+  }, [symbol]);
+  if (!up) return null;
+  return (
+    <div style={{ fontSize: 11, color: "#F59E0B", border: "1px solid rgba(245,158,11,0.35)", background: "rgba(245,158,11,0.07)", borderRadius: 8, padding: "6px 9px", ...style }}>
+      📅 Results {up.inDays === 0 ? "today" : up.inDays === 1 ? "tomorrow" : `in ${up.inDays} days`} ({mqFmtDate(up.date)}) — expect a big gap either way; size down or wait.
+    </div>
+  );
+}
+
 function StockPage({ symbol, onBack, onPlan }) {
   const { data: mq } = useMarketQuadrant();
   const [d, setD] = useState(null);
@@ -3818,6 +3883,7 @@ function StockPage({ symbol, onBack, onPlan }) {
           <span style={{ fontFamily: "var(--mono)", fontSize: 13, color: col(chg) }}>{pct(chg)}</span>
           <span style={{ fontSize: 11, color: "var(--text3)" }}>{mqFmtDate(d.dates[last])} close{d.verified ? (d.verified.date === d.dates[last] ? " · ✓ NSE" : "") : " · unverified"}</span>
         </div>
+        <ResultsWarning symbol={symbol} style={{ marginTop: 8 }} />
         <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 4 }}>
           {sector || "—"}{secInfo && <span style={{ color: MQ_DIM_COLOR[secInfo.status] }}> · {secInfo.status}</span>}{secInfo?.quadrant && ` · ${secInfo.quadrant.toLowerCase()}`} · {offHigh.toFixed(1)}% from 52w high
         </div>
@@ -4203,14 +4269,20 @@ function positionHealth(t, trend, mq, livePrice) {
 function PositionHealth({ trade, livePrice }) {
   const [trend, setTrend] = useState(null);
   const [mq, setMq] = useState(() => getLastMarketQuadrant());
+  const [results, setResults] = useState(null);
   useEffect(() => {
     let alive = true;
     stockTrend(normalizeSymbol(trade.symbol)).then(x => alive && setTrend(x));
+    fetchResultsCalendar().then(cal => alive && setResults(upcomingResults(cal, normalizeSymbol(trade.symbol), 5)));
     loadMarketQuadrant({ allowCompute: false }).then(x => { if (alive && x) setMq(x); }).catch(() => {});
     return () => { alive = false; };
   }, [trade.symbol]);
   if (!trend && !mq) return null;
   const h = positionHealth(trade, trend, mq, livePrice);
+  if (results) {
+    h.reasons.unshift(`Results ${results.inDays === 0 ? "today" : results.inDays === 1 ? "tomorrow" : `in ${results.inDays} days`} (${mqFmtDate(results.date)}) — decide before the gap`);
+    if (h.level < 1) { h.level = 1; h.label = "TIGHTEN STOP"; h.color = "#F59E0B"; }
+  }
   return (
     <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
