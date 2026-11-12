@@ -2651,7 +2651,13 @@ function AnalyticsPage({ trades, portfolio }) {
 // ─── MARKET QUADRANT — UI (data/compute lives in marketQuadrant.js) ──────────
 const MQ_SIGNAL_COLOR = { INVEST: "#4ADE80", SELECTIVE: "#F59E0B", CASH: "#DC143C" };
 const MQ_SIGNAL_BG    = { INVEST: "rgba(74,222,128,0.08)", SELECTIVE: "rgba(245,158,11,0.08)", CASH: "rgba(220,20,60,0.08)" };
-const MQ_DIM_COLOR    = { BULL: "#4ADE80", BEAR: "#DC143C", UP: "#4ADE80", DOWN: "#DC143C", RISING: "#4ADE80", FALLING: "#DC143C", HOT: "#4ADE80", WARM: "#A3E635", COOL: "#A39C89", COLD: "#DC143C" };
+const MQ_DIM_COLOR    = {
+  BULL: "#4ADE80", BEAR: "#DC143C", UP: "#4ADE80", DOWN: "#DC143C", SIDEWAYS: "#F59E0B",
+  UPSWING: "#4ADE80", DOWNSWING: "#DC143C", CHOPPY: "#A39C89",
+  POSITIVE: "#4ADE80", NEGATIVE: "#DC143C", IMPROVING: "#4ADE80", WORSENING: "#DC143C",
+  RISING: "#4ADE80", FALLING: "#DC143C", HOT: "#4ADE80", WARM: "#A3E635", COOL: "#A39C89", COLD: "#DC143C",
+};
+const MQ_ENV_COLOR = { "EASY MONEY": "#4ADE80", "HARD MONEY": "#F59E0B", "NO MONEY": "#DC143C" };
 // Breadth chart series — validated categorical palette for the #141414 surface (all checks pass)
 const MQ_SERIES = [
   { key: "p200", label: "200-SMA", color: "#3987E5" },
@@ -2755,6 +2761,38 @@ function NNHBadge({ label, value }) {
 
 const mqCardStyle = { background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: 14, marginBottom: 14 };
 const mqHeadStyle = { fontSize: 10, color: "var(--text3)", letterSpacing: "0.14em", fontWeight: 700 };
+
+// Trading environment (easy / hard / no money), lockout-rally warning, momentum leaders
+function MqEnvironment({ data }) {
+  const env = data?.environment;
+  if (!env) return null;
+  const c = MQ_ENV_COLOR[env.name] || "var(--text2)";
+  return (
+    <div style={{ ...mqCardStyle, borderColor: `${c}55`, background: `${c}0D` }}>
+      <div style={{ ...mqHeadStyle, marginBottom: 6 }}>ENVIRONMENT</div>
+      <div style={{ fontSize: 18, fontWeight: 800, color: c, letterSpacing: "-0.01em" }}>{env.name}</div>
+      <div style={{ fontSize: 12, color: "var(--text2)", marginTop: 4, lineHeight: 1.45 }}>{env.text}</div>
+      {env.lockout && (
+        <div style={{ marginTop: 10, border: "1px solid rgba(245,158,11,0.35)", background: "rgba(245,158,11,0.08)", borderRadius: 10, padding: "8px 10px" }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#F59E0B", letterSpacing: "0.08em", marginBottom: 3 }}>🔒 LOCKOUT RALLY</div>
+          <div style={{ fontSize: 11, color: "var(--text2)", lineHeight: 1.45 }}>{env.lockout_text.replace(/^Lockout rally: (\w)/, (_, ch) => ch.toUpperCase())}</div>
+        </div>
+      )}
+      {data.momentum_leaders?.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontSize: 10, color: "var(--text3)", marginBottom: 5 }}>Momentum leaders · sector avg 1-month return</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {data.momentum_leaders.map(m => (
+              <span key={m.name} style={{ fontSize: 11, border: "1px solid var(--border)", borderRadius: 14, padding: "3px 9px", color: "var(--text)", background: "var(--bg2)" }}>
+                {m.name} <span style={{ fontFamily: "var(--mono)", color: "#4ADE80" }}>+{m.ret1m}%</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // Says whether today's closes were checked against NSE's official bhavcopy
 function MqVerificationBadge({ data }) {
@@ -3121,6 +3159,8 @@ function MarketQuadrantPage() {
         )}
       </div>
 
+      <MqEnvironment data={data} />
+
       <MqVerificationBadge data={data} />
 
       <MqSignalTimeline history={h} />
@@ -3128,15 +3168,35 @@ function MarketQuadrantPage() {
       {/* ── Four Dimensions ── */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
         {[
-          { label: "BIAS", value: data.bias, sub: <>{data.pct_above_200}% &gt; 200-SMA<MqDelta cur={data.pct_above_200} prev={prev?.p200} /></> },
-          { label: "TREND", value: data.trend, sub: <>{data.pct_above_50}% &gt; 50-SMA<MqDelta cur={data.pct_above_50} prev={prev?.p50} /></> },
-          { label: "SWING", value: data.swing, sub: <>{data.pct_above_10}% &gt; 10-SMA<MqDelta cur={data.pct_above_10} prev={prev?.p10} /></> },
-          { label: "MOMENTUM", value: data.momentum, sub: <>ROC vs avg {data.momentum_change > 0 ? "+" : ""}{data.momentum_change} pts</> },
-        ].map(({ label, value, sub }) => (
-          <div key={label} style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: "14px 12px" }}>
+          {
+            label: "BIAS", value: data.bias,
+            tag: data.bias_turning ? `TURNING ${data.bias === "BEAR" ? "UP" : "DOWN"}` : null,
+            tagColor: data.bias === "BEAR" ? "#4ADE80" : "#DC143C",
+            sub: <>{data.pct_above_200}% &gt; 200-SMA<MqDelta cur={data.pct_above_200} prev={prev?.p200} /></>,
+            note: data.bias_turning ? `${data.bias_days}/${data.bias_needed} sessions ${data.bias === "BEAR" ? "above" : "below"} 50% to flip` : `held ${data.bias_days}+ sessions`,
+          },
+          {
+            label: "TREND", value: data.trend,
+            sub: <>{data.pct_above_50}% &gt; 50-SMA<MqDelta cur={data.pct_above_50} prev={prev?.p50} /></>,
+            note: `52w net new highs ${data.nnh_52w > 0 ? "+" : ""}${data.nnh_52w}`,
+          },
+          {
+            label: "SWING", value: data.swing_state,
+            sub: <>{data.pct_above_10}% &gt; 10-SMA<MqDelta cur={data.pct_above_10} prev={prev?.p10} /></>,
+            note: `10-day ${data.pct_above_10 >= data.pct_above_20 ? "≥" : "<"} 20-day (${data.pct_above_20}%)`,
+          },
+          {
+            label: "MOMENTUM", value: data.momentum_sign,
+            tag: data.momentum_dir, tagColor: MQ_DIM_COLOR[data.momentum_dir],
+            sub: <>4-wk ROC vs avg {data.momentum_change > 0 ? "+" : ""}{data.momentum_change} pts</>,
+          },
+        ].map(({ label, value, tag, tagColor, sub, note }) => (
+          <div key={label} style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 14, padding: "14px 12px", minWidth: 0 }}>
             <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.14em", marginBottom: 6, fontWeight: 700 }}>{label}</div>
-            <div style={{ fontSize: 20, fontWeight: 800, color: MQ_DIM_COLOR[value] || "var(--text)", letterSpacing: "-0.02em", lineHeight: 1 }}>{value}</div>
+            <div style={{ fontSize: 19, fontWeight: 800, color: MQ_DIM_COLOR[value] || "var(--text)", letterSpacing: "-0.02em", lineHeight: 1 }}>{value}</div>
+            {tag && <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.1em", color: tagColor, marginTop: 4 }}>{tag}</div>}
             <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 5, fontFamily: "var(--mono)" }}>{sub}</div>
+            {note && <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 2 }}>{note}</div>}
           </div>
         ))}
       </div>

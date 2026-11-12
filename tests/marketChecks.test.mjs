@@ -175,3 +175,29 @@ test("breadth math: steady uptrend → 100% above all SMAs and INVEST; downtrend
   const down = computeFromAligned(axis, make(-0.2), {}, Date.parse("2026-01-01"));
   assert.equal(down.pct_above_50, 0); assert.equal(down.overall, "CASH");
 });
+
+// ── Market Quadrant framework rules ──
+const days = (n) => Array.from({ length: n }, (_, i) => new Date(Date.UTC(2025, 0, 1) + i * 86400000).toISOString().slice(0, 10));
+
+test("bias only flips after 20 sessions on the other side of 50% (turning before that)", () => {
+  const axis = days(300);
+  // 290 sessions of decline, then a sharp 10-session rally that lifts every stock above its 200-SMA
+  const series = (s) => axis.map((_, i) => (i < 290 ? 300 - i * 0.6 + s * 0.01 : 126 + (i - 289) * 12));
+  const data = Object.fromEntries(Array.from({ length: 60 }, (_, s) => [`S${s}.NS`, series(s)]));
+  const r = computeFromAligned(axis, data, {}, Date.parse("2026-01-01"));
+  assert.equal(r.pct_above_200, 100);
+  assert.equal(r.bias, "BEAR");                 // not yet sustained
+  assert.equal(r.bias_turning, true);
+  assert.ok(r.bias_days < 20);
+  assert.equal(r.environment.lockout, true);    // bear + 10-day breadth from washed-out to stretched
+});
+
+test("environment: steady uptrend is EASY MONEY, steady downtrend is NO MONEY", () => {
+  const axis = days(260);
+  const make = (dir) => Object.fromEntries(Array.from({ length: 60 }, (_, s) => [`S${s}.NS`, axis.map((_, i) => 100 + dir * (i + s * 0.1))]));
+  const up = computeFromAligned(axis, make(1), {}, Date.parse("2026-01-01"));
+  assert.deepEqual([up.bias, up.trend, up.swing_state, up.environment.name], ["BULL", "UP", "UPSWING", "EASY MONEY"]);
+  const down = computeFromAligned(axis, make(-0.2), {}, Date.parse("2026-01-01"));
+  assert.deepEqual([down.bias, down.trend, down.swing_state, down.environment.name], ["BEAR", "DOWN", "DOWNSWING", "NO MONEY"]);
+  assert.equal(down.momentum_sign === "POSITIVE", false);
+});

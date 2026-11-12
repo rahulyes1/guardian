@@ -13,7 +13,7 @@ import { verifyAgainstBhav, isPlaceholderSymbol } from "./lib/marketChecks.js";
 
 export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 
-const LOCAL_KEY       = "td_mq_v4";   // v4: adds per-sector stock rankings (sector_stocks)
+const LOCAL_KEY       = "td_mq_v5";   // v5: Nitin R framework — sustained bias, 3-state trend, environment
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
@@ -81,7 +81,7 @@ export function configureSharedStore(getClient) { sharedClientGetter = getClient
 
 function looksValid(d) {
   return d && MQ_SIGNALS.includes(d.overall) && Array.isArray(d.history) && typeof d.total === "number" && d.total >= 400
-    && d.sector_stocks && typeof d.sector_stocks === "object";
+    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state;
 }
 async function readShared() {
   const sb = sharedClientGetter?.();
@@ -234,6 +234,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
       closes,
       s200: smaSeries(closes, 200, 150),
       s50:  smaSeries(closes, 50, 40),
+      s20:  smaSeries(closes, 20, 15),
       s10:  smaSeries(closes, 10, 8),
       h252: rollExtreme(closes, 252, true), l252: rollExtreme(closes, 252, false),
       h20:  rollExtreme(closes, 20, true),  l20:  rollExtreme(closes, 20, false),
@@ -254,9 +255,9 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     }
     return tot > 0 ? (cnt / tot) * 100 : null;
   };
-  const p200 = [], p50 = [], p10 = [], nnh52 = [];
+  const p200 = [], p50 = [], p20 = [], p10 = [], nnh52 = [];
   for (let i = 0; i < nRows; i++) {
-    p200.push(pctAt("s200", i)); p50.push(pctAt("s50", i)); p10.push(pctAt("s10", i));
+    p200.push(pctAt("s200", i)); p50.push(pctAt("s50", i)); p20.push(pctAt("s20", i)); p10.push(pctAt("s10", i));
     let nh = 0, nl = 0;
     for (const s of stocks) {
       const c = s.closes[i];
@@ -267,7 +268,39 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     nnh52.push(nh - nl);
   }
 
-  // Momentum: weekly snapshots of %>50-SMA, 4-week ROC vs its average
+  // ── Model (after Nitin R's Market Quadrant framework) ──────────────────────
+  // Bias:     regime from % above 200-SMA; it only flips after BIAS_DAYS straight
+  //           sessions on the other side of 50% (otherwise "turning").
+  // Trend:    UP = most stocks above 50-SMA AND 52w net new highs > 0 for 3 sessions;
+  //           DOWN = the reverse; anything mixed = SIDEWAYS.
+  // Swing:    UPSWING = ≥50% above 10-SMA and 10-day breadth ≥ 20-day breadth;
+  //           DOWNSWING = the reverse; otherwise CHOPPY.
+  // Momentum: 4-week change in % above 50-SMA. Sign = its 10-week average (POSITIVE/
+  //           NEGATIVE); direction = latest 4-week change vs that average (IMPROVING/WORSENING).
+  const BIAS_DAYS = 20;
+  const regime = new Array(nRows).fill(null), sideRun = new Array(nRows).fill(0), side = new Array(nRows).fill(null);
+  {
+    let cur = null, s = null, run = 0;
+    for (let i = 0; i < nRows; i++) {
+      const v = p200[i];
+      if (v != null) {
+        const now = v >= 50 ? "BULL" : "BEAR";
+        if (now === s) run++; else { s = now; run = 1; }
+        if (run >= BIAS_DAYS) cur = s;
+      }
+      regime[i] = cur ?? s; side[i] = s; sideRun[i] = run;
+    }
+  }
+  const trendAt = (i) => {
+    if (p50[i] == null || i < 2) return null;
+    const pos = nnh52[i] > 0 && nnh52[i - 1] > 0 && nnh52[i - 2] > 0;
+    const neg = nnh52[i] < 0 && nnh52[i - 1] < 0 && nnh52[i - 2] < 0;
+    return p50[i] >= 50 && pos ? "UP" : p50[i] < 50 && neg ? "DOWN" : "SIDEWAYS";
+  };
+  const swingAt = (i) => {
+    if (p10[i] == null || p20[i] == null) return null;
+    return p10[i] >= 50 && p10[i] >= p20[i] ? "UPSWING" : p10[i] < 50 && p10[i] <= p20[i] ? "DOWNSWING" : "CHOPPY";
+  };
   const momentumAt = (i) => {
     const w = [];
     for (let k = 0; k < 14; k++) {
@@ -283,12 +316,12 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   };
   const signalAt = (i) => {
     if (i < 199 || p200[i] == null || p50[i] == null || p10[i] == null) return null;
-    const b = (p200[i] >= 50 ? 1 : 0) + (p50[i] >= 50 && nnh52[i] > 0 ? 1 : 0) + (p10[i] >= 50 ? 1 : 0) + (momentumAt(i).rising ? 1 : 0);
+    const b = (regime[i] === "BULL" ? 1 : 0) + (trendAt(i) === "UP" ? 1 : 0) + (swingAt(i) === "UPSWING" ? 1 : 0) + (momentumAt(i).rising ? 1 : 0);
     return b >= 3 ? "INVEST" : b === 2 ? "SELECTIVE" : "CASH";
   };
 
   // ── today ──
-  const pct200 = r1(p200[last] ?? 0), pct50 = r1(p50[last] ?? 0), pct10 = r1(p10[last] ?? 0);
+  const pct200 = r1(p200[last] ?? 0), pct50 = r1(p50[last] ?? 0), pct20 = r1(p20[last] ?? 0), pct10 = r1(p10[last] ?? 0);
   let above200 = 0, above50 = 0, above10 = 0, newHighs = 0, newLows = 0;
   let nnh20h = 0, nnh20l = 0, nnh65h = 0, nnh65l = 0;
   for (const s of stocks) {
@@ -305,11 +338,16 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     if (s.l65[last]  != null && c <= s.l65[last]  * 1.01) nnh65l++;
   }
   const nnh52w = newHighs - newLows, nnh20 = nnh20h - nnh20l, nnh65 = nnh65h - nnh65l;
-  const bias = pct200 >= 50 ? "BULL" : "BEAR";
-  const trend = pct50 >= 50 && nnh52w > 0 ? "UP" : "DOWN";
-  const swing = pct10 >= 70 ? "HOT" : pct10 >= 50 ? "WARM" : pct10 >= 30 ? "COOL" : "COLD";
+  const bias = regime[last] || (pct200 >= 50 ? "BULL" : "BEAR");
+  const biasTurning = Boolean(side[last] && side[last] !== bias); // crossed 50% but not yet sustained
+  const biasDays = sideRun[last];                                 // sessions on the current side of 50%
+  const trend = trendAt(last) || "SIDEWAYS";
+  const swingState = swingAt(last) || "CHOPPY";
+  const swing = pct10 >= 70 ? "HOT" : pct10 >= 50 ? "WARM" : pct10 >= 30 ? "COOL" : "COLD"; // heat (kept for compatibility)
   const mom = momentumAt(last);
   const momentum = mom.rising ? "RISING" : "FALLING";
+  const momentumSign = mom.ma > 0 ? "POSITIVE" : "NEGATIVE"; // smoothed momentum level (10-wk avg of 4-wk ROC)
+  const momentumDir = mom.rising ? "IMPROVING" : "WORSENING";
   const overall = signalAt(last) ?? "CASH";
 
   // Breadth thrust: %>10-SMA now > 40 after being < 25 within the last 12 sessions
@@ -321,6 +359,28 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     }
   }
 
+  // ── Trading environment ──
+  // Lockout rally: long-term bear, but short-term breadth went from washed-out to
+  // stretched within 15 sessions — stocks run away without normal pullback entries.
+  let minP10 = Infinity;
+  for (let k = 0; k <= 15 && last - k >= 0; k++) if (p10[last - k] != null) minP10 = Math.min(minP10, p10[last - k]);
+  const lockout = bias === "BEAR" && pct10 >= 70 && minP10 < 30;
+  const envName = bias === "BULL" && trend === "UP" && swingState === "UPSWING" ? "EASY MONEY"
+    : bias === "BEAR" && trend === "DOWN" && swingState === "DOWNSWING" ? "NO MONEY" : "HARD MONEY";
+  const ENV_TEXT = {
+    "EASY MONEY": "Broad participation — most clean setups follow through. Normal size; let winners run.",
+    "HARD MONEY": "Mixed breadth — only the best setups and stronger pockets work. Be selective, size smaller, take profits quicker.",
+    "NO MONEY": "Most structures are breaking down. Protect capital: sit out or trade very small.",
+  };
+  const environment = {
+    name: envName,
+    text: ENV_TEXT[envName],
+    lockout,
+    lockout_text: lockout
+      ? "Lockout rally: stocks are running without normal pullback entries. Options: (1) drop to a lower timeframe for entries, (2) accept unconventional entries on the daily chart, or (3) sit out until a pause builds fresh setups. Index ETFs often give the cleanest risk/reward here."
+      : null,
+  };
+
   let score = Math.min(pct10 * 0.4, 40);
   if (nnh20 > 0) score += 20;
   if (nnh65 > 0) score += 20;
@@ -329,7 +389,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   // ── history (every row that has a signal) ──
   const history = [];
   for (let i = 199; i < nRows; i++) {
-    history.push({ d: axis[i], p200: r1(p200[i]), p50: r1(p50[i]), p10: r1(p10[i]), nnh: nnh52[i], sig: signalAt(i) });
+    history.push({ d: axis[i], p200: r1(p200[i]), p50: r1(p50[i]), p20: r1(p20[i]), p10: r1(p10[i]), nnh: nnh52[i], sig: signalAt(i) });
   }
   let phaseWeeks = 0;
   for (let w = 1; w <= 52; w++) {
@@ -338,21 +398,33 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
 
   // ── to upgrade (each condition carries its unit for display) ──
   const toUpgrade = [];
+  const nnhPos3 = nnh52[last] > 0 && nnh52[last - 1] > 0 && nnh52[last - 2] > 0;
   const investConds = () => {
     const c = [];
-    if (pct200 < 50) c.push({ metric: "Long-term breadth (200-SMA)", current: pct200, needs: 50, gap: r1(50 - pct200), unit: "%" });
-    if (pct50 < 50)  c.push({ metric: "Medium breadth (50-SMA)", current: pct50, needs: 50, gap: r1(50 - pct50), unit: "%" });
-    if (nnh52w <= 0) c.push({ metric: "Net New Highs (52-week)", current: nnh52w, needs: "> 0", gap: Math.abs(nnh52w) + 1, unit: "" });
+    if (bias !== "BULL") {
+      if (pct200 >= 50) c.push({ metric: "Bias: sessions with ≥50% above 200-SMA", current: biasDays, needs: BIAS_DAYS, gap: BIAS_DAYS - biasDays, unit: "d" });
+      else c.push({ metric: "Long-term breadth (200-SMA), then hold 20 sessions", current: pct200, needs: 50, gap: r1(50 - pct200), unit: "%" });
+    }
+    if (trend !== "UP") {
+      if (pct50 < 50) c.push({ metric: "Medium breadth (50-SMA)", current: pct50, needs: 50, gap: r1(50 - pct50), unit: "%" });
+      if (!nnhPos3) c.push({ metric: "Net New Highs (52w) positive 3 sessions", current: nnh52w, needs: "> 0 ×3", gap: nnh52w > 0 ? "hold" : Math.abs(nnh52w) + 1, unit: "" });
+    }
+    return c;
+  };
+  const swingConds = () => {
+    const c = [];
+    if (swingState !== "UPSWING") {
+      if (pct10 < 50) c.push({ metric: "Swing breadth (10-SMA)", current: pct10, needs: 50, gap: r1(50 - pct10), unit: "%" });
+      if (pct10 < pct20) c.push({ metric: "10-day breadth ≥ 20-day breadth", current: pct10, needs: `≥ ${pct20}%`, gap: r1(pct20 - pct10), unit: "%" });
+    }
+    if (!mom.rising) c.push({ metric: "Momentum (4-wk ROC, pts)", current: r1(mom.raw), needs: `> ${r1(mom.ma)}`, gap: r1(mom.ma - mom.raw), unit: "" });
     return c;
   };
   if (overall === "CASH") {
-    const sc = [];
-    if (pct10 < 50) sc.push({ metric: "Swing breadth (10-SMA)", current: pct10, needs: 50, gap: r1(50 - pct10), unit: "%" });
-    if (!mom.rising) sc.push({ metric: "Momentum (4-wk ROC, pts)", current: r1(mom.raw), needs: `> ${r1(mom.ma)}`, gap: r1(mom.ma - mom.raw), unit: "" });
-    if (sc.length) toUpgrade.push({ to: "SELECTIVE", conditions: sc });
+    const sc = swingConds(); if (sc.length) toUpgrade.push({ to: "SELECTIVE", conditions: sc });
     const ic = investConds(); if (ic.length) toUpgrade.push({ to: "INVEST", conditions: ic });
   } else if (overall === "SELECTIVE") {
-    const ic = investConds(); if (ic.length) toUpgrade.push({ to: "INVEST", conditions: ic });
+    const ic = [...investConds(), ...swingConds()]; if (ic.length) toUpgrade.push({ to: "INVEST", conditions: ic });
   }
 
   // ── sectors ──
@@ -395,6 +467,14 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     .sort((a, b) => (b.ret12m ?? b.ret3m ?? -999) - (a.ret12m ?? a.ret3m ?? -999))
     .slice(0, 15);
 
+  // ── sector momentum: equal-weight 1-month return of each sector's stocks ──
+  for (const sec of sectors) {
+    const rets = (bySector[sec.name] || []).map(s => retOver(s, 21)).filter(Number.isFinite);
+    sec.ret1m = rets.length ? r1((rets.reduce((x, y) => x + y, 0) / rets.length) * 100) : null;
+  }
+  const momentumLeaders = sectors.filter(x => x.ret1m != null && x.ret1m > 0)
+    .sort((x, y) => y.ret1m - x.ret1m).slice(0, 5).map(x => ({ name: x.name, ret1m: x.ret1m }));
+
   // ── per-sector rankings: the stocks carrying each sector, strongest first ──
   // Rank: above 50-SMA first, then 3-month return (relative strength), then 1-month.
   const r1n = (v) => (Number.isFinite(v) ? r1(v * 100) : null);
@@ -419,6 +499,10 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   const asOf = axis[last];
   return {
     bias, trend, swing, momentum,
+    bias_turning: biasTurning, bias_days: biasDays, bias_needed: BIAS_DAYS,
+    swing_state: swingState, momentum_sign: momentumSign, momentum_dir: momentumDir,
+    momentum_leaders: momentumLeaders, environment,
+    pct_above_20: pct20,
     swing_confidence: Math.round(score), momentum_change: r1(mom.raw - mom.ma),
     pct_above_200: pct200, pct_above_50: pct50, pct_above_10: pct10,
     above_200: above200, above_50: above50, above_10: above10, total: N,
