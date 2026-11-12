@@ -1350,38 +1350,8 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
 
   return (
     <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
-      {/* Regime Banner */}
-      <div className="card" style={{
-        marginBottom: 14,
-        background: `linear-gradient(135deg, ${cfg.bg} 0%, var(--bg2) 60%)`,
-        border: `1.5px solid ${cfg.color}`,
-        boxShadow: cfg.glow,
-      }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-          <div>
-            <div className="label">Market Regime</div>
-            <div style={{ fontFamily: "var(--display)", fontSize: 36, color: cfg.color, lineHeight: 1 }}>
-              {cfg.label}
-            </div>
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {Object.keys(REGIME_CONFIG).map(r => (
-              <button key={r} onClick={() => setRegime(r)}
-                className="chip"
-                style={regime === r ? { borderColor: REGIME_CONFIG[r].color, color: REGIME_CONFIG[r].color, background: REGIME_CONFIG[r].bg } : { borderColor: THEME_TOKENS.selectorInactiveBorder, color: THEME_TOKENS.selectorInactiveText }}
-              >
-                {r.toUpperCase()}
-              </button>
-            ))}
-            {regimeSince && (
-              <div style={{ fontSize: 10, color: "var(--text3)", fontFamily: "var(--mono)", textAlign: "center", marginTop: 2 }}>
-                Since {new Date(regimeSince).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
-              </div>
-            )}
-          </div>
-        </div>
-        <div style={{ fontSize: 13, color: "var(--text2)", lineHeight: 1.5 }}>{cfg.text}</div>
-      </div>
+      {/* Market brief — regime and rules come from the data, not a manual toggle */}
+      <MarketBrief onOpenQuad={() => setPage("quadrant")} onOpenScan={() => setPage("scan")} />
 
       {/* Portfolio Value Edit */}
       <div className="card" style={{ marginBottom: 14 }}>
@@ -3211,7 +3181,7 @@ function MarketQuadrantPage({ onPickStock }) {
         <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 8 }}>
           Nifty 500 · {data.total} stocks · {data.phase_weeks > 0 ? `${data.phase_weeks}w in this phase` : "new phase"} · as of {mqFmtDate(data.as_of)}{data.final ? "" : " (intraday)"}
         </div>
-        <div style={{ fontSize: 11, color: sigColor, marginTop: 6, fontWeight: 600 }}>{MQ_POS_RULE[data.overall]}</div>
+        <div style={{ fontSize: 11, color: sigColor, marginTop: 6, fontWeight: 600 }}>{data.environment ? briefRule(data) : MQ_POS_RULE[data.overall]}</div>
         {data.thrust_detected && (
           <div style={{ marginTop: 10, background: "rgba(74,222,128,0.12)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 8, padding: "6px 10px", fontSize: 11, color: "#4ADE80", fontWeight: 700, letterSpacing: "0.1em" }}>
             ⚡ BREADTH THRUST DETECTED
@@ -3359,8 +3329,6 @@ function MarketSignalBanner({ onOpen }) {
   const cautions = [
     ftWeak && `Breakouts failing: only ${ft.rate}% of recent pocket pivots held`,
     ft && ft.label === "MIXED" && `Follow-through mixed (${ft.rate}%) — breakouts are a coin flip`,
-    data.lows_ok === false && `${data.new_lows} stocks at 52-week lows — reduce size`,
-    data.environment?.lockout && "Lockout rally — few clean entries",
   ].filter(Boolean);
   const warn = data.overall !== "INVEST" || ftWeak || data.lows_ok === false;
   return (
@@ -3371,7 +3339,7 @@ function MarketSignalBanner({ onOpen }) {
         <div style={{ fontSize: 12, fontWeight: 700, color: c, letterSpacing: "0.04em" }}>
           Market {data.overall}{stale ? " (stale)" : ""}
         </div>
-        <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 2 }}>{MQ_POS_RULE[data.overall]}</div>
+        <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 2 }}>{data.environment ? briefRule(data) : MQ_POS_RULE[data.overall]}</div>
         {cautions.map(t => (
           <div key={t} style={{ fontSize: 11, color: "#F59E0B", marginTop: 3 }}>⚠ {t}</div>
         ))}
@@ -3434,12 +3402,246 @@ function MarketSignalStats({ closed }) {
   );
 }
 
+// ─── MARKET BRIEF (TODAY) & SCAN — information-first views built on QUAD data ─
+
+/** One-line rule for today, from signal + environment + follow-through + lows. */
+function briefRule(d) {
+  const env = d.environment?.name;
+  let rule;
+  if (d.overall === "CASH" || env === "NO MONEY") rule = "No new entries. Protect capital; let stops do their job.";
+  else if (env === "HARD MONEY") rule = d.environment?.lockout
+    ? "Small size. Prefer index ETFs or lower-timeframe entries; don't chase extended stocks."
+    : "Half size. Only A+ setups in HOT/WARM sectors; take profits quicker.";
+  else rule = d.follow_through?.label === "STRONG"
+    ? "Full size on A-grade setups in HOT/WARM sectors; let winners run."
+    : "Normal size, but wait for follow-through — breakouts are a coin flip right now.";
+  if (d.lows_ok === false) rule += ` ${d.new_lows} stocks at 52-week lows — cap size.`;
+  return rule;
+}
+
+/** "What changed since the previous session" bullets, most important first. */
+function briefChanges(d) {
+  const h = d.history || [];
+  const prev = h.length >= 2 ? h[h.length - 2] : null;
+  const out = [];
+  if (prev?.sig && prev.sig !== d.overall) out.push({ tone: MQ_SIGNAL_COLOR[d.overall], text: `Signal changed ${prev.sig} → ${d.overall}` });
+  if (d.bias_turning) out.push({ tone: "#F59E0B", text: `Bias ${d.bias} is turning ${d.bias === "BEAR" ? "up" : "down"}: ${d.bias_days}/${d.bias_needed} sessions ${d.bias === "BEAR" ? "above" : "below"} 50% (200-SMA)` });
+  if (d.environment?.lockout) out.push({ tone: "#F59E0B", text: "Lockout rally — stocks running without clean pullback entries" });
+  if (d.thrust_detected) out.push({ tone: "#4ADE80", text: "Breadth thrust: 10-day breadth jumped from washed-out levels" });
+  if (prev) {
+    for (const [k, label] of [["p200", "200-SMA"], ["p50", "50-SMA"], ["p10", "10-SMA"]]) {
+      const cur = { p200: d.pct_above_200, p50: d.pct_above_50, p10: d.pct_above_10 }[k];
+      const delta = cur != null && prev[k] != null ? +(cur - prev[k]).toFixed(1) : 0;
+      if (Math.abs(delta) >= 3) out.push({ tone: delta > 0 ? "#4ADE80" : "#DC143C", text: `% above ${label} ${delta > 0 ? "up" : "down"} ${Math.abs(delta)} pts to ${cur}%` });
+    }
+  }
+  const ft = d.follow_through;
+  if (ft?.rate != null) {
+    const past = ft.history?.[ft.history.length - 6];
+    const was = past?.rate != null ? (past.rate >= FT_BANDS.strong ? "STRONG" : past.rate >= FT_BANDS.weak ? "MIXED" : "WEAK") : null;
+    out.push({ tone: FT_COLOR[ft.label], text: was && was !== ft.label ? `Follow-through ${was} → ${ft.label} (${ft.rate}%) over the past week` : `Follow-through ${ft.label} (${ft.rate}% of recent breakouts holding)` });
+  }
+  const moved = (d.sectors || []).filter(s => s.status_d1 && s.status !== s.status_d1 && s.status !== "—" && s.status_d1 !== "—");
+  const rank = { COLD: 0, COOL: 1, WARM: 2, HOT: 3 };
+  for (const s of moved.sort((a, b) => Math.abs(rank[b.status] - rank[b.status_d1]) - Math.abs(rank[a.status] - rank[a.status_d1])).slice(0, 4)) {
+    out.push({ tone: rank[s.status] > rank[s.status_d1] ? "#4ADE80" : "#DC143C", text: `${s.name}: ${s.status_d1} → ${s.status}` });
+  }
+  if (d.leaders_new?.length) out.push({ tone: "#4ADE80", text: `New leaders: ${d.leaders_new.slice(0, 5).join(", ")}` });
+  if (d.scans?.pivots_total) out.push({ tone: "var(--text2)", text: `${d.scans.pivots_total} pocket pivots today` });
+  return out;
+}
+
+function MarketBrief({ onOpenQuad, onOpenScan }) {
+  const { data, loading, error, progress, retry } = useMarketQuadrant();
+  if (!data?.history) {
+    return (
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="label">Market Brief</div>
+        {error ? (
+          <>
+            <div style={{ fontSize: 12, color: "var(--red)", marginTop: 6 }}>{error}</div>
+            <button className="btn-ghost" style={{ marginTop: 10 }} onClick={retry}>Retry</button>
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize: 12, color: "var(--text3)", margin: "8px 0" }}>{loading ? progress.msg : "Loading…"}</div>
+            <div style={{ height: 3, background: "var(--border)", borderRadius: 3, overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${Math.round(progress.pct)}%`, background: "var(--text2)", transition: "width 0.4s ease" }} />
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+  const d = data;
+  const sigColor = MQ_SIGNAL_COLOR[d.overall];
+  const envColor = MQ_ENV_COLOR[d.environment?.name] || "var(--text2)";
+  const verified = d.verification && d.verification.date === d.as_of;
+  const changes = briefChanges(d);
+  const chips = [
+    ["BIAS", d.bias + (d.bias_turning ? " ↗" : "")], ["TREND", d.trend], ["SWING", d.swing_state],
+    ["MOMENTUM", `${d.momentum_sign === "POSITIVE" ? "POS" : "NEG"} ${d.momentum_dir === "IMPROVING" ? "↗" : "↘"}`],
+  ];
+  return (
+    <div className="card" style={{ marginBottom: 14, border: `1.5px solid ${sigColor}55`, background: `linear-gradient(135deg, ${sigColor}12 0%, var(--bg2) 60%)` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+        <div className="label">Market Brief · {mqFmtDate(d.as_of)}</div>
+        <span style={{ fontSize: 10, color: verified ? "#4ADE80" : d.final ? "var(--amber)" : "var(--text3)" }}>
+          {verified ? "✓ NSE-verified" : d.final ? "awaiting NSE close" : "intraday"}
+        </span>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 4 }}>
+        <span style={{ fontFamily: "var(--display)", fontSize: 34, color: sigColor, lineHeight: 1 }}>{d.overall}</span>
+        <span style={{ fontSize: 11, fontWeight: 700, color: envColor, border: `1px solid ${envColor}66`, borderRadius: 12, padding: "2px 8px" }}>{d.environment?.name}</span>
+        {d.environment?.lockout && <span style={{ fontSize: 11, color: "#F59E0B" }}>🔒 lockout</span>}
+      </div>
+      <div style={{ fontSize: 13, color: "var(--text)", marginTop: 8, lineHeight: 1.45 }}>{briefRule(d)}</div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6, marginTop: 12 }}>
+        {chips.map(([k, v]) => (
+          <div key={k} style={{ background: "var(--bg3)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 6px", minWidth: 0 }}>
+            <div style={{ fontSize: 8, color: "var(--text3)", letterSpacing: "0.12em" }}>{k}</div>
+            <div style={{ fontSize: 11, fontWeight: 700, marginTop: 2, color: k === "MOMENTUM" ? (v === "POS ↗" ? "#4ADE80" : v === "NEG ↘" ? "#DC143C" : "#F59E0B") : (MQ_DIM_COLOR[v.split(" ")[0]] || "var(--text)"), whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{v}</div>
+          </div>
+        ))}
+      </div>
+
+      {changes.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.12em", marginBottom: 6 }}>WHAT CHANGED</div>
+          {changes.slice(0, 8).map((c, i) => (
+            <div key={i} style={{ display: "flex", gap: 8, fontSize: 12, color: "var(--text2)", padding: "3px 0", lineHeight: 1.4 }}>
+              <span style={{ width: 6, height: 6, borderRadius: 3, background: c.tone, marginTop: 6, flexShrink: 0 }} />
+              <span>{c.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {d.momentum_leaders?.length > 0 && (
+        <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 10 }}>
+          Leading sectors: {d.momentum_leaders.slice(0, 4).map(m => `${m.name} +${m.ret1m}%`).join(" · ")}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+        <button className="btn-primary" style={{ flex: 1, padding: "10px 8px", fontSize: 12 }} onClick={onOpenScan}>
+          SCAN · {(d.scans?.pivots_total || 0) + (d.scans?.tight_total || 0) + (d.scans?.reclaim50_total || 0)} ideas
+        </button>
+        <button className="btn-ghost" style={{ flex: 1, padding: "10px 8px", fontSize: 12 }} onClick={onOpenQuad}>Full QUAD ›</button>
+      </div>
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 8 }}>
+        Header regime ({d.bias}) is set automatically from this breadth data.
+      </div>
+    </div>
+  );
+}
+
+const SCAN_DEFS = [
+  { id: "pivots", label: "Pivots today", hint: "Up ≥4.5% today on volume above yesterday's and the 50-day average — fresh institutional demand.",
+    cols: [["CHG", r => r.chg != null ? `+${r.chg}%` : "—"], ["VOL×", r => r.volx != null ? `${r.volx}×` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"]] },
+  { id: "leaders", label: "Leaders · hot sectors", hint: "Above 10/50/200-SMA, within 5% of 52-week high, in a HOT or WARM sector.",
+    cols: [["12M", r => r.ret12m != null ? `${r.ret12m > 0 ? "+" : ""}${r.ret12m}%` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"], ["HIGH", r => r.off_high != null ? `${r.off_high}%` : "—"]] },
+  { id: "tight", label: "Tight near highs", hint: "Above 50 & 200-SMA, within 10% of the 52-week high, last 10 closes in a ≤6% range — low-volatility setups.",
+    cols: [["RANGE", r => r.range10 != null ? `${r.range10}%` : "—"], ["HIGH", r => r.off_high != null ? `${r.off_high}%` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"]] },
+  { id: "reclaim50", label: "Reclaimed 50-SMA", hint: "Closed back above the 50-day average today after being below it yesterday.",
+    cols: [["200↑", r => (r.a200 ? "yes" : "no")], ["HIGH", r => r.off_high != null ? `${r.off_high}%` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"]] },
+];
+
+function ScanPage({ onPickStock }) {
+  const { data, loading, error, progress, retry } = useMarketQuadrant();
+  const [tab, setTab] = useState(() => { try { return localStorage.getItem("td_scan_tab") || "pivots"; } catch (_) { return "pivots"; } });
+  const pick = (id) => { setTab(id); try { localStorage.setItem("td_scan_tab", id); } catch (_) {} };
+
+  const head = (
+    <div style={{ marginBottom: 14 }}>
+      <div className="section-title">Scan</div>
+      <div style={{ fontSize: 13, color: "var(--text3)", marginTop: 4 }}>Nifty 500 setups from today's close. Tap a stock to plan it.</div>
+    </div>
+  );
+  if (!data?.scans) {
+    return (
+      <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
+        {head}
+        <div className="card" style={{ fontSize: 12, color: error ? "var(--red)" : "var(--text3)" }}>
+          {error || (loading ? progress.msg : "Loading…")}
+          {error && <button className="btn-ghost" style={{ marginTop: 10, width: "100%" }} onClick={retry}>Retry</button>}
+        </div>
+      </div>
+    );
+  }
+
+  const statusOf = Object.fromEntries((data.sectors || []).map(s => [s.name, s.status]));
+  const lists = {
+    pivots: data.scans.pivots, tight: data.scans.tight, reclaim50: data.scans.reclaim50,
+    leaders: (data.leaders || []).filter(l => ["HOT", "WARM"].includes(statusOf[l.sector])),
+  };
+  const totals = { pivots: data.scans.pivots_total, tight: data.scans.tight_total, reclaim50: data.scans.reclaim50_total, leaders: lists.leaders.length };
+  const def = SCAN_DEFS.find(x => x.id === tab) || SCAN_DEFS[0];
+  const rows = lists[def.id] || [];
+  const verified = data.verification && data.verification.date === data.as_of;
+
+  return (
+    <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
+      {head}
+      <MarketSignalBanner />
+      <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4, marginBottom: 10, scrollbarWidth: "none" }}>
+        {SCAN_DEFS.map(x => (
+          <button key={x.id} onClick={() => pick(x.id)} className="chip" aria-pressed={x.id === def.id}
+            style={x.id === def.id ? { borderColor: "var(--text)", color: "var(--text)", whiteSpace: "nowrap" } : { whiteSpace: "nowrap" }}>
+            {x.label} <span style={{ fontFamily: "var(--mono)", opacity: 0.7 }}>{totals[x.id] ?? 0}</span>
+          </button>
+        ))}
+      </div>
+      <div className="card">
+        <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 10, lineHeight: 1.45 }}>{def.hint}</div>
+        {rows.length === 0 ? (
+          <div style={{ fontSize: 12, color: "var(--text3)", padding: "16px 0", textAlign: "center" }}>Nothing qualifies today.</div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", columnGap: 12, fontSize: 12 }}>
+            <span style={{ fontSize: 9, color: "var(--text3)", paddingBottom: 6 }}>STOCK</span>
+            {def.cols.map(([h]) => <span key={h} style={{ fontSize: 9, color: "var(--text3)", textAlign: "right" }}>{h}</span>)}
+            {rows.map(r => {
+              const st = statusOf[r.sector];
+              return (
+                <Fragment key={r.sym}>
+                  <div style={{ padding: "7px 0", borderTop: "1px solid var(--border)", minWidth: 0 }}>
+                    <button onClick={() => onPickStock?.(r.sym)} title={`Plan a trade in ${r.sym}`}
+                      style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", font: "inherit", fontFamily: "var(--display)", fontWeight: 700, letterSpacing: "0.02em", textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{r.sym}</button>
+                    <div style={{ fontSize: 10, color: "var(--text3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {r.sector}{st && st !== "—" && <span style={{ color: MQ_DIM_COLOR[st], marginLeft: 4 }}>· {st}</span>}
+                    </div>
+                  </div>
+                  {def.cols.map(([h, f]) => (
+                    <div key={h} style={{ padding: "7px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: "var(--text2)" }}>{f(r)}</div>
+                  ))}
+                </Fragment>
+              );
+            })}
+          </div>
+        )}
+        {totals[def.id] > rows.length && (
+          <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 8 }}>Showing top {rows.length} of {totals[def.id]} (strongest 3-month relative strength first).</div>
+        )}
+      </div>
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 10 }}>
+        Data as of {mqFmtDate(data.as_of)} {verified ? "· ✓ closes verified against NSE" : data.final ? "· awaiting NSE's official closes" : "· intraday"}. Ideas, not recommendations — check the chart and your plan.
+      </div>
+    </div>
+  );
+}
+
 // ─── BOTTOM NAV ──────────────────────────────────────────────────────────────
 function BottomNav({ page, setPage }) {
   const tabs = [
     { id: "today", label: "TODAY", icon: (
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
         <rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
+      </svg>
+    )},
+    { id: "scan", label: "SCAN", icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><polyline points="8 12 10 10 12 12 14 9"/>
       </svg>
     )},
     { id: "calc", label: "CALC", icon: (
@@ -3512,6 +3714,19 @@ export default function App() {
     setRegimeSince(new Date().toISOString());
   };
 
+  const pickStock = (sym) => { setCalcSymbol(sym); setPage("calc"); window.scrollTo(0, 0); };
+
+  // Regime follows QUAD's Bias automatically (BULL/BEAR from Nifty 500 breadth), so the
+  // header badge can never contradict the data. Re-checked whenever the page changes.
+  useEffect(() => {
+    let alive = true;
+    loadMarketQuadrant().then((d) => {
+      const next = d?.bias ? d.bias.toLowerCase() : null;
+      if (alive && next && REGIME_CONFIG[next] && next !== regime) handleRegimeChange(next);
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, [page, regime]);
+
   const handleSendToJournal = (data) => {
     setPrefill(data);
     setPage("journal");
@@ -3536,8 +3751,11 @@ export default function App() {
       {page === "analytics" && (
         <AnalyticsPage trades={trades} portfolio={portfolio} />
       )}
+      {page === "scan" && (
+        <ScanPage onPickStock={pickStock} />
+      )}
       {page === "quadrant" && (
-        <MarketQuadrantPage onPickStock={(sym) => { setCalcSymbol(sym); setPage("calc"); window.scrollTo(0, 0); }} />
+        <MarketQuadrantPage onPickStock={pickStock} />
       )}
 
       <BottomNav page={page} setPage={setPage} />

@@ -13,7 +13,7 @@ import { verifyAgainstBhav, isPlaceholderSymbol } from "./lib/marketChecks.js";
 
 export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 
-const LOCAL_KEY       = "td_mq_v6";   // v6: follow-through gauge + 52-week-lows check
+const LOCAL_KEY       = "td_mq_v7";   // v7: SCAN lists + day-over-day changes
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
@@ -88,7 +88,7 @@ export function configureSharedStore(getClient) { sharedClientGetter = getClient
 
 function looksValid(d) {
   return d && MQ_SIGNALS.includes(d.overall) && Array.isArray(d.history) && typeof d.total === "number" && d.total >= 400
-    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d;
+    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans;
 }
 async function readShared() {
   const sb = sharedClientGetter?.();
@@ -500,11 +500,13 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     .map(([name, list]) => {
       const sp50 = pctAt("s50", last, list);
       const sp50Prev = last >= 20 ? pctAt("s50", last - 20, list) : null;
+      const sp50D1 = last >= 1 ? pctAt("s50", last - 1, list) : null;
       return {
         name, n: list.length,
         p50: r1(sp50), p200: r1(pctAt("s200", last, list)), p10: r1(pctAt("s10", last, list)),
         p50_chg: sp50 != null && sp50Prev != null ? r1(sp50 - sp50Prev) : null,
         status: sectorStatus(sp50),
+        status_d1: sectorStatus(sp50D1),
       };
     })
     .sort((a, b) => (b.p50 ?? -1) - (a.p50 ?? -1));
@@ -531,6 +533,60 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     .map(l => ({ ...l, ret12m: Number.isFinite(l.ret12m) ? l.ret12m : null, ret3m: Number.isFinite(l.ret3m) ? l.ret3m : null }))
     .sort((a, b) => (b.ret12m ?? b.ret3m ?? -999) - (a.ret12m ?? a.ret3m ?? -999))
     .slice(0, 15);
+
+  // ── yesterday's leaders (to flag new ones) ──
+  const isLeaderAt = (s, i) => {
+    const c = s.closes[i];
+    return c != null && s.s10[i] != null && s.s50[i] != null && s.s200[i] != null && s.h252[i] != null
+      && c > s.s10[i] && c > s.s50[i] && c > s.s200[i] && c >= s.h252[i] * 0.95;
+  };
+  const leadersNew = leaders.filter(l => {
+    const st = stocks.find(x => x.sym === l.sym);
+    return st && last >= 1 && !isLeaderAt(st, last - 1);
+  }).map(l => l.sym);
+
+  // ── SCANS (each list strongest first, max 15) ──
+  const ret3 = (s) => { const r = retOver(s, 63); return Number.isFinite(r) ? r1(r * 100) : null; };
+  const base = (s) => ({ sym: s.sym, sector: sectorMap[s.sym] || "Other", ret3m: ret3(s),
+    off_high: s.h252[last] != null && s.closes[last] != null ? r1((s.closes[last] / s.h252[last] - 1) * 100) : null });
+  const byRs = (a, b) => (b.ret3m ?? -999) - (a.ret3m ?? -999);
+  // 1. Pocket pivots today: ≥4.5% up on volume above yesterday's and the 50-day average
+  const scanPivots = [];
+  if (volumes) {
+    for (const s of stocks) {
+      const v = volumes[s.ticker]; const c = s.closes;
+      if (!v || c[last] == null || c[last - 1] == null || v[last] == null || v[last - 1] == null) continue;
+      const chg = c[last] / c[last - 1] - 1;
+      if (chg < 0.045 || v[last] <= v[last - 1]) continue;
+      let sum = 0, cnt = 0;
+      for (let k = last - 50; k < last; k++) if (k >= 0 && v[k] != null) { sum += v[k]; cnt++; }
+      if (cnt < 20 || v[last] <= sum / cnt) continue;
+      scanPivots.push({ ...base(s), chg: r1(chg * 100), volx: r1(v[last] / (sum / cnt)) });
+    }
+    scanPivots.sort((a, b) => b.volx * b.chg - a.volx * a.chg);
+  }
+  // 2. Tight near highs: above 50 & 200-SMA, within 10% of 52w high, last 10 closes in a ≤6% range
+  const scanTight = stocks.filter(s => {
+    const c = s.closes[last];
+    if (c == null || s.s50[last] == null || s.s200[last] == null || s.h252[last] == null) return false;
+    if (!(c > s.s50[last] && c > s.s200[last] && c >= s.h252[last] * 0.9)) return false;
+    const w = s.closes.slice(last - 9, last + 1).filter(x => x != null);
+    if (w.length < 8) return false;
+    return (Math.max(...w) / Math.min(...w) - 1) <= 0.06;
+  }).map(s => {
+    const w = s.closes.slice(last - 9, last + 1).filter(x => x != null);
+    return { ...base(s), range10: r1((Math.max(...w) / Math.min(...w) - 1) * 100) };
+  }).sort(byRs);
+  // 3. Reclaimed the 50-SMA today (was below yesterday)
+  const scanReclaim = stocks.filter(s => {
+    const c = s.closes[last], p = s.closes[last - 1];
+    return c != null && p != null && s.s50[last] != null && s.s50[last - 1] != null && c > s.s50[last] && p <= s.s50[last - 1];
+  }).map(s => ({ ...base(s), a200: s.s200[last] != null && s.closes[last] > s.s200[last] })).sort(byRs);
+  const scans = {
+    pivots: scanPivots.slice(0, 15), pivots_total: scanPivots.length,
+    tight: scanTight.slice(0, 15), tight_total: scanTight.length,
+    reclaim50: scanReclaim.slice(0, 15), reclaim50_total: scanReclaim.length,
+  };
 
   // ── sector momentum: equal-weight 1-month return of each sector's stocks ──
   for (const sec of sectors) {
@@ -568,6 +624,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     swing_state: swingState, momentum_sign: momentumSign, momentum_dir: momentumDir,
     momentum_leaders: momentumLeaders, environment,
     follow_through: computeFollowThrough(axis, aligned, volumes),
+    leaders_new: leadersNew, scans,
     lows_ok: newLows <= LOWS_OK_MAX, lows_ok_max: LOWS_OK_MAX,
     pct_above_20: pct20,
     swing_confidence: Math.round(score), momentum_change: r1(mom.raw - mom.ma),
