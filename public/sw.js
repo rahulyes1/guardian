@@ -30,15 +30,6 @@ self.addEventListener("fetch", (event) => {
   }
 });
 
-// Server-sent alerts (stop hit, price level, signal change) — arrive even when the app is closed
-self.addEventListener("push", (event) => {
-  let data = {};
-  try { data = event.data ? event.data.json() : {}; } catch (_) { data = { title: "TRADESK", body: event.data?.text() || "" }; }
-  event.waitUntil(self.registration.showNotification(data.title || "TRADESK alert", {
-    body: data.body || "", icon: "/icon-192.png", badge: "/icon-192.png", tag: data.tag || "tradesk", data: { url: data.url || "/" },
-  }));
-});
-
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   event.waitUntil(

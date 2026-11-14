@@ -39,13 +39,6 @@ jobs:
       - name: Compute, verify and publish QUAD
         if: ${{ github.event.inputs.audit_date == '' || github.event.inputs.audit_date == null }}
         run: node scripts/nightly-quad.mjs
-      - name: Push signal-change alert
-        if: ${{ github.event.inputs.audit_date == '' || github.event.inputs.audit_date == null }}
-        env:
-          MODE: signal
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
-        run: node scripts/push-alerts.mjs
       - name: Audit live app against NSE
         env:
           AUDIT_DATE: ${{ github.event.inputs.audit_date }}
