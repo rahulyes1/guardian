@@ -3,6 +3,7 @@ import { getSupabaseClient } from "./supabaseClient.js";
 import {
   MQ_SIGNALS, loadMarketQuadrant, getLastMarketQuadrant, subscribeProgress, signalOnDate, configureSharedStore,
   FT_BANDS, FT_CALIBRATION, smaSeries, historyOnDate, istDayKey, fetchResultsCalendar, upcomingResults, loadMicrocapScans,
+  rsScore, rsRating, gradeSetup, tradePlan,
 } from "./marketQuadrant.js";
 import { INDEX_KEYS, reconcileIndex } from "./lib/marketChecks.js";
 import { useSyncedAppState } from "./appStateSync.js";
@@ -1531,6 +1532,7 @@ function OpenTradeCard({ trade, livePrice }) {
 
 // ─── CALCULATOR PAGE ─────────────────────────────────────────────────────────
 function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillSymbol, onPrefillUsed }) {
+  const planRef = useRef(null); // { symbol, entry, stop } from a stock page's suggested plan
   const [symbol, setSymbol] = useState("");
   const [symbolInfo, setSymbolInfo] = useState(null);
 
@@ -1569,9 +1571,10 @@ function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillS
     showSuggestions,
     suggestions,
   } = useSymbolLookup({
-    onSymbolChange: setSymbol,
+    onSymbolChange: (v) => { if (planRef.current && normalizeSymbol(v) !== normalizeSymbol(planRef.current.symbol)) planRef.current = null; setSymbol(v); },
     onSymbolInfo: setSymbolInfo,
-    onLtpSelect: (ltp) => setEntry(String(ltp.toFixed(2))),
+    // A plan from a stock page keeps its entry; otherwise the live price becomes the entry
+    onLtpSelect: (ltp) => { if (!planRef.current?.entry) setEntry(String(ltp.toFixed(2))); },
   });
 
   useEffect(() => {
@@ -1583,7 +1586,11 @@ function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillS
   // Stock picked from QUAD: select it and fetch its live price as the entry
   useEffect(() => {
     if (!prefillSymbol) return;
-    selectSuggestion({ symbol: prefillSymbol, name: prefillSymbol });
+    const p = typeof prefillSymbol === "string" ? { symbol: prefillSymbol } : prefillSymbol;
+    planRef.current = p.entry ? p : null;
+    if (p.entry) setEntry(String(p.entry));
+    if (p.stop) setStop(String(p.stop));
+    selectSuggestion({ symbol: p.symbol, name: p.symbol });
     onPrefillUsed?.();
   }, [prefillSymbol]);
 
@@ -3667,6 +3674,7 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
       ) : (
       <div className="card">
         <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 10, lineHeight: 1.45 }}>{def.hint}</div>
+        <ScanEdge st={data.scan_stats?.[def.id]} />
         {rows.length === 0 ? (
           <div style={{ fontSize: 12, color: "var(--text3)", padding: "16px 0", textAlign: "center" }}>Nothing qualifies today.</div>
         ) : (
@@ -3680,6 +3688,7 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
                   <div style={{ padding: "7px 0", borderTop: "1px solid var(--border)", minWidth: 0 }}>
                     <button onClick={() => onPickStock?.(r.sym)} title={`Open ${r.sym}`}
                       style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", font: "inherit", fontFamily: "var(--display)", fontWeight: 700, letterSpacing: "0.02em", textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{r.sym}</button>
+                    <RsBadge rs={r.rs ?? data.rs_of?.[r.sym] ?? microData?.rs_of?.[r.sym]} grade={r.grade ?? data.grade_of?.[r.sym] ?? microData?.grade_of?.[r.sym]} />
                     <div style={{ fontSize: 10, color: "var(--text3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                       {r.results && <span style={{ color: "#F59E0B", marginRight: 4 }} title="Results were due around this move">★</span>}
                       {r.sector}{st && st !== "—" && <span style={{ color: MQ_DIM_COLOR[st], marginLeft: 4 }}>· {st}</span>}
@@ -3703,6 +3712,32 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
       <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 10 }}>
         Data as of {mqFmtDate(data.as_of)} {verified ? "· ✓ closes verified against NSE" : data.final ? "· awaiting NSE's official closes" : "· intraday"}. Ideas, not recommendations — check the chart and your plan.
       </div>
+    </div>
+  );
+}
+
+// Strength rank + setup grade, shown next to a stock name
+const GRADE_COLOR = { A: "#4ADE80", B: "#F59E0B", C: "#A39C89" };
+function RsBadge({ rs, grade }) {
+  if (rs == null && !grade) return null;
+  const rc = rs == null ? "var(--text3)" : rs >= 90 ? "#4ADE80" : rs >= 70 ? "#A3E635" : rs >= 40 ? "#A39C89" : "#DC143C";
+  return (
+    <span style={{ display: "inline-flex", gap: 4, marginLeft: 6, verticalAlign: "middle" }}>
+      {rs != null && <span title="Strength rank vs the Nifty 500 (1–99)" style={{ fontFamily: "var(--mono)", fontSize: 9, fontWeight: 700, color: rc, border: `1px solid ${rc}55`, borderRadius: 6, padding: "0 4px" }}>RS {rs}</span>}
+      {grade && <span title="Setup grade (A best)" style={{ fontSize: 9, fontWeight: 800, color: GRADE_COLOR[grade], border: `1px solid ${GRADE_COLOR[grade]}55`, borderRadius: 6, padding: "0 4px" }}>{grade}</span>}
+    </span>
+  );
+}
+
+/** One line telling how a scan did historically (10 sessions after each signal). */
+function ScanEdge({ st }) {
+  if (!st) return null;
+  const tone = st.excess >= 0.5 ? "#4ADE80" : st.excess <= -0.5 ? "#DC143C" : "var(--text3)";
+  const verdict = st.excess >= 0.5 ? "beat the average stock" : st.excess <= -0.5 ? "lagged the average stock" : "no clear edge";
+  return (
+    <div style={{ fontSize: 10.5, color: "var(--text3)", margin: "-4px 0 10px", lineHeight: 1.45 }}>
+      Past year ({st.signals.toLocaleString("en-IN")} signals): <b style={{ color: "var(--text2)" }}>{st.hit}%</b> higher {st.horizon} sessions later ·
+      avg {st.avg > 0 ? "+" : ""}{st.avg}% · <span style={{ color: tone, fontWeight: 700 }}>{st.excess > 0 ? "+" : ""}{st.excess} vs average stock — {verdict}</span>
     </div>
   );
 }
@@ -3873,16 +3908,10 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist }) {
     const w = d.vols.slice(i - 50, i).filter(x => x != null);
     if (w.length >= 20 && v > w.reduce((a, b) => a + b, 0) / w.length) pivots.push(d.dates[i]);
   }
-  const rel3 = periods[1].rel;
-  const checks = [
-    ["Above 50 & 200-day SMA", d.s50[last] != null && d.s200[last] != null && c > d.s50[last] && c > d.s200[last]],
-    [`Sector ${sector || "?"} is HOT/WARM${secInfo ? ` (${secInfo.status})` : ""}`, ["HOT", "WARM"].includes(secInfo?.status)],
-    ["Within 15% of 52-week high", offHigh >= -15],
-    ["Beating Nifty 500 over 3 months", rel3 != null && rel3 > 0],
-    [`Market allows new longs (${mq?.environment?.name || "?"})`, mq ? mq.overall !== "CASH" && mq.environment?.name !== "NO MONEY" : false],
-    [`Breakouts following through (${mq?.follow_through?.rate ?? "?"}%)`, mq?.follow_through?.label === "STRONG"],
-  ];
-  const score = checks.filter(x => x[1]).length;
+  const rsRank = mq?.rs_breaks ? rsRating(rsScore(d.closes, last), mq.rs_breaks) : null;
+  const envOk = mq ? mq.overall !== "CASH" && mq.environment?.name !== "NO MONEY" : null;
+  const g = gradeSetup({ closes: d.closes, vols: d.vols, i: last, s50: d.s50[last], s200: d.s200[last], rs: rsRank, sectorStatus: secInfo?.status ?? null, envOk });
+  const plan = tradePlan(d.closes, last);
   const pct = (v) => (v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(1)}%`);
   const col = (v) => (v == null ? "var(--text3)" : v >= 0 ? "#4ADE80" : "#DC143C");
 
@@ -3946,8 +3975,16 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist }) {
       </div>
 
       <div className="card" style={{ marginBottom: 12 }}>
-        <div className="label" style={{ marginBottom: 8 }}>Fits today's market? <span style={{ color: score >= 5 ? "#4ADE80" : score >= 3 ? "#F59E0B" : "#DC143C" }}>{score}/6</span></div>
-        {checks.map(([t, ok]) => (
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
+          <span style={{ fontFamily: "var(--display)", fontSize: 40, lineHeight: 1, color: GRADE_COLOR[g.grade] }}>{g.grade}</span>
+          <div>
+            <div className="label">Setup grade · {g.pass}/{g.of} checks</div>
+            <div style={{ fontSize: 12, color: "var(--text2)", marginTop: 2 }}>
+              Strength rank <b style={{ color: rsRank == null ? "var(--text3)" : rsRank >= 80 ? "#4ADE80" : "var(--text)" }}>{rsRank ?? "—"}</b>/99 vs the Nifty 500
+            </div>
+          </div>
+        </div>
+        {g.checks.filter(([, ok]) => ok != null).map(([t, ok]) => (
           <div key={t} style={{ display: "flex", gap: 8, fontSize: 12, padding: "3px 0", color: ok ? "var(--text)" : "var(--text3)" }}>
             <span style={{ color: ok ? "#4ADE80" : "#DC143C", width: 12 }}>{ok ? "✓" : "✗"}</span>{t}
           </div>
@@ -3957,7 +3994,25 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist }) {
         </div>
       </div>
 
-      <button className="btn-primary" style={{ width: "100%" }} onClick={() => onPlan(symbol)}>Plan a trade in {symbol} ›</button>
+      {plan && (
+        <div className="card" style={{ marginBottom: 12 }}>
+          <div className="label" style={{ marginBottom: 8 }}>Suggested plan</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, fontFamily: "var(--mono)" }}>
+            {[["ENTRY", `₹${plan.entry}`, "var(--text)"], ["STOP", `₹${plan.stop}`, "#DC143C"], ["RISK", `${plan.riskPct}%`, plan.riskPct > 6 ? "#F59E0B" : "var(--text)"]].map(([l, v, col]) => (
+              <div key={l} style={{ background: "var(--bg3)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 8px" }}>
+                <div style={{ fontSize: 9, color: "var(--text3)" }}>{l}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: col }}>{v}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 8, lineHeight: 1.45 }}>
+            {plan.breaking ? "Closing at a 10-day high — entry at today's close." : `Entry just above the 10-day closing high (₹${plan.pivot}).`} Stop just under the last 5 closes.{plan.note ? ` ${plan.note}.` : ""} Based on closing prices — adjust to the chart.
+          </div>
+        </div>
+      )}
+      <button className="btn-primary" style={{ width: "100%" }} onClick={() => onPlan(plan ? { symbol, entry: plan.entry, stop: plan.stop } : symbol)}>
+        Plan this trade in CALC ›
+      </button>
       <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 10 }}>Information only — not a recommendation.</div>
     </div>
   );
@@ -4769,7 +4824,7 @@ export default function App() {
     setRegimeSince(new Date().toISOString());
   };
 
-  const pickStock = (sym) => { setCalcSymbol(sym); setPage("calc"); window.scrollTo(0, 0); };
+  const pickStock = (p) => { setCalcSymbol(p); setPage("calc"); window.scrollTo(0, 0); };
   const openStock = (sym) => { setStockSym(sym); setStockBack(page === "stock" ? stockBack : page); setPage("stock"); window.scrollTo(0, 0); };
 
   // Regime follows QUAD's Bias automatically (BULL/BEAR from Nifty 500 breadth), so the

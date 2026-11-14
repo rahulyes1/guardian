@@ -18,12 +18,12 @@ export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 let API_BASE = "";
 export function setApiBase(url) { API_BASE = String(url || "").replace(/\/+$/, ""); }
 
-const LOCAL_KEY       = "td_mq_v10";  // v10: EP + IPO scans
+const LOCAL_KEY       = "td_mq_v11";  // v11: RS rank, grades, scan backtests
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
 const MIN_COVERAGE    = 0.9;          // refuse to compute on <90% of the index
-const VOL_DAYS        = 120;          // recent volumes fetched for pocket-pivot detection
+const VOL_DAYS        = 260;          // ~1 year of volumes: pocket pivots, EP, volume dry-up, scan backtests
 // Follow-through bands (share of last-10-session pocket pivots still above their pivot close).
 // Calibrated on Nifty 500, Jan–Nov 2026 (~200 sessions, ~2,600 new pivots): when FT ≥ 70, new
 // pivots were higher 10 sessions later 72% of the time (avg +5.2%); at 40–70 it was 46–51%
@@ -93,7 +93,7 @@ export function configureSharedStore(getClient) { sharedClientGetter = getClient
 
 function looksValid(d) {
   return d && MQ_SIGNALS.includes(d.overall) && Array.isArray(d.history) && typeof d.total === "number" && d.total >= 400
-    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d && Array.isArray(d.scans.ep);
+    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d && Array.isArray(d.scans.ep) && d.rs_of && d.scan_stats;
 }
 async function readShared() {
   const sb = sharedClientGetter?.();
@@ -210,6 +210,124 @@ export function alignByDate(allData) {
   return { axis, aligned };
 }
 
+// ─── strength rank (RS 1–99), setup grade, trade plan ─────────────────────────
+const _retAt = (closes, i, bars) => {
+  const c = closes[i]; if (c == null) return null;
+  for (let k = i - bars; k >= Math.max(0, i - bars - 5); k--) if (closes[k] != null) return c / closes[k] - 1;
+  return null;
+};
+/** IBD-style strength score: 40% last 3 months + 20% each for the three quarters before. */
+export function rsScore(closes, i = closes.length - 1) {
+  const r3 = _retAt(closes, i, 63), r6 = _retAt(closes, i, 126), r9 = _retAt(closes, i, 189), r12 = _retAt(closes, i, 252);
+  if (r3 == null) return null;
+  const parts = [[r3, 0.4], [r6, 0.2], [r9, 0.2], [r12, 0.2]].filter(([v]) => v != null);
+  const w = parts.reduce((a, [, x]) => a + x, 0);
+  return parts.reduce((a, [v, x]) => a + v * x, 0) / w;
+}
+/** Map a score to 1–99 using the Nifty 500's percentile cut-offs (array of 98 ascending scores). */
+export function rsRating(score, breaks) {
+  if (score == null || !breaks?.length) return null;
+  let lo = 0, hi = breaks.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (breaks[m] <= score) lo = m + 1; else hi = m; }
+  return Math.max(1, Math.min(99, lo + 1));
+}
+/**
+ * Setup grade from up to 7 checks. Missing inputs are skipped (graded out of what's known).
+ * A ≥ 85% of known checks, B ≥ 57%, else C.
+ */
+export function gradeSetup({ closes, vols, i = closes.length - 1, s50, s200, rs, sectorStatus, envOk }) {
+  const c = closes[i];
+  const win = closes.slice(Math.max(0, i - 251), i + 1).filter(x => x != null);
+  const hi = win.length ? Math.max(...win) : null;
+  const last10 = closes.slice(i - 9, i + 1).filter(x => x != null);
+  const range10 = last10.length >= 8 ? Math.max(...last10) / Math.min(...last10) - 1 : null;
+  let volDry = null;
+  if (vols) {
+    const v10 = vols.slice(i - 9, i + 1).filter(x => x != null), v50 = vols.slice(i - 59, i - 9).filter(x => x != null);
+    if (v10.length >= 6 && v50.length >= 25) volDry = (v10.reduce((a, b) => a + b, 0) / v10.length) < 0.85 * (v50.reduce((a, b) => a + b, 0) / v50.length);
+  }
+  const checks = [
+    ["Strength rank 80+", rs == null ? null : rs >= 80],
+    ["Above 50 & 200-day SMA", s50 == null || s200 == null || c == null ? null : c > s50 && c > s200],
+    ["Within 10% of 52-week high", hi == null || c == null ? null : c >= hi * 0.9],
+    ["Tight: last 10 closes within 8%", range10 == null ? null : range10 <= 0.08],
+    ["Volume drying up", volDry],
+    ["Sector HOT/WARM", sectorStatus == null ? null : ["HOT", "WARM"].includes(sectorStatus)],
+    ["Market allows new longs", envOk == null ? null : envOk],
+  ];
+  const known = checks.filter(x => x[1] != null), pass = known.filter(x => x[1]).length;
+  const ratio = known.length ? pass / known.length : 0;
+  return { grade: ratio >= 0.85 ? "A" : ratio >= 0.57 ? "B" : "C", pass, of: known.length, checks, range10, volDry };
+}
+/**
+ * Suggested trade from closes: entry just above the 10-day closing high (or today's close if it
+ * is breaking out), stop just under the last 5 closes, risk capped at 8%.
+ */
+export function tradePlan(closes, i = closes.length - 1) {
+  const c = closes[i];
+  const w10 = closes.slice(Math.max(0, i - 9), i + 1).filter(x => x != null);
+  const w5 = closes.slice(Math.max(0, i - 4), i + 1).filter(x => x != null);
+  if (c == null || w10.length < 5) return null;
+  const pivot = Math.max(...w10.slice(0, -1).length ? w10.slice(0, -1) : w10);
+  const breaking = c >= pivot;
+  const entry = +(breaking ? c : pivot * 1.002).toFixed(2);
+  let stop = +(Math.min(...w5) * 0.99).toFixed(2), note = null;
+  if (stop >= entry) stop = +(entry * 0.95).toFixed(2);
+  if ((entry - stop) / entry > 0.08) { stop = +(entry * 0.92).toFixed(2); note = "Stop capped at 8% below entry"; }
+  return { entry, stop, riskPct: +(((entry - stop) / entry) * 100).toFixed(1), breaking, pivot: +pivot.toFixed(2), note };
+}
+
+/**
+ * Historical check of each scan: for every session in the last ~250 with 10 sessions of future,
+ * which stocks qualified, and how did they do over the next 10 sessions vs the average stock?
+ * Returns { scanId: { signals, days, hit, avg, excess, from, to } }.
+ */
+export function scanBacktest(axis, stocks, volumes, last, horizon = 10, lookback = 250) {
+  const ids = ["pivots", "ep", "tight", "reclaim50", "leaders"];
+  const acc = Object.fromEntries(ids.map(id => [id, { n: 0, up: 0, sum: 0, ex: 0, days: new Set() }]));
+  const start = Math.max(60, last - horizon - lookback), end = last - horizon;
+  for (let t = start; t <= end; t++) {
+    let uSum = 0, uN = 0;
+    const fwd = new Map();
+    for (const st of stocks) {
+      const c0 = st.closes[t], c1 = st.closes[t + horizon];
+      if (c0 == null || c1 == null) continue;
+      const r = c1 / c0 - 1; fwd.set(st, r); uSum += r; uN++;
+    }
+    if (!uN) continue;
+    const uAvg = uSum / uN;
+    const hit = (id, st) => { const r = fwd.get(st); if (r == null) return; const a = acc[id]; a.n++; a.sum += r; a.ex += r - uAvg; if (r > 0) a.up++; a.days.add(t); };
+    for (const st of stocks) {
+      if (!fwd.has(st)) continue;
+      const c = st.closes, p = c[t - 1], x = c[t];
+      if (p == null || x == null) continue;
+      const v = volumes?.[st.ticker];
+      let avg50 = null;
+      if (v && v[t] != null && v[t - 1] != null) {
+        let sm = 0, cn = 0; for (let k = t - 50; k < t; k++) if (v[k] != null) { sm += v[k]; cn++; }
+        if (cn >= 20) avg50 = sm / cn;
+      }
+      const chg = x / p - 1;
+      if (avg50 != null && chg >= 0.045 && v[t] > v[t - 1] && v[t] > avg50) hit("pivots", st);
+      if (avg50 != null && chg >= 0.08 && v[t] >= 3 * avg50) hit("ep", st);
+      const s50 = st.s50[t], s200 = st.s200[t], h = st.h252[t];
+      if (s50 != null && s200 != null && h != null && x > s50 && x > s200 && x >= h * 0.9) {
+        const w = c.slice(t - 9, t + 1).filter(y => y != null);
+        if (w.length >= 8 && Math.max(...w) / Math.min(...w) - 1 <= 0.06) hit("tight", st);
+      }
+      if (s50 != null && st.s50[t - 1] != null && x > s50 && p <= st.s50[t - 1]) hit("reclaim50", st);
+      if (st.s10[t] != null && s50 != null && s200 != null && h != null && x > st.s10[t] && x > s50 && x > s200 && x >= h * 0.95) hit("leaders", st);
+    }
+  }
+  const out = {};
+  for (const id of ids) {
+    const a = acc[id];
+    out[id] = a.n ? { signals: a.n, days: a.days.size, hit: Math.round((a.up / a.n) * 100), avg: Math.round((a.sum / a.n) * 1000) / 10,
+      excess: Math.round((a.ex / a.n) * 1000) / 10, from: axis[start], to: axis[end], horizon } : null;
+  }
+  return out;
+}
+
 /** Volumes on the same date axis as the closes: { ticker: [volume|null] }. */
 export function alignVolumes(axis, allVol) {
   const out = {};
@@ -296,7 +414,7 @@ const r1 = (v) => (v == null ? null : Math.round(v * 10) / 10);
 const sectorStatus = (p) => (p == null ? "—" : p >= 70 ? "HOT" : p >= 50 ? "WARM" : p >= 30 ? "COOL" : "COLD");
 
 /** Pure computation from aligned closes. Exported for testing. */
-export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now(), verification = null, volumes = null, themeMap = null, events = null) {
+export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now(), verification = null, volumes = null, themeMap = null, events = null, opts = {}) {
   const stocks = Object.entries(aligned)
     .filter(([, closes]) => closes.filter(c => c != null).length >= 150)
     .map(([ticker, closes]) => ({
@@ -709,6 +827,32 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
       .slice(0, 10);
   }
 
+  // ── strength rank (RS 1–99) for every stock, relative to this universe (or given cut-offs) ──
+  const scores = stocks.map(st => [st.sym, rsScore(st.closes, last)]).filter(([, v]) => v != null);
+  const sorted = scores.map(([, v]) => v).sort((a, b) => a - b);
+  const rsBreaks = opts.rsBreaks || (sorted.length >= 50 ? Array.from({ length: 98 }, (_, k) => r1(sorted[Math.floor(((k + 1) / 99) * sorted.length)] * 1000) / 1000) : null);
+  const rsOf = {};
+  for (const [sym, v] of scores) rsOf[sym] = rsRating(v, rsBreaks);
+  for (const [ticker, closes] of Object.entries(aligned)) { // IPOs / short histories too
+    const sym = ticker.replace(/\.NS$/, "");
+    if (rsOf[sym] == null) { const v = rsScore(closes, last); if (v != null) rsOf[sym] = rsRating(v, rsBreaks); }
+  }
+  const envOk = overall !== "CASH" && environment.name !== "NO MONEY";
+  const statusOfSector = Object.fromEntries(sectors.map(x => [x.name, x.status]));
+  const gradeOf = {};
+  for (const st of stocks) {
+    gradeOf[st.sym] = gradeSetup({ closes: st.closes, vols: volumes?.[st.ticker] || null, i: last, s50: st.s50[last], s200: st.s200[last],
+      rs: rsOf[st.sym], sectorStatus: statusOfSector[sectorMap[st.sym] || "Other"], envOk }).grade;
+  }
+  const enrich = (rows) => (rows || []).forEach(r => { r.rs = rsOf[r.sym] ?? null; r.grade = gradeOf[r.sym] ?? null; });
+  enrich(leaders);
+  for (const k of ["pivots", "tight", "reclaim50", "ep", "ipo"]) enrich(scans[k]);
+  for (const rows of Object.values(sectorStocks)) enrich(rows);
+  for (const t of themes) enrich(t.top);
+
+  // ── scan backtests: what happened 10 sessions after each past signal ──
+  const scanStats = scanBacktest(axis, stocks, volumes, last);
+
   const asOf = axis[last];
   return {
     bias, trend, swing, momentum,
@@ -716,7 +860,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     swing_state: swingState, momentum_sign: momentumSign, momentum_dir: momentumDir,
     momentum_leaders: momentumLeaders, environment,
     follow_through: computeFollowThrough(axis, aligned, volumes),
-    leaders_new: leadersNew, scans,
+    leaders_new: leadersNew, scans, scan_stats: scanStats, rs_of: rsOf, rs_breaks: rsBreaks, grade_of: gradeOf,
     lows_ok: newLows <= LOWS_OK_MAX, lows_ok_max: LOWS_OK_MAX,
     pct_above_20: pct20,
     swing_confidence: Math.round(score), momentum_change: r1(mom.raw - mom.ma),
@@ -849,7 +993,7 @@ export function upcomingResults(cal, sym, days = 7) {
 }
 
 // ─── wider universe: NSE Microcap 250 (loaded on demand, scans only) ─────────
-const MICRO_KEY = "td_mq_micro_v1";
+const MICRO_KEY = "td_mq_micro_v2"; // v2: RS + grades
 let _microInflight = null;
 export async function loadMicrocapScans({ force = false } = {}) {
   if (!force) {
@@ -873,8 +1017,9 @@ export async function loadMicrocapScans({ force = false } = {}) {
     const verification = applyNseCloses(axis, aligned, bhav);
     const vols = alignVolumes(axis, allVol);
     if (verification) verification.volumes_filled = fillVolumesFromBhav(axis, vols, bhav);
-    const r = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, vols, null, cal?.results || null);
-    const data = { as_of: r.as_of, final: r.final, verification, total: r.total, scans: r.scans, leaders: r.leaders, sector_of: r.sector_of };
+    const r = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, vols, null, cal?.results || null,
+      { rsBreaks: getLastMarketQuadrant()?.rs_breaks || null });
+    const data = { as_of: r.as_of, final: r.final, verification, total: r.total, scans: r.scans, leaders: r.leaders, sector_of: r.sector_of, rs_of: r.rs_of, grade_of: r.grade_of };
     try { localStorage.setItem(MICRO_KEY, JSON.stringify({ data, savedAt: Date.now() })); } catch (_) {}
     return data;
   })().finally(() => { _microInflight = null; });
