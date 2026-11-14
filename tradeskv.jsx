@@ -1355,6 +1355,7 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
       {/* Market brief — regime and rules come from the data, not a manual toggle */}
       <MarketBrief onOpenQuad={() => setPage("quadrant")} onOpenScan={() => setPage("scan")} />
       <WatchAlertsCard watchlist={watchlist} onOpen={onOpenStock} />
+      <GlobalBrief />
 
       {/* Portfolio Value Edit */}
       <div className="card" style={{ marginBottom: 14 }}>
@@ -3296,6 +3297,7 @@ function MarketQuadrantPage({ onPickStock }) {
       </div>
 
       <MqSectorGrid sectors={data.sectors} sectorStocks={data.sector_stocks} selected={sector} onSelect={setSector} onPickStock={onPickStock} />
+      <MqRotationMap data={data} onSelect={(n) => { setSector(n); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
       <MqSectorRotation data={data} onSelect={setSector} />
       <MqThemes themes={data.themes} onPickStock={onPickStock} />
       <MqLeaders leaders={sector ? data.leaders.filter(l => l.sector === sector) : data.leaders} sector={sector} onClear={() => setSector(null)} onPickStock={onPickStock} />
@@ -3793,7 +3795,7 @@ async function fetchStockDetail(sym) {
   };
 }
 
-function StockChart({ d, from }) {
+function StockChart({ d, from, series = STOCK_SERIES }) {
   const [hover, setHover] = useState(null);
   const n = d.dates.length, start = Math.max(0, n - from);
   const idx = Array.from({ length: n - start }, (_, k) => start + k);
@@ -3825,7 +3827,7 @@ function StockChart({ d, from }) {
             <text x={W - padR + 4} y={y(t) + 3} fontSize="9" fill="var(--text3)" fontFamily="var(--mono)">{fmt(t)}</text>
           </g>
         ))}
-        {STOCK_SERIES.map(s => <path key={s.key} d={path(d[s.key])} fill="none" stroke={s.color} strokeWidth="1.4" />)}
+        {series.map(s => <path key={s.key} d={path(d[s.key])} fill="none" stroke={s.color} strokeWidth="1.4" />)}
         <path d={path(d.closes)} fill="none" stroke="var(--text)" strokeWidth="1.8" strokeLinejoin="round" />
         {idx.map((i, k) => d.vols[i] ? (
           <rect key={i} x={x(k) - 0.6} width="1.2" y={H + 6 + VH - (d.vols[i] / maxV) * VH} height={(d.vols[i] / maxV) * VH}
@@ -3843,7 +3845,7 @@ function StockChart({ d, from }) {
           background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 8px", fontSize: 11, fontFamily: "var(--mono)", pointerEvents: "none", whiteSpace: "nowrap", zIndex: 2 }}>
           <div style={{ color: "var(--text3)" }}>{mqFmtDate(d.dates[hi_])}</div>
           <div>₹{d.closes[hi_].toFixed(2)}</div>
-          {STOCK_SERIES.map(s => d[s.key][hi_] != null && <div key={s.key} style={{ color: "var(--text2)" }}><span style={{ display: "inline-block", width: 8, height: 2, background: s.color, marginRight: 5, verticalAlign: "middle" }} />{s.label} {d[s.key][hi_].toFixed(1)}</div>)}
+          {series.map(s => d[s.key][hi_] != null && <div key={s.key} style={{ color: "var(--text2)" }}><span style={{ display: "inline-block", width: 8, height: 2, background: s.color, marginRight: 5, verticalAlign: "middle" }} />{s.label} {d[s.key][hi_].toFixed(1)}</div>)}
           {d.vols[hi_] != null && <div style={{ color: "var(--text3)" }}>Vol {(d.vols[hi_] / 1e5).toFixed(1)}L</div>}
         </div>
       )}
@@ -3871,6 +3873,7 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist }) {
   const [d, setD] = useState(null);
   const [err, setErr] = useState(null);
   const [range, setRange] = useState(250);
+  const [weekly, setWeekly] = useState(false);
   useEffect(() => {
     let alive = true;
     setD(null); setErr(null);
@@ -3915,6 +3918,8 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist }) {
   const envOk = mq ? mq.overall !== "CASH" && mq.environment?.name !== "NO MONEY" : null;
   const g = gradeSetup({ closes: d.closes, vols: d.vols, i: last, s50: d.s50[last], s200: d.s200[last], rs: rsRank, sectorStatus: secInfo?.status ?? null, envOk });
   const plan = tradePlan(d.closes, last);
+  const wk = toWeekly(d);
+  const wTrend = weeklyTrend(wk);
   const pct = (v) => (v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(1)}%`);
   const col = (v) => (v == null ? "var(--text3)" : v >= 0 ? "#4ADE80" : "#DC143C");
 
@@ -3932,17 +3937,23 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist }) {
         <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 4 }}>
           {sector || "—"}{secInfo && <span style={{ color: MQ_DIM_COLOR[secInfo.status] }}> · {secInfo.status}</span>}{secInfo?.quadrant && ` · ${secInfo.quadrant.toLowerCase()}`} · {offHigh.toFixed(1)}% from 52w high
         </div>
-        <div style={{ display: "flex", gap: 6, margin: "12px 0 6px" }}>
-          {[["3M", 63], ["6M", 126], ["1Y", 250]].map(([l, n]) => (
+        <div style={{ display: "flex", gap: 6, margin: "12px 0 6px", flexWrap: "wrap" }}>
+          {(weekly ? [["1Y", 52], ["2Y", 104]] : [["3M", 63], ["6M", 126], ["1Y", 250]]).map(([l, n]) => (
             <button key={l} className="chip" onClick={() => setRange(n)} aria-pressed={range === n}
               style={range === n ? { borderColor: "var(--text)", color: "var(--text)" } : {}}>{l}</button>
+          ))}
+          <span style={{ flex: 1 }} />
+          {[[false, "Daily"], [true, "Weekly"]].map(([v, l]) => (
+            <button key={l} className="chip" onClick={() => { setWeekly(v); setRange(v ? 104 : 250); }} aria-pressed={weekly === v}
+              style={weekly === v ? { borderColor: "var(--text)", color: "var(--text)" } : {}}>{l}</button>
           ))}
         </div>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 10, color: "var(--text2)", marginBottom: 4 }}>
           <span><span style={{ display: "inline-block", width: 10, height: 2, background: "var(--text)", marginRight: 4, verticalAlign: "middle" }} />Price</span>
-          {STOCK_SERIES.map(s => <span key={s.key}><span style={{ display: "inline-block", width: 10, height: 2, background: s.color, marginRight: 4, verticalAlign: "middle" }} />{s.label}</span>)}
+          {(weekly ? WEEKLY_SERIES : STOCK_SERIES).map(s => <span key={s.key}><span style={{ display: "inline-block", width: 10, height: 2, background: s.color, marginRight: 4, verticalAlign: "middle" }} />{s.label}</span>)}
         </div>
-        <StockChart d={d} from={range} />
+        <StockChart d={weekly ? wk : d} from={range} series={weekly ? WEEKLY_SERIES : STOCK_SERIES} />
+        {wTrend && <div style={{ fontSize: 11, marginTop: 6, color: wTrend.above && wTrend.rising ? "#4ADE80" : !wTrend.above && !wTrend.rising ? "#DC143C" : "#F59E0B" }}>{wTrend.label}</div>}
       </div>
 
       <div className="card" style={{ marginBottom: 12 }}>
@@ -4102,6 +4113,7 @@ function MqWeeklyReport({ data }) {
   const reports = weeklyReports(data);
   const [sel, setSel] = useState(0);
   const [copied, setCopied] = useState(false);
+  const [shared, setShared] = useState(null);
   if (!reports.length) return null;
   const rep = reports[Math.min(sel, reports.length - 1)];
   const copy = async () => {
@@ -4111,7 +4123,12 @@ function MqWeeklyReport({ data }) {
     <div style={mqCardStyle}>
       <div style={{ ...mqHeadStyle, marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span>WEEKLY REPORT</span>
-        <button onClick={copy} className="chip" style={{ fontSize: 10, letterSpacing: 0 }}>{copied ? "Copied ✓" : "Copy"}</button>
+        <span style={{ display: "flex", gap: 6 }}>
+          <button onClick={async () => { const r = await shareReport(rep); setShared(r); setTimeout(() => setShared(null), 2000); }} className="chip" style={{ fontSize: 10, letterSpacing: 0 }}>
+            {shared === "shared" ? "Shared ✓" : shared === "downloaded" ? "Saved ✓" : "Share image"}
+          </button>
+          <button onClick={copy} className="chip" style={{ fontSize: 10, letterSpacing: 0 }}>{copied ? "Copied ✓" : "Copy"}</button>
+        </span>
       </div>
       <div style={{ display: "flex", gap: 6, overflowX: "auto", marginBottom: 10, scrollbarWidth: "none" }}>
         {reports.map((r, i) => (
@@ -4956,6 +4973,185 @@ function ExitReplay({ closed }) {
         </div>
       )}
       <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>* still above the average today (not exited yet). Ignores costs and intraday moves.</div>
+    </div>
+  );
+}
+
+// ─── H · I · J · K ────────────────────────────────────────────────────────────
+
+// H: global markets / pre-market brief
+const GLOBAL_TICKERS = [
+  ["ES=F", "S&P 500 fut"], ["NQ=F", "Nasdaq fut"], ["^N225", "Nikkei"], ["^HSI", "Hang Seng"],
+  ["^KS11", "Kospi"], ["CL=F", "Crude"], ["GC=F", "Gold"], ["USDINR=X", "USD/INR"],
+];
+let _globalCache = null;
+async function fetchGlobal() {
+  if (_globalCache && Date.now() - _globalCache.at < 5 * 60000) return _globalCache.rows;
+  const r = await fetch(`/api/spark?symbols=${encodeURIComponent(GLOBAL_TICKERS.map(([t]) => t).join(","))}&range=5d&interval=1d`).then(x => x.json());
+  const rows = GLOBAL_TICKERS.map(([t, name]) => {
+    const it = (r?.spark?.result || []).find(x => x.symbol === t);
+    if (!it) return null;
+    const x = it.response[0], ts = x.timestamp, cl = x.indicators.quote[0].close;
+    const idx = cl.map((v, i) => (v != null ? i : -1)).filter(i => i >= 0);
+    if (idx.length < 2) return null;
+    const a = cl[idx[idx.length - 1]], b = cl[idx[idx.length - 2]];
+    return { t, name, price: a, chg: (a / b - 1) * 100, at: ts[idx[idx.length - 1]] };
+  }).filter(Boolean);
+  _globalCache = { at: Date.now(), rows };
+  return rows;
+}
+function GlobalBrief() {
+  const [rows, setRows] = useState(null);
+  useEffect(() => { let alive = true; fetchGlobal().then(x => alive && setRows(x)).catch(() => alive && setRows([])); return () => { alive = false; }; }, []);
+  if (!rows?.length) return null;
+  const { mins, dow } = (() => { const d = new Date(Date.now() + 19800000); return { mins: d.getUTCHours() * 60 + d.getUTCMinutes(), dow: d.getUTCDay() }; })();
+  const pre = dow >= 1 && dow <= 5 && mins < 9 * 60 + 15;
+  const us = rows.filter(r => /=F$/.test(r.t) && /S&P|Nasdaq/.test(r.name));
+  const usAvg = us.length ? us.reduce((a, r) => a + r.chg, 0) / us.length : null;
+  const tone = usAvg == null ? null : usAvg > 0.4 ? "positive" : usAvg < -0.4 ? "negative" : "flat";
+  const fmt = (r) => (r.t === "USDINR=X" ? r.price.toFixed(2) : r.price >= 1000 ? r.price.toLocaleString("en-IN", { maximumFractionDigits: 0 }) : r.price.toFixed(2));
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <div className="label">{pre ? "Pre-market · global cues" : "Global markets"}</div>
+        {tone && <span style={{ fontSize: 11, color: tone === "positive" ? "#4ADE80" : tone === "negative" ? "#DC143C" : "var(--text3)" }}>US futures {tone}</span>}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", columnGap: 14, rowGap: 6, marginTop: 8 }}>
+        {rows.map(r => (
+          <div key={r.t} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, gap: 6 }}>
+            <span style={{ color: "var(--text2)", whiteSpace: "nowrap" }}>{r.name}</span>
+            <span style={{ fontFamily: "var(--mono)", whiteSpace: "nowrap" }}>
+              <span style={{ color: "var(--text3)", fontSize: 10, marginRight: 4 }}>{fmt(r)}</span>
+              <span style={{ color: r.t === "USDINR=X" ? (r.chg > 0 ? "#DC143C" : "#4ADE80") : r.chg >= 0 ? "#4ADE80" : "#DC143C" }}>{r.chg >= 0 ? "+" : ""}{r.chg.toFixed(2)}%</span>
+            </span>
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 8 }}>Change vs previous close. A rising USD/INR (red) usually weighs on Indian stocks. GIFT Nifty isn't available from a free source.</div>
+    </div>
+  );
+}
+
+// I: weekly view of a daily price series (last close of each week; 10/30/40-week SMAs)
+function toWeekly(d) {
+  const wk = new Map();
+  d.dates.forEach((day, i) => {
+    const dt = new Date(`${day}T00:00:00Z`); const monday = new Date(dt); monday.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 6) % 7));
+    const key = monday.toISOString().slice(0, 10);
+    const w = wk.get(key) || { date: day, close: null, vol: 0 };
+    w.date = day; if (d.closes[i] != null) w.close = d.closes[i]; w.vol += d.vols[i] || 0; wk.set(key, w);
+  });
+  const rows = [...wk.values()].filter(w => w.close != null);
+  const closes = rows.map(w => w.close);
+  return { sym: d.sym, weekly: true, dates: rows.map(w => w.date), closes, vols: rows.map(w => w.vol || null),
+    s10: smaSeries(closes, 10, 8), s50: smaSeries(closes, 30, 24), s200: smaSeries(closes, 40, 32) };
+}
+const WEEKLY_SERIES = [
+  { key: "s10", label: "10-week", color: "#A06CD5" },
+  { key: "s50", label: "30-week", color: "#D9632B" },
+  { key: "s200", label: "40-week", color: "#3987E5" },
+];
+function weeklyTrend(w) {
+  const i = w.closes.length - 1, s30 = w.s50, c = w.closes[i];
+  if (s30[i] == null || s30[i - 4] == null) return null;
+  const rising = s30[i] > s30[i - 4];
+  return { above: c > s30[i], rising, label: c > s30[i] && rising ? "Weekly uptrend (above a rising 30-week SMA)" : c < s30[i] && !rising ? "Weekly downtrend (below a falling 30-week SMA)" : "Weekly trend mixed" };
+}
+
+// J: weekly report as a shareable image
+async function reportImage(text) {
+  const lines = text.split("\n");
+  const W = 1080, pad = 64, lh = 46;
+  const wrap = (ctx, s, max) => {
+    const out = []; let cur = "";
+    for (const word of s.split(" ")) { const t = cur ? cur + " " + word : word; if (ctx.measureText(t).width > max && cur) { out.push(cur); cur = word; } else cur = t; }
+    out.push(cur); return out;
+  };
+  const probe = document.createElement("canvas").getContext("2d");
+  probe.font = "32px ui-monospace, Menlo, Consolas, monospace";
+  const body = lines.slice(1).flatMap(l => (l ? wrap(probe, l, W - pad * 2) : [""]));
+  const H = pad * 2 + 90 + body.length * lh + 70;
+  const c = document.createElement("canvas"); c.width = W; c.height = H;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#080C0F"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#DC143C"; ctx.fillRect(0, 0, W, 10);
+  ctx.fillStyle = "#F5F0E6"; ctx.font = "bold 40px ui-sans-serif, system-ui, sans-serif"; ctx.fillText(lines[0], pad, pad + 40);
+  ctx.font = "32px ui-monospace, Menlo, Consolas, monospace";
+  body.forEach((l, k) => {
+    ctx.fillStyle = /^⦿/.test(l) ? "#F5F0E6" : /^Signal|^Leading|^Follow/.test(l) ? "#D4CCB6" : "#A39C89";
+    ctx.fillText(l, pad, pad + 110 + k * lh);
+  });
+  ctx.fillStyle = "#5A5548"; ctx.font = "26px ui-sans-serif, system-ui, sans-serif";
+  ctx.fillText("TRADESK · Nifty 500 breadth, verified against NSE", pad, H - pad + 20);
+  return new Promise(res => c.toBlob(res, "image/png"));
+}
+async function shareReport(rep) {
+  const blob = await reportImage(rep.text);
+  const file = new File([blob], `market-quadrant-${rep.label.replace("/", "-")}.png`, { type: "image/png" });
+  if (navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: `Market Quadrant ${rep.label}` }); return "shared"; } catch (_) { return null; }
+  }
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = file.name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  return "downloaded";
+}
+
+// K: rotation map — breadth level vs 4-week change, with 4-week tails
+function MqRotationMap({ data, onSelect }) {
+  const hist = data?.sector_history;
+  if (!hist) return null;
+  const pts = (data.sectors || []).map(s => {
+    const h = hist[s.name]; if (!h || h.length < 9) return null;
+    const trail = [];
+    for (let k = h.length - 4; k < h.length; k++) {
+      const now = h[k]?.p50, ago = h[k - 4]?.p50;
+      if (now != null && ago != null) trail.push({ x: now, y: now - ago });
+    }
+    return trail.length ? { name: s.name, q: s.quadrant, trail } : null;
+  }).filter(Boolean);
+  if (!pts.length) return null;
+  const W = 340, H = 260, pad = 26;
+  const ys = pts.flatMap(p => p.trail.map(t => t.y)), yMax = Math.max(20, ...ys.map(Math.abs)) * 1.1;
+  const X = (v) => pad + (v / 100) * (W - pad * 2), Y = (v) => H / 2 - (v / yMax) * (H / 2 - pad);
+  // Greedy label placement: nudge down/up to avoid overlaps; drop labels that can't fit
+  const placed = [], labelPos = {};
+  const ends = pts.map(p => ({ p, t: p.trail[p.trail.length - 1] })).sort((a, b) => Y(a.t.y) - Y(b.t.y));
+  for (const { p, t } of ends) {
+    const x = X(t.x) + 6, w = Math.min(70, p.name.length * 4.2);
+    for (const dy of [3, 12, -6, 21, -15]) {
+      const y = Y(t.y) + dy;
+      if (!placed.some(b => Math.abs(b.y - y) < 9 && x < b.x + b.w && b.x < x + w) && x + w < W) { placed.push({ x, y, w }); labelPos[p.name] = y; break; }
+    }
+  }
+  const short = (n) => n.replace("Consumer ", "Cons. ").replace("Cement & Materials", "Cement").replace("Capital Goods", "Cap Goods").replace("Telecommunication", "Telecom").replace("Construction", "Constr.");
+  return (
+    <div style={mqCardStyle}>
+      <div style={{ ...mqHeadStyle, marginBottom: 4 }}>ROTATION MAP</div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 6 }}>Across: % of stocks above 50-SMA · Up: change over 4 weeks · Tails: last 4 weeks. Tap a dot for its stocks.</div>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: "block" }} role="img" aria-label="Sector rotation map">
+        <rect x={X(50)} y={pad} width={X(100) - X(50)} height={Y(0) - pad} fill="rgba(74,222,128,0.05)" />
+        <rect x={X(0)} y={Y(0)} width={X(50) - X(0)} height={H - pad - Y(0)} fill="rgba(220,20,60,0.05)" />
+        <line x1={X(50)} x2={X(50)} y1={pad} y2={H - pad} stroke="var(--border)" />
+        <line x1={pad} x2={W - pad} y1={Y(0)} y2={Y(0)} stroke="var(--border)" />
+        {[["LEADING", X(97), pad + 10, "end"], ["WEAKENING", X(97), H - pad - 4, "end"], ["IMPROVING", X(3), pad + 10, "start"], ["LAGGING", X(3), H - pad - 4, "start"]].map(([l, x, y, a]) => (
+          <text key={l} x={x} y={y} fontSize="8" fontWeight="700" letterSpacing="1" fill={QUAD_COLOR[l]} opacity="0.7" textAnchor={a}>{l}</text>
+        ))}
+        {pts.map(p => (
+          <g key={p.name} onClick={() => onSelect?.(p.name)} style={{ cursor: "pointer" }}>
+            <polyline points={p.trail.map(t => `${X(t.x).toFixed(1)},${Y(t.y).toFixed(1)}`).join(" ")} fill="none" stroke={QUAD_COLOR[p.q] || "var(--text3)"} strokeOpacity="0.35" strokeWidth="1.2" />
+            {(() => { const t = p.trail[p.trail.length - 1]; return (
+              <>
+                <circle cx={X(t.x)} cy={Y(t.y)} r="4.5" fill={QUAD_COLOR[p.q] || "var(--text3)"} stroke="var(--bg2)" strokeWidth="1.5" />
+                {labelPos[p.name] != null && <text x={X(t.x) + 6} y={labelPos[p.name]} fontSize="8" fill="var(--text2)">{short(p.name)}</text>}
+                <circle cx={X(t.x)} cy={Y(t.y)} r="12" fill="transparent"><title>{`${p.name}: ${t.x.toFixed(0)}% above 50-SMA, ${t.y >= 0 ? "+" : ""}${t.y.toFixed(0)} pts in 4 weeks`}</title></circle>
+              </>
+            ); })()}
+          </g>
+        ))}
+        <text x={X(0)} y={H - 6} fontSize="8" fill="var(--text3)">0%</text>
+        <text x={X(50)} y={H - 6} fontSize="8" fill="var(--text3)" textAnchor="middle">50%</text>
+        <text x={X(100)} y={H - 6} fontSize="8" fill="var(--text3)" textAnchor="end">100%</text>
+      </svg>
     </div>
   );
 }

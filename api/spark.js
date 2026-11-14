@@ -93,7 +93,7 @@ export default async function handler(req, res) {
     const ist = new Date(Date.now() + 5.5 * 3600 * 1000);
     const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
     const weekday = ist.getUTCDay() >= 1 && ist.getUTCDay() <= 5;
-    const ttl = weekday && mins >= 9 * 60 && mins < 16 * 60 ? 300 : 3600;
+    const ttl = weekday && mins >= 7 * 60 + 30 && mins < 16 * 60 ? 300 : 3600; // short TTL from pre-market to after the close
     res.setHeader(
       "Cache-Control",
       ok.length >= symbolList.length * MIN_OK_RATIO ? `public, max-age=${ttl}, s-maxage=${ttl}` : "no-store"
