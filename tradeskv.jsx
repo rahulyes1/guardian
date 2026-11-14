@@ -2841,7 +2841,9 @@ function MqVerificationBadge({ data }) {
     color = "#4ADE80";
     text = `✓ Closes for ${mqFmtDate(v.date)} verified against NSE`;
     detail = `${v.checked} stocks checked against NSE's official bhavcopy` +
-      (v.corrected ? ` · ${v.corrected} corrected to NSE values` : " · all matched") +
+      (v.corrected ? ` · ${v.corrected} corrected to NSE values` : "") +
+      (v.filled ? ` · ${v.filled} missing on Yahoo, filled from NSE` : "") +
+      (!v.corrected && !v.filled ? " · all matched" : "") +
       (v.appended ? " · latest day added from NSE" : "") +
       (v.missing ? ` · ${v.missing} not in bhavcopy` : "");
   } else if (!data.final) {

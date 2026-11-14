@@ -80,7 +80,7 @@ test("parses NSE's bhavcopy and keeps only equity series", () => {
   ].join("\n");
   const p = parseBhavFullCsv(csv);
   assert.equal(p.date, "2026-11-12");
-  assert.deepEqual(p.closes.RELIANCE, { prev: 1335.4, close: 1339.7 });
+  assert.deepEqual(p.closes.RELIANCE, { prev: 1335.4, close: 1339.7, vol: 13807921 });
   assert.ok(p.closes["21STCENMGM"]);
   assert.equal(p.closes.SGBJUN28, undefined);
 });
@@ -121,7 +121,8 @@ test("bhavcopy verification corrects wrong and missing closes", () => {
   const aligned = { "A.NS": [10, 11], "B.NS": [20, 25], "C.NS": [30, null], "D.NS": [1, 2] };
   const bhav = { date: "2026-11-12", closes: { A: { prev: 10, close: 11 }, B: { prev: 20, close: 21 }, C: { prev: 30, close: 31 } } };
   const v = verifyAgainstBhav(axis, aligned, bhav);
-  assert.deepEqual([v.checked, v.matched, v.corrected, v.missing], [3, 1, 2, 1]);
+  // B had a wrong price (corrected), C had no bar on Yahoo (filled), D is not in the bhavcopy
+  assert.deepEqual([v.checked, v.matched, v.corrected, v.filled, v.missing], [3, 1, 1, 1, 1]);
   assert.equal(aligned["B.NS"][1], 21);
   assert.equal(aligned["C.NS"][1], 31);
   assert.equal(verifyAgainstBhav(axis, aligned, { ...bhav, date: "2026-11-13" }), null);
@@ -229,4 +230,14 @@ test("signal backtest applies yesterday's signal to today's index move", () => {
   assert.equal(bt.strat.maxDD, 0);                 // never invested during the decline
   assert.ok(bt.hold.maxDD < -25);
   assert.equal(backtestSignal(h.slice(0, 10), idx), null); // too short → no verdict
+});
+
+test("missing volumes on the bhavcopy day are filled from NSE's traded quantity", async () => {
+  const { fillVolumesFromBhav } = await import("../marketQuadrant.js");
+  const axis = ["2026-11-12", "2026-11-13"];
+  const vols = { "A.NS": [100, null], "B.NS": [200, 250] };
+  const n = fillVolumesFromBhav(axis, vols, { date: "2026-11-13", closes: { A: { prev: 1, close: 2, vol: 999 }, B: { prev: 1, close: 2, vol: 777 } } });
+  assert.equal(n, 1);
+  assert.deepEqual(vols["A.NS"], [100, 999]);
+  assert.deepEqual(vols["B.NS"], [200, 250]); // existing Yahoo volume kept
 });

@@ -35,7 +35,7 @@ try {
 }
 const v = r.verification;
 log(`Computed ${r.as_of}: ${r.overall} · ${r.environment?.name} · ${r.total} stocks · follow-through ${r.follow_through?.rate ?? "—"}%`);
-log(v ? `NSE check: ${v.checked} closes checked against the ${v.date} bhavcopy, ${v.corrected} corrected` : "NSE bhavcopy not available yet");
+log(v ? `NSE check: ${v.checked} stocks checked against the ${v.date} bhavcopy — ${v.matched} matched, ${v.filled ?? 0} missing on Yahoo (filled from NSE, ${v.volumes_filled ?? 0} volumes), ${v.corrected} wrong on Yahoo (corrected)` : "NSE bhavcopy not available yet");
 
 if (!r.final || !isVerified(r)) {
   log(`⚠️ Not published: result is ${r.final ? "not yet verified against NSE (bhavcopy for " + r.as_of + " not out)" : "intraday"}. The 22:00 IST run will retry.`);

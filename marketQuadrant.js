@@ -737,6 +737,18 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
  * If Yahoo is missing the newest session entirely, that day is added from NSE.
  * Returns the verification summary (or null when the bhavcopy is unavailable).
  */
+/** Where Yahoo has no volume for the bhavcopy day, use NSE's traded quantity. Returns count filled. */
+export function fillVolumesFromBhav(axis, volumes, bhav) {
+  const i = bhav?.date ? axis.indexOf(bhav.date) : -1;
+  if (i < 0 || !volumes) return 0;
+  let n = 0;
+  for (const [ticker, v] of Object.entries(volumes)) {
+    const b = bhav.closes[ticker.replace(/\.NS$/, "")];
+    if (b?.vol != null && v[i] == null) { v[i] = b.vol; n++; }
+  }
+  return n;
+}
+
 export function applyNseCloses(axis, aligned, bhav) {
   if (!bhav?.date || !bhav.closes) return null;
   let appended = false;
@@ -762,7 +774,7 @@ async function fetchBhav() {
     const j = await r.json();
     if (!j?.date || !j.closes) return null;
     const closes = {};
-    for (const [s, v] of Object.entries(j.closes)) closes[s] = { prev: v[0], close: v[1] };
+    for (const [s, v] of Object.entries(j.closes)) closes[s] = { prev: v[0], close: v[1], vol: v[2] ?? null };
     return { date: j.date, closes };
   } catch (_) { return null; }
 }
@@ -803,8 +815,11 @@ async function computeFresh(onProgress) {
   await new Promise(r => setTimeout(r, 0)); // let the progress paint
   const { axis, aligned } = alignByDate(allData);
   onProgress("Verifying closes against NSE…", 85);
-  const verification = applyNseCloses(axis, aligned, await bhavPromise);
-  const result = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, alignVolumes(axis, allVol), await themesPromise, (await eventsPromise)?.results || null);
+  const bhavData = await bhavPromise;
+  const verification = applyNseCloses(axis, aligned, bhavData);
+  const volumes = alignVolumes(axis, allVol);
+  if (verification) verification.volumes_filled = fillVolumesFromBhav(axis, volumes, bhavData);
+  const result = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, volumes, await themesPromise, (await eventsPromise)?.results || null);
   const idx = await indexPromise;
   result.signal_backtest = idx ? backtestSignal(result.history, idx) : null;
   return result;
@@ -854,7 +869,9 @@ export async function loadMicrocapScans({ force = false } = {}) {
     if (got < tickers.length * 0.8) throw new Error(`Only got data for ${got}/${tickers.length} microcaps — try again shortly.`);
     const { axis, aligned } = alignByDate(allData);
     const verification = applyNseCloses(axis, aligned, bhav);
-    const r = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, alignVolumes(axis, allVol), null, cal?.results || null);
+    const vols = alignVolumes(axis, allVol);
+    if (verification) verification.volumes_filled = fillVolumesFromBhav(axis, vols, bhav);
+    const r = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, vols, null, cal?.results || null);
     const data = { as_of: r.as_of, final: r.final, verification, total: r.total, scans: r.scans, leaders: r.leaders, sector_of: r.sector_of };
     try { localStorage.setItem(MICRO_KEY, JSON.stringify({ data, savedAt: Date.now() })); } catch (_) {}
     return data;

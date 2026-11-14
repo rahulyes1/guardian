@@ -1,6 +1,6 @@
 // Vercel Node.js serverless function — official NSE data (source of truth)
 //   /api/nse?type=indices  latest ind_close_all file  → { date, indices: { "Nifty 50": {...}, "Nifty 500": {...} } }
-//   /api/nse?type=bhav     latest sec_bhavdata_full   → { date, closes: { SYMBOL: { prev, close } } }  (EQ/BE/BZ)
+//   /api/nse?type=bhav     latest sec_bhavdata_full   → { date, closes: { SYMBOL: [prev, close, volume] } }
 //   /api/nse?type=live     NSE allIndices feed        → { date, time, indices: { "NIFTY 50": {...}, ... } }
 //   /api/nse?type=events   NSE board-meeting calendar → { from, to, results: { SYMBOL: ["YYYY-MM-DD", ...] } }
 //                          (financial results only; 10 days back to 21 days ahead)
@@ -75,7 +75,7 @@ export default async function handler(req, res) {
         (d) => `https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_${d}.csv`, parseBhavFullCsv, started);
       if (!parsed) return fail(502, "NSE bhavcopy unavailable", { tried });
       const closes = {};
-      for (const [s, v] of Object.entries(parsed.closes)) closes[s] = [v.prev, v.close];
+      for (const [s, v] of Object.entries(parsed.closes)) closes[s] = [v.prev, v.close, v.vol];
       res.setHeader("Cache-Control", `public, max-age=300, s-maxage=${cacheFor(parsed.date)}`);
       return res.json({ source: "nse-sec_bhavdata_full", date: parsed.date, closes });
     }

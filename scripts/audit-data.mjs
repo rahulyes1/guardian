@@ -13,13 +13,13 @@
 //   4. Index list    — app /nifty500.json vs NSE's current Nifty 500 constituents
 import fs from "node:fs";
 import {
-  parseIndexCloseCsv, parseBhavFullCsv, nseFileDate, istParts, isPlaceholderSymbol, INDEX_KEYS,
+  parseIndexCloseCsv, parseBhavFullCsv, nseFileDate, istParts, isPlaceholderSymbol, INDEX_KEYS, recentWeekdays,
 } from "../lib/marketChecks.js";
 import { alignByDate, applyNseCloses, computeFromAligned } from "../marketQuadrant.js";
 
 const APP = (process.env.APP_URL || "https://guardian-swart-theta.vercel.app").replace(/\/$/, "");
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
-const DAY = process.env.AUDIT_DATE || istParts().day;
+let DAY = process.env.AUDIT_DATE || istParts().day;
 
 const failures = [], warnings = [], notes = [];
 const fail = (m) => { failures.push(m); console.log("FAIL  " + m); };
@@ -44,10 +44,16 @@ async function get(url, { json = false, timeout = 20000, retries = 2 } = {}) {
 const pctDiff = (a, b) => Math.abs(a / b - 1) * 100;
 
 async function main() {
-  console.log(`Auditing ${APP} for NSE session ${DAY}\n`);
+  console.log(`Auditing ${APP} (requested session ${DAY})\n`);
 
-  // ── NSE truth ──
-  const idxFile = await get(`https://nsearchives.nseindia.com/content/indices/ind_close_all_${nseFileDate(DAY)}.csv`);
+  // ── NSE truth ── (no date given and nothing for today → audit the latest session)
+  let idxFile = await get(`https://nsearchives.nseindia.com/content/indices/ind_close_all_${nseFileDate(DAY)}.csv`);
+  if (idxFile.status === 404 && !process.env.AUDIT_DATE) {
+    for (const d of recentWeekdays(Date.now() - 86400000, 6)) {
+      const r = await get(`https://nsearchives.nseindia.com/content/indices/ind_close_all_${nseFileDate(d)}.csv`);
+      if (r.status === 200) { note(`No NSE file for ${DAY}; auditing the latest session, ${d}`); DAY = d; idxFile = r; break; }
+    }
+  }
   if (idxFile.status === 404) {
     const { dow, mins } = istParts();
     const msg = `NSE has no index close file for ${DAY} (weekend, holiday, or not published yet) — nothing to audit.`;
