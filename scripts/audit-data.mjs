@@ -136,7 +136,8 @@ async function main() {
   }
   if (wrong.length) fail(`${wrong.length}/${compared} stock closes differ from NSE by >0.1% (QUAD corrects these, but Yahoo is drifting): ${wrong.slice(0, 10).join("; ")}`);
   else note(`All ${compared - missingToday.length} stock closes for ${DAY} match NSE within 0.1%`);
-  if (missingToday.length > compared * 0.02) fail(`${missingToday.length} stocks have no ${DAY} bar on Yahoo: ${missingToday.slice(0, 15).join(" ")}`);
+  // Yahoo sometimes posts the day's bar late; the app fills those from NSE (checked below), so warn only
+  if (missingToday.length > compared * 0.02) warn(`${missingToday.length} stocks have no ${DAY} bar on Yahoo yet — the app fills them from NSE: ${missingToday.slice(0, 15).join(" ")}`);
   else if (missingToday.length) note(`${missingToday.length} stocks lack a ${DAY} Yahoo bar (filled from NSE by QUAD): ${missingToday.join(" ")}`);
 
   // ── 3. Breadth: app computation vs naive recount on the same NSE-verified data ──

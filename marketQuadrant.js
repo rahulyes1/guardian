@@ -768,7 +768,7 @@ async function fetchBhav() {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 12000);
-    const r = await fetch(API_BASE + "/api/nse?type=bhav", { signal: ctrl.signal });
+    const r = await fetch(API_BASE + "/api/nse?type=bhav&v=2", { signal: ctrl.signal }) /* v=2: response includes volume */;
     clearTimeout(t);
     if (!r.ok) return null;
     const j = await r.json();

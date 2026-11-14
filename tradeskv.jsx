@@ -3720,7 +3720,7 @@ async function fetchStockDetail(sym) {
   const url = `/api/spark?symbols=${encodeURIComponent(`${tk},${IDX_TICKER}`)}&range=2y&interval=1d&vol=260`;
   const [sparkRes, bhavRes] = await Promise.all([
     fetch(url).then(r => (r.ok ? r.json() : null)).catch(() => null),
-    fetch("/api/nse?type=bhav").then(r => (r.ok ? r.json() : null)).catch(() => null),
+    fetch("/api/nse?type=bhav&v=2").then(r => (r.ok ? r.json() : null)).catch(() => null),
   ]);
   const items = Object.fromEntries((sparkRes?.spark?.result || []).map(it => [it.symbol, it]));
   const s = items[tk], ix = items[IDX_TICKER];
