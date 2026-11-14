@@ -9,20 +9,27 @@ import { INDEX_KEYS, reconcileIndex } from "./lib/marketChecks.js";
 import { parseTradebook, buildTrades } from "./lib/tradeImport.js";
 import { useSyncedAppState } from "./appStateSync.js";
 // ─── THEME & CONSTANTS ───────────────────────────────────────────────────────
+// Light/dark: accents are picked per theme for contrast (vivid on dark, deeper on light).
+// Switching theme reloads the page so every colour is recomputed.
+const THEME = (() => { try { return localStorage.getItem("td_theme") === "light" ? "light" : "dark"; } catch (_) { return "dark"; } })();
+if (typeof document !== "undefined") document.documentElement.dataset.theme = THEME;
+const C = THEME === "light"
+  ? { pos: "#15803D", neg: "#C8102E", warn: "#B45309", lime: "#4D7C0F", muted: "#6E685C" }
+  : { pos: "#4ADE80", neg: "#DC143C", warn: "#F59E0B", lime: "#A3E635", muted: "#A39C89" };
 const REGIME_CONFIG = {
-  bull:     { label: "BULL", color: "#4ADE80", glow: "0 0 0 rgba(0,0,0,0)", bg: "rgba(74,222,128,0.06)", text: "Trend is constructive. Stay selective, press clean strength, and let quality setups do the work." },
-  bear:     { label: "BEAR", color: "#DC143C", glow: "0 0 0 rgba(0,0,0,0)", bg: "rgba(220,20,60,0.06)", text: "Flames consume the careless. Stay defensive. Only high-conviction cuts through the smoke." },
+  bull:     { label: "BULL", color: C.pos, glow: "0 0 0 rgba(0,0,0,0)", bg: "rgba(74,222,128,0.06)", text: "Trend is constructive. Stay selective, press clean strength, and let quality setups do the work." },
+  bear:     { label: "BEAR", color: C.neg, glow: "0 0 0 rgba(0,0,0,0)", bg: "rgba(220,20,60,0.06)", text: "Flames consume the careless. Stay defensive. Only high-conviction cuts through the smoke." },
   sideways: { label: "SIDEWAYS", color: "#2DD4BF", glow: "0 0 0 rgba(0,0,0,0)", bg: "rgba(45,212,191,0.06)", text: "Range-bound conditions. Stay patient, stay light, and wait for decisive expansion before committing." },
 };
 
 const THEME_TOKENS = {
   selectorInactiveBorder: "#2A2A2A",
-  selectorInactiveText: "#A39C89",
+  selectorInactiveText: C.muted,
   portfolioValue: "#D4CCB6",
   openRiskValue: "#D4CCB6",
   heatNeutral: "#D4CCB6",
-  heatWarm: "#A39C89",
-  heatHot: "#DC143C",
+  heatWarm: C.muted,
+  heatHot: C.neg,
 };
 
 const SETUP_TYPES = ["Breakout", "Pullback", "U&R", "Range Break", "Momentum"];
@@ -813,7 +820,7 @@ function NiftyStrip({ data }) {
   return (
     <div style={{
       position: "sticky", top: 49, zIndex: 99,
-      background: "rgba(10,10,10,0.96)", backdropFilter: "blur(12px)",
+      background: "var(--bar)", backdropFilter: "blur(12px)",
       borderBottom: "1px solid var(--border2)",
       boxShadow: "none",
       padding: "5px 16px", display: "flex", alignItems: "center", gap: 16,
@@ -900,6 +907,19 @@ const GlobalStyle = () => (
       --display: 'Inter', sans-serif;
       --body:    'Inter', sans-serif;
     }
+
+    :root { --bar: rgba(10,10,10,0.96); }
+    :root[data-theme="light"] {
+      --bg: #F6F4EF; --bg2: #FFFFFF; --bg3: #F1EEE7; --bg4: #E9E5DC;
+      --border: #DDD7CB; --border2: #CFC8BA;
+      --text: #1D1B17; --text2: #4A463E; --text3: #6E685C;
+      --green: #15803D; --green2: #166534; --red: #C8102E; --amber: #8A6D3B;
+      --blue: #8B0000; --violet: #C8102E; --bar: rgba(246,244,239,0.96);
+      color-scheme: light;
+    }
+    .skel { background: linear-gradient(90deg, var(--bg3) 25%, var(--bg4) 50%, var(--bg3) 75%); background-size: 200% 100%; animation: skel 1.4s ease-in-out infinite; border-radius: 8px; }
+    @keyframes skel { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+    @media (prefers-reduced-motion: reduce) { .skel { animation: none; } }
 
     html, body {
       background: var(--bg);
@@ -1207,7 +1227,7 @@ function TopBar({ regime, portfolio, page, indicesData }) {
   return (
     <div style={{
       position: "sticky", top: 0, zIndex: 100,
-      background: "rgba(10,10,10,0.96)", backdropFilter: "blur(24px)",
+      background: "var(--bar)", backdropFilter: "blur(24px)",
       borderBottom: "1px solid var(--border)",
       borderLeft: "0 solid transparent",
       padding: "10px 16px",
@@ -2645,15 +2665,15 @@ function AnalyticsPage({ trades, portfolio }) {
 }
 
 // ─── MARKET QUADRANT — UI (data/compute lives in marketQuadrant.js) ──────────
-const MQ_SIGNAL_COLOR = { INVEST: "#4ADE80", SELECTIVE: "#F59E0B", CASH: "#DC143C" };
+const MQ_SIGNAL_COLOR = { INVEST: C.pos, SELECTIVE: C.warn, CASH: C.neg };
 const MQ_SIGNAL_BG    = { INVEST: "rgba(74,222,128,0.08)", SELECTIVE: "rgba(245,158,11,0.08)", CASH: "rgba(220,20,60,0.08)" };
 const MQ_DIM_COLOR    = {
-  BULL: "#4ADE80", BEAR: "#DC143C", UP: "#4ADE80", DOWN: "#DC143C", SIDEWAYS: "#F59E0B",
-  UPSWING: "#4ADE80", DOWNSWING: "#DC143C", CHOPPY: "#A39C89",
-  POSITIVE: "#4ADE80", NEGATIVE: "#DC143C", IMPROVING: "#4ADE80", WORSENING: "#DC143C",
-  RISING: "#4ADE80", FALLING: "#DC143C", HOT: "#4ADE80", WARM: "#A3E635", COOL: "#A39C89", COLD: "#DC143C",
+  BULL: C.pos, BEAR: C.neg, UP: C.pos, DOWN: C.neg, SIDEWAYS: C.warn,
+  UPSWING: C.pos, DOWNSWING: C.neg, CHOPPY: C.muted,
+  POSITIVE: C.pos, NEGATIVE: C.neg, IMPROVING: C.pos, WORSENING: C.neg,
+  RISING: C.pos, FALLING: C.neg, HOT: C.pos, WARM: C.lime, COOL: C.muted, COLD: C.neg,
 };
-const MQ_ENV_COLOR = { "EASY MONEY": "#4ADE80", "HARD MONEY": "#F59E0B", "NO MONEY": "#DC143C" };
+const MQ_ENV_COLOR = { "EASY MONEY": C.pos, "HARD MONEY": C.warn, "NO MONEY": C.neg };
 // Breadth chart series — validated categorical palette for the #141414 surface (all checks pass)
 const MQ_SERIES = [
   { key: "p200", label: "200-SMA", color: "#3987E5" },
@@ -2723,14 +2743,14 @@ function MqDelta({ cur, prev, digits = 1, unit = "" }) {
   const d = +(cur - prev).toFixed(digits);
   if (d === 0) return <span style={{ color: "var(--text3)", fontSize: 10, fontFamily: "var(--mono)" }}> ±0</span>;
   return (
-    <span style={{ color: d > 0 ? "#4ADE80" : "#DC143C", fontSize: 10, fontFamily: "var(--mono)", whiteSpace: "nowrap" }}>
+    <span style={{ color: d > 0 ? C.pos : C.neg, fontSize: 10, fontFamily: "var(--mono)", whiteSpace: "nowrap" }}>
       {" "}{d > 0 ? "▲ +" : "▼ "}{d}{unit}
     </span>
   );
 }
 
 function BreadthBar({ label, pct, prev, count, total }) {
-  const fill = pct >= 50 ? "#4ADE80" : pct >= 30 ? "#A39C89" : "#DC143C";
+  const fill = pct >= 50 ? C.pos : pct >= 30 ? C.muted : C.neg;
   return (
     <div style={{ marginBottom: 10 }}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, gap: 8 }}>
@@ -2747,7 +2767,7 @@ function BreadthBar({ label, pct, prev, count, total }) {
 }
 
 function NNHBadge({ label, value }) {
-  const color = value > 0 ? "#4ADE80" : value < 0 ? "#DC143C" : "var(--text3)";
+  const color = value > 0 ? C.pos : value < 0 ? C.neg : "var(--text3)";
   return (
     <div style={{ textAlign: "center" }}>
       <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 3 }}>{label}</div>
@@ -2773,7 +2793,7 @@ function MqEnvironment({ data }) {
       <div style={{ fontSize: 12, color: "var(--text2)", marginTop: 4, lineHeight: 1.45 }}>{env.text}</div>
       {env.lockout && (
         <div style={{ marginTop: 10, border: "1px solid rgba(245,158,11,0.35)", background: "rgba(245,158,11,0.08)", borderRadius: 10, padding: "8px 10px" }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: "#F59E0B", letterSpacing: "0.08em", marginBottom: 3 }}>🔒 LOCKOUT RALLY</div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: C.warn, letterSpacing: "0.08em", marginBottom: 3 }}>🔒 LOCKOUT RALLY</div>
           <div style={{ fontSize: 11, color: "var(--text2)", lineHeight: 1.45 }}>{env.lockout_text.replace(/^Lockout rally: (\w)/, (_, ch) => ch.toUpperCase())}</div>
         </div>
       )}
@@ -2783,7 +2803,7 @@ function MqEnvironment({ data }) {
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {data.momentum_leaders.map(m => (
               <span key={m.name} style={{ fontSize: 11, border: "1px solid var(--border)", borderRadius: 14, padding: "3px 9px", color: "var(--text)", background: "var(--bg2)" }}>
-                {m.name} <span style={{ fontFamily: "var(--mono)", color: "#4ADE80" }}>+{m.ret1m}%</span>
+                {m.name} <span style={{ fontFamily: "var(--mono)", color: C.pos }}>+{m.ret1m}%</span>
               </span>
             ))}
           </div>
@@ -2793,7 +2813,7 @@ function MqEnvironment({ data }) {
   );
 }
 
-const FT_COLOR = { STRONG: "#4ADE80", MIXED: "#F59E0B", WEAK: "#DC143C", "NO PIVOTS": "#A39C89" };
+const FT_COLOR = { STRONG: C.pos, MIXED: C.warn, WEAK: C.neg, "NO PIVOTS": C.muted };
 
 // Do strong breakout days keep going? (pocket-pivot follow-through) + 52-week-lows check
 function MqFollowThrough({ data }) {
@@ -2819,7 +2839,7 @@ function MqFollowThrough({ data }) {
             {hist.map(h => (
               <div key={h.d} title={`${mqFmtDate(h.d)}: ${h.rate ?? "—"}% of ${h.events}`}
                 style={{ flex: 1, height: `${Math.max(4, h.rate ?? 0)}%`, borderRadius: 2,
-                  background: h.rate == null ? "var(--border)" : h.rate >= FT_BANDS.strong ? "#4ADE80" : h.rate >= FT_BANDS.weak ? "#F59E0B" : "#DC143C", opacity: 0.8 }} />
+                  background: h.rate == null ? "var(--border)" : h.rate >= FT_BANDS.strong ? C.pos : h.rate >= FT_BANDS.weak ? C.warn : C.neg, opacity: 0.8 }} />
             ))}
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--text3)", fontFamily: "var(--mono)", marginTop: 3 }}>
@@ -2835,7 +2855,7 @@ function MqFollowThrough({ data }) {
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
         <span style={{ fontSize: 14 }}>{lowsOk ? "✅" : "⚠️"}</span>
         <div style={{ fontSize: 11, color: "var(--text2)" }}>
-          <b style={{ color: lowsOk ? "#4ADE80" : "#F59E0B" }}>{data.new_lows} stocks at 52-week lows</b>
+          <b style={{ color: lowsOk ? C.pos : C.warn }}>{data.new_lows} stocks at 52-week lows</b>
           {lowsOk ? ` — low enough for full size (≤ ${data.lows_ok_max}).` : ` — above ${data.lows_ok_max}: keep size reduced until lows dry up.`}
         </div>
       </div>
@@ -2849,7 +2869,7 @@ function MqVerificationBadge({ data }) {
   const verified = v && v.date === data.as_of;
   let color, text, detail;
   if (verified) {
-    color = "#4ADE80";
+    color = C.pos;
     text = `✓ Closes for ${mqFmtDate(v.date)} verified against NSE`;
     detail = `${v.checked} stocks checked against NSE's official bhavcopy` +
       (v.corrected ? ` · ${v.corrected} corrected to NSE values` : "") +
@@ -3021,7 +3041,7 @@ function MqSectorGrid({ sectors, sectorStocks, selected, onSelect, onPickStock }
       <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 10 }}>% of stocks above 50-SMA · change vs 20 days ago · tap a sector for its stocks</div>
 
       {sel && (
-        <div ref={panelRef} style={{ border: `1px solid ${(MQ_DIM_COLOR[sel.status] || "#A39C89")}55`, borderRadius: 12, padding: "10px 12px", marginBottom: 10, background: "var(--bg3)" }}>
+        <div ref={panelRef} style={{ border: `1px solid ${(MQ_DIM_COLOR[sel.status] || C.muted)}55`, borderRadius: 12, padding: "10px 12px", marginBottom: 10, background: "var(--bg3)" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6, gap: 8 }}>
             <div style={{ minWidth: 0 }}>
               <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{sel.name}</span>
@@ -3042,7 +3062,7 @@ function MqSectorGrid({ sectors, sectorStocks, selected, onSelect, onPickStock }
               ))}
               {stocks.map(st => {
                 const pctCell = (v) => (
-                  <div style={{ padding: "5px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: v == null ? "var(--text3)" : v >= 0 ? "#4ADE80" : "#DC143C" }}>
+                  <div style={{ padding: "5px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: v == null ? "var(--text3)" : v >= 0 ? C.pos : C.neg }}>
                     {v == null ? "—" : `${v > 0 ? "+" : ""}${v}%`}
                   </div>
                 );
@@ -3050,7 +3070,7 @@ function MqSectorGrid({ sectors, sectorStocks, selected, onSelect, onPickStock }
                   <Fragment key={st.sym}>
                     <div style={{ padding: "5px 0", borderTop: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
                       <span title={st.a50 ? "Above 50-SMA" : "Below 50-SMA"}
-                        style={{ width: 6, height: 6, borderRadius: 3, flexShrink: 0, background: st.a50 ? "#4ADE80" : "var(--border2)" }} />
+                        style={{ width: 6, height: 6, borderRadius: 3, flexShrink: 0, background: st.a50 ? C.pos : "var(--border2)" }} />
                       <button onClick={() => onPickStock?.(st.sym)} title={`Open ${st.sym}`}
                         style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", font: "inherit", fontFamily: "var(--display)", fontWeight: 700, letterSpacing: "0.02em", overflow: "hidden", textOverflow: "ellipsis", textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{st.sym}</button>
                       {st.a200 && <span style={{ fontSize: 8, color: "var(--text3)" }} title="Above 200-SMA">200↑</span>}
@@ -3124,7 +3144,7 @@ function MqLeaders({ leaders, sector, onClear, onPickStock }) {
                 style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", font: "inherit", fontFamily: "var(--display)", fontWeight: 700, letterSpacing: "0.02em", textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{l.sym}</button>
               <div style={{ fontSize: 10, color: "var(--text3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{l.sector}</div>
             </div>
-            <div style={{ padding: "6px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: (l.ret12m ?? 0) >= 0 ? "#4ADE80" : "#DC143C" }}>
+            <div style={{ padding: "6px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: (l.ret12m ?? 0) >= 0 ? C.pos : C.neg }}>
               {l.ret12m == null ? "—" : `${l.ret12m > 0 ? "+" : ""}${l.ret12m}%`}
             </div>
             <div style={{ padding: "6px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: "var(--text2)" }}>
@@ -3178,7 +3198,7 @@ function MarketQuadrantPage({ onPickStock }) {
   })();
 
   const swingConfLabel = data.swing_confidence >= 60 ? "HIGH" : data.swing_confidence >= 40 ? "MEDIUM" : data.swing_confidence >= 20 ? "LOW" : "ZERO";
-  const swingConfColor = data.swing_confidence >= 60 ? "#4ADE80" : data.swing_confidence >= 40 ? "#F59E0B" : "var(--text3)";
+  const swingConfColor = data.swing_confidence >= 60 ? C.pos : data.swing_confidence >= 40 ? C.warn : "var(--text3)";
 
   return (
     <div className="fade-in" style={{ padding: "20px 16px 100px" }}>
@@ -3206,7 +3226,7 @@ function MarketQuadrantPage({ onPickStock }) {
         </div>
         <div style={{ fontSize: 11, color: sigColor, marginTop: 6, fontWeight: 600 }}>{data.environment ? briefRule(data) : MQ_POS_RULE[data.overall]}</div>
         {data.thrust_detected && (
-          <div style={{ marginTop: 10, background: "rgba(74,222,128,0.12)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 8, padding: "6px 10px", fontSize: 11, color: "#4ADE80", fontWeight: 700, letterSpacing: "0.1em" }}>
+          <div style={{ marginTop: 10, background: "rgba(74,222,128,0.12)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 8, padding: "6px 10px", fontSize: 11, color: C.pos, fontWeight: 700, letterSpacing: "0.1em" }}>
             ⚡ BREADTH THRUST DETECTED
           </div>
         )}
@@ -3226,7 +3246,7 @@ function MarketQuadrantPage({ onPickStock }) {
           {
             label: "BIAS", value: data.bias,
             tag: data.bias_turning ? `TURNING ${data.bias === "BEAR" ? "UP" : "DOWN"}` : null,
-            tagColor: data.bias === "BEAR" ? "#4ADE80" : "#DC143C",
+            tagColor: data.bias === "BEAR" ? C.pos : C.neg,
             sub: <>{data.pct_above_200}% &gt; 200-SMA<MqDelta cur={data.pct_above_200} prev={prev?.p200} /></>,
             note: data.bias_turning ? `${data.bias_days}/${data.bias_needed} sessions ${data.bias === "BEAR" ? "above" : "below"} 50% to flip` : `held ${data.bias_days}+ sessions`,
           },
@@ -3276,9 +3296,9 @@ function MarketQuadrantPage({ onPickStock }) {
           <div style={{ textAlign: "center" }}>
             <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 3 }}>52w H/L</div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 12, fontWeight: 700 }}>
-              <span style={{ color: "#4ADE80" }}>{data.new_highs}</span>
+              <span style={{ color: C.pos }}>{data.new_highs}</span>
               <span style={{ color: "var(--text3)" }}> / </span>
-              <span style={{ color: "#DC143C" }}>{data.new_lows}</span>
+              <span style={{ color: C.neg }}>{data.new_lows}</span>
             </div>
           </div>
         </div>
@@ -3318,7 +3338,7 @@ function MarketQuadrantPage({ onPickStock }) {
                     <div style={{ textAlign: "right", flexShrink: 0 }}>
                       <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--red)" }}>{fmt(c.current)}</span>
                       <span style={{ color: "var(--text3)", fontSize: 12 }}> → </span>
-                      <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "#4ADE80" }}>{fmt(c.needs)}</span>
+                      <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: C.pos }}>{fmt(c.needs)}</span>
                       <div style={{ fontSize: 10, color: "var(--text3)", fontFamily: "var(--mono)", marginTop: 1 }}>gap {fmt(c.gap)}</div>
                     </div>
                   </div>
@@ -3371,10 +3391,10 @@ function MarketSignalBanner({ onOpen }) {
         </div>
         <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 2 }}>{data.environment ? briefRule(data) : MQ_POS_RULE[data.overall]}</div>
         {cautions.map(t => (
-          <div key={t} style={{ fontSize: 11, color: "#F59E0B", marginTop: 3 }}>⚠ {t}</div>
+          <div key={t} style={{ fontSize: 11, color: C.warn, marginTop: 3 }}>⚠ {t}</div>
         ))}
         {ft?.label === "STRONG" && !cautions.length && (
-          <div style={{ fontSize: 11, color: "#4ADE80", marginTop: 3 }}>Breakouts are following through ({ft.rate}%)</div>
+          <div style={{ fontSize: 11, color: C.pos, marginTop: 3 }}>Breakouts are following through ({ft.rate}%)</div>
         )}
       </div>
       <span style={{ fontSize: 10, color: "var(--text3)", fontFamily: "var(--mono)", whiteSpace: "nowrap" }}>{mqFmtDate(data.as_of)} ›</span>
@@ -3455,14 +3475,14 @@ function briefChanges(d) {
   const prev = h.length >= 2 ? h[h.length - 2] : null;
   const out = [];
   if (prev?.sig && prev.sig !== d.overall) out.push({ tone: MQ_SIGNAL_COLOR[d.overall], text: `Signal changed ${prev.sig} → ${d.overall}` });
-  if (d.bias_turning) out.push({ tone: "#F59E0B", text: `Bias ${d.bias} is turning ${d.bias === "BEAR" ? "up" : "down"}: ${d.bias_days}/${d.bias_needed} sessions ${d.bias === "BEAR" ? "above" : "below"} 50% (200-SMA)` });
-  if (d.environment?.lockout) out.push({ tone: "#F59E0B", text: "Lockout rally — stocks running without clean pullback entries" });
-  if (d.thrust_detected) out.push({ tone: "#4ADE80", text: "Breadth thrust: 10-day breadth jumped from washed-out levels" });
+  if (d.bias_turning) out.push({ tone: C.warn, text: `Bias ${d.bias} is turning ${d.bias === "BEAR" ? "up" : "down"}: ${d.bias_days}/${d.bias_needed} sessions ${d.bias === "BEAR" ? "above" : "below"} 50% (200-SMA)` });
+  if (d.environment?.lockout) out.push({ tone: C.warn, text: "Lockout rally — stocks running without clean pullback entries" });
+  if (d.thrust_detected) out.push({ tone: C.pos, text: "Breadth thrust: 10-day breadth jumped from washed-out levels" });
   if (prev) {
     for (const [k, label] of [["p200", "200-SMA"], ["p50", "50-SMA"], ["p10", "10-SMA"]]) {
       const cur = { p200: d.pct_above_200, p50: d.pct_above_50, p10: d.pct_above_10 }[k];
       const delta = cur != null && prev[k] != null ? +(cur - prev[k]).toFixed(1) : 0;
-      if (Math.abs(delta) >= 3) out.push({ tone: delta > 0 ? "#4ADE80" : "#DC143C", text: `% above ${label} ${delta > 0 ? "up" : "down"} ${Math.abs(delta)} pts to ${cur}%` });
+      if (Math.abs(delta) >= 3) out.push({ tone: delta > 0 ? C.pos : C.neg, text: `% above ${label} ${delta > 0 ? "up" : "down"} ${Math.abs(delta)} pts to ${cur}%` });
     }
   }
   const ft = d.follow_through;
@@ -3474,11 +3494,64 @@ function briefChanges(d) {
   const moved = (d.sectors || []).filter(s => s.status_d1 && s.status !== s.status_d1 && s.status !== "—" && s.status_d1 !== "—");
   const rank = { COLD: 0, COOL: 1, WARM: 2, HOT: 3 };
   for (const s of moved.sort((a, b) => Math.abs(rank[b.status] - rank[b.status_d1]) - Math.abs(rank[a.status] - rank[a.status_d1])).slice(0, 4)) {
-    out.push({ tone: rank[s.status] > rank[s.status_d1] ? "#4ADE80" : "#DC143C", text: `${s.name}: ${s.status_d1} → ${s.status}` });
+    out.push({ tone: rank[s.status] > rank[s.status_d1] ? C.pos : C.neg, text: `${s.name}: ${s.status_d1} → ${s.status}` });
   }
-  if (d.leaders_new?.length) out.push({ tone: "#4ADE80", text: `New leaders: ${d.leaders_new.slice(0, 5).join(", ")}` });
+  if (d.leaders_new?.length) out.push({ tone: C.pos, text: `New leaders: ${d.leaders_new.slice(0, 5).join(", ")}` });
   if (d.scans?.pivots_total) out.push({ tone: "var(--text2)", text: `${d.scans.pivots_total} pocket pivots today` });
   return out;
+}
+
+function Skeleton({ lines = 4 }) {
+  return (
+    <div aria-hidden="true">
+      <div className="skel" style={{ height: 30, width: "45%", marginBottom: 12 }} />
+      {Array.from({ length: lines }, (_, i) => <div key={i} className="skel" style={{ height: 12, width: `${90 - i * 12}%`, marginBottom: 8 }} />)}
+    </div>
+  );
+}
+
+const TOUR = [
+  ["TODAY", "Your market brief: today's signal, environment and one rule for the day, what changed, your watchlist alerts and open positions with HOLD / TIGHTEN / EXIT."],
+  ["SCAN", "Ready-made lists from the Nifty 500 (and Microcap 250): pivots, tight setups, earnings EPs, IPO bases, leaders — each with its past-year record, strength rank and grade."],
+  ["Stock pages", "Tap any stock for its chart (daily or weekly), relative strength, setup grade, results warning and a suggested entry/stop you can send to CALC."],
+  ["CALC", "Size the trade: risk is suggested from today's environment and capped by your total open risk."],
+  ["TRADES", "Your journal (or import a Zerodha tradebook) and stats: results by market condition, discipline, equity curve, drawdown odds and exit replay."],
+  ["QUAD", "The full Nifty 500 breadth picture, verified against NSE every evening: Bias, Trend, Swing, Momentum, sectors, themes, rotation and the weekly report."],
+];
+function Tour({ onDone }) {
+  const [i, setI] = useState(0);
+  const [title, body] = TOUR[i];
+  return (
+    <div role="dialog" aria-modal="true" aria-label="App tour" style={{ position: "fixed", inset: 0, zIndex: 500, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center", padding: 16 }}>
+      <div className="card" style={{ maxWidth: 440, width: "100%", marginBottom: 70 }}>
+        <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.12em" }}>WELCOME · {i + 1}/{TOUR.length}</div>
+        <div style={{ fontFamily: "var(--display)", fontSize: 22, margin: "6px 0" }}>{title}</div>
+        <div style={{ fontSize: 13, color: "var(--text2)", lineHeight: 1.5 }}>{body}</div>
+        <div style={{ display: "flex", gap: 6, margin: "12px 0" }}>{TOUR.map((_, k) => <span key={k} style={{ width: 18, height: 3, borderRadius: 2, background: k <= i ? "var(--text)" : "var(--border)" }} />)}</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn-ghost" style={{ padding: "8px 12px" }} onClick={onDone}>Skip</button>
+          <button className="btn-primary" style={{ flex: 1, padding: "8px" }} onClick={() => (i < TOUR.length - 1 ? setI(i + 1) : onDone())}>{i < TOUR.length - 1 ? "Next" : "Start"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+function AppSettings({ onTour }) {
+  const setTheme = (t) => { try { localStorage.setItem("td_theme", t); } catch (_) {} location.reload(); };
+  return (
+    <div className="card" style={{ marginTop: 14 }}>
+      <div className="label" style={{ marginBottom: 8 }}>Settings</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12, color: "var(--text2)" }}>Theme</span>
+        {[["dark", "Dark"], ["light", "Light"]].map(([v, l]) => (
+          <button key={v} className="chip" aria-pressed={THEME === v} onClick={() => THEME !== v && setTheme(v)}
+            style={THEME === v ? { borderColor: "var(--text)", color: "var(--text)" } : {}}>{l}</button>
+        ))}
+        <span style={{ flex: 1 }} />
+        <button className="chip" onClick={onTour}>Show tour</button>
+      </div>
+    </div>
+  );
 }
 
 function MarketBrief({ onOpenQuad, onOpenScan }) {
@@ -3495,9 +3568,10 @@ function MarketBrief({ onOpenQuad, onOpenScan }) {
         ) : (
           <>
             <div style={{ fontSize: 12, color: "var(--text3)", margin: "8px 0" }}>{loading ? progress.msg : "Loading…"}</div>
-            <div style={{ height: 3, background: "var(--border)", borderRadius: 3, overflow: "hidden" }}>
+            <div style={{ height: 3, background: "var(--border)", borderRadius: 3, overflow: "hidden", marginBottom: 14 }}>
               <div style={{ height: "100%", width: `${Math.round(progress.pct)}%`, background: "var(--text2)", transition: "width 0.4s ease" }} />
             </div>
+            <Skeleton lines={5} />
           </>
         )}
       </div>
@@ -3516,14 +3590,14 @@ function MarketBrief({ onOpenQuad, onOpenScan }) {
     <div className="card" style={{ marginBottom: 14, border: `1.5px solid ${sigColor}55`, background: `linear-gradient(135deg, ${sigColor}12 0%, var(--bg2) 60%)` }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
         <div className="label">Market Brief · {mqFmtDate(d.as_of)}</div>
-        <span style={{ fontSize: 10, color: verified ? "#4ADE80" : d.final ? "var(--amber)" : "var(--text3)" }}>
+        <span style={{ fontSize: 10, color: verified ? C.pos : d.final ? "var(--amber)" : "var(--text3)" }}>
           {verified ? "✓ NSE-verified" : d.final ? "awaiting NSE close" : "intraday"}
         </span>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 4 }}>
         <span style={{ fontFamily: "var(--display)", fontSize: 34, color: sigColor, lineHeight: 1 }}>{d.overall}</span>
         <span style={{ fontSize: 11, fontWeight: 700, color: envColor, border: `1px solid ${envColor}66`, borderRadius: 12, padding: "2px 8px" }}>{d.environment?.name}</span>
-        {d.environment?.lockout && <span style={{ fontSize: 11, color: "#F59E0B" }}>🔒 lockout</span>}
+        {d.environment?.lockout && <span style={{ fontSize: 11, color: C.warn }}>🔒 lockout</span>}
       </div>
       <div style={{ fontSize: 13, color: "var(--text)", marginTop: 8, lineHeight: 1.45 }}>{briefRule(d)}</div>
 
@@ -3531,7 +3605,7 @@ function MarketBrief({ onOpenQuad, onOpenScan }) {
         {chips.map(([k, v]) => (
           <div key={k} style={{ background: "var(--bg3)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 6px", minWidth: 0 }}>
             <div style={{ fontSize: 8, color: "var(--text3)", letterSpacing: "0.12em" }}>{k}</div>
-            <div style={{ fontSize: 11, fontWeight: 700, marginTop: 2, color: k === "MOMENTUM" ? (v === "POS ↗" ? "#4ADE80" : v === "NEG ↘" ? "#DC143C" : "#F59E0B") : (MQ_DIM_COLOR[v.split(" ")[0]] || "var(--text)"), whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{v}</div>
+            <div style={{ fontSize: 11, fontWeight: 700, marginTop: 2, color: k === "MOMENTUM" ? (v === "POS ↗" ? C.pos : v === "NEG ↘" ? C.neg : C.warn) : (MQ_DIM_COLOR[v.split(" ")[0]] || "var(--text)"), whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{v}</div>
           </div>
         ))}
       </div>
@@ -3619,6 +3693,7 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
       <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
         {head}
         <div className="card" style={{ fontSize: 12, color: error ? "var(--red)" : "var(--text3)" }}>
+          {!error && <div style={{ marginBottom: 12 }}><Skeleton lines={6} /></div>}
           {error || (loading ? progress.msg : "Loading…")}
           {error && <button className="btn-ghost" style={{ marginTop: 10, width: "100%" }} onClick={retry}>Retry</button>}
         </div>
@@ -3664,7 +3739,7 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
       </div>
       <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4, marginBottom: 10, scrollbarWidth: "none" }}>
         <button onClick={() => pick("watch")} className="chip" aria-pressed={isWatch}
-          style={isWatch ? { borderColor: "#F59E0B", color: "#F59E0B", whiteSpace: "nowrap" } : { whiteSpace: "nowrap" }}>
+          style={isWatch ? { borderColor: C.warn, color: C.warn, whiteSpace: "nowrap" } : { whiteSpace: "nowrap" }}>
           ★ Watchlist <span style={{ fontFamily: "var(--mono)", opacity: 0.7 }}>{watchlist?.length || 0}</span>
         </button>
         {SCAN_DEFS.map(x => (
@@ -3695,7 +3770,7 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
                       style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", font: "inherit", fontFamily: "var(--display)", fontWeight: 700, letterSpacing: "0.02em", textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{r.sym}</button>
                     <RsBadge rs={r.rs ?? data.rs_of?.[r.sym] ?? microData?.rs_of?.[r.sym]} grade={r.grade ?? data.grade_of?.[r.sym] ?? microData?.grade_of?.[r.sym]} />
                     <div style={{ fontSize: 10, color: "var(--text3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                      {r.results && <span style={{ color: "#F59E0B", marginRight: 4 }} title="Results were due around this move">★</span>}
+                      {r.results && <span style={{ color: C.warn, marginRight: 4 }} title="Results were due around this move">★</span>}
                       {r.sector}{st && st !== "—" && <span style={{ color: MQ_DIM_COLOR[st], marginLeft: 4 }}>· {st}</span>}
                       {r.micro && <span style={{ marginLeft: 4, color: "var(--text3)", border: "1px solid var(--border)", borderRadius: 6, padding: "0 4px", fontSize: 9 }}>micro</span>}
                     </div>
@@ -3722,10 +3797,10 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
 }
 
 // Strength rank + setup grade, shown next to a stock name
-const GRADE_COLOR = { A: "#4ADE80", B: "#F59E0B", C: "#A39C89" };
+const GRADE_COLOR = { A: C.pos, B: C.warn, C: C.muted };
 function RsBadge({ rs, grade }) {
   if (rs == null && !grade) return null;
-  const rc = rs == null ? "var(--text3)" : rs >= 90 ? "#4ADE80" : rs >= 70 ? "#A3E635" : rs >= 40 ? "#A39C89" : "#DC143C";
+  const rc = rs == null ? "var(--text3)" : rs >= 90 ? C.pos : rs >= 70 ? C.lime : rs >= 40 ? C.muted : C.neg;
   return (
     <span style={{ display: "inline-flex", gap: 4, marginLeft: 6, verticalAlign: "middle" }}>
       {rs != null && <span title="Strength rank vs the Nifty 500 (1–99)" style={{ fontFamily: "var(--mono)", fontSize: 9, fontWeight: 700, color: rc, border: `1px solid ${rc}55`, borderRadius: 6, padding: "0 4px" }}>RS {rs}</span>}
@@ -3737,7 +3812,7 @@ function RsBadge({ rs, grade }) {
 /** One line telling how a scan did historically (10 sessions after each signal). */
 function ScanEdge({ st }) {
   if (!st) return null;
-  const tone = st.excess >= 0.5 ? "#4ADE80" : st.excess <= -0.5 ? "#DC143C" : "var(--text3)";
+  const tone = st.excess >= 0.5 ? C.pos : st.excess <= -0.5 ? C.neg : "var(--text3)";
   const verdict = st.excess >= 0.5 ? "beat the average stock" : st.excess <= -0.5 ? "lagged the average stock" : "no clear edge";
   return (
     <div style={{ fontSize: 10.5, color: "var(--text3)", margin: "-4px 0 10px", lineHeight: 1.45 }}>
@@ -3831,7 +3906,7 @@ function StockChart({ d, from, series = STOCK_SERIES }) {
         <path d={path(d.closes)} fill="none" stroke="var(--text)" strokeWidth="1.8" strokeLinejoin="round" />
         {idx.map((i, k) => d.vols[i] ? (
           <rect key={i} x={x(k) - 0.6} width="1.2" y={H + 6 + VH - (d.vols[i] / maxV) * VH} height={(d.vols[i] / maxV) * VH}
-            fill={d.closes[i] >= (d.closes[i - 1] ?? d.closes[i]) ? "#4ADE80" : "#DC143C"} opacity="0.55" />
+            fill={d.closes[i] >= (d.closes[i - 1] ?? d.closes[i]) ? C.pos : C.neg} opacity="0.55" />
         ) : null)}
         {hi_ != null && (
           <g>
@@ -3862,7 +3937,7 @@ function ResultsWarning({ symbol, style }) {
   }, [symbol]);
   if (!up) return null;
   return (
-    <div style={{ fontSize: 11, color: "#F59E0B", border: "1px solid rgba(245,158,11,0.35)", background: "rgba(245,158,11,0.07)", borderRadius: 8, padding: "6px 9px", ...style }}>
+    <div style={{ fontSize: 11, color: C.warn, border: "1px solid rgba(245,158,11,0.35)", background: "rgba(245,158,11,0.07)", borderRadius: 8, padding: "6px 9px", ...style }}>
       📅 Results {up.inDays === 0 ? "today" : up.inDays === 1 ? "tomorrow" : `in ${up.inDays} days`} ({mqFmtDate(up.date)}) — expect a big gap either way; size down or wait.
     </div>
   );
@@ -3921,7 +3996,7 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist }) {
   const wk = toWeekly(d);
   const wTrend = weeklyTrend(wk);
   const pct = (v) => (v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(1)}%`);
-  const col = (v) => (v == null ? "var(--text3)" : v >= 0 ? "#4ADE80" : "#DC143C");
+  const col = (v) => (v == null ? "var(--text3)" : v >= 0 ? C.pos : C.neg);
 
   return (
     <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
@@ -3953,7 +4028,7 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist }) {
           {(weekly ? WEEKLY_SERIES : STOCK_SERIES).map(s => <span key={s.key}><span style={{ display: "inline-block", width: 10, height: 2, background: s.color, marginRight: 4, verticalAlign: "middle" }} />{s.label}</span>)}
         </div>
         <StockChart d={weekly ? wk : d} from={range} series={weekly ? WEEKLY_SERIES : STOCK_SERIES} />
-        {wTrend && <div style={{ fontSize: 11, marginTop: 6, color: wTrend.above && wTrend.rising ? "#4ADE80" : !wTrend.above && !wTrend.rising ? "#DC143C" : "#F59E0B" }}>{wTrend.label}</div>}
+        {wTrend && <div style={{ fontSize: 11, marginTop: 6, color: wTrend.above && wTrend.rising ? C.pos : !wTrend.above && !wTrend.rising ? C.neg : C.warn }}>{wTrend.label}</div>}
       </div>
 
       <div className="card" style={{ marginBottom: 12 }}>
@@ -3966,7 +4041,7 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist }) {
             let p = ""; rsLine.forEach((v, i) => { if (v != null) p += `${p ? "L" : "M"}${X(i).toFixed(1)},${Y(v).toFixed(1)}`; });
             return (<>
               <line x1="0" x2="300" y1={Y(100)} y2={Y(100)} stroke="var(--border)" strokeDasharray="3 3" />
-              <path d={p} fill="none" stroke={vals[vals.length - 1] >= 100 ? "#4ADE80" : "#DC143C"} strokeWidth="1.6" />
+              <path d={p} fill="none" stroke={vals[vals.length - 1] >= 100 ? C.pos : C.neg} strokeWidth="1.6" />
               <text x="304" y={Y(vals[vals.length - 1]) + 3} fontSize="9" fill="var(--text2)" fontFamily="var(--mono)">{vals[vals.length - 1].toFixed(0)}</text>
             </>);
           })()}
@@ -3994,13 +4069,13 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist }) {
           <div>
             <div className="label">Setup grade · {g.pass}/{g.of} checks</div>
             <div style={{ fontSize: 12, color: "var(--text2)", marginTop: 2 }}>
-              Strength rank <b style={{ color: rsRank == null ? "var(--text3)" : rsRank >= 80 ? "#4ADE80" : "var(--text)" }}>{rsRank ?? "—"}</b>/99 vs the Nifty 500
+              Strength rank <b style={{ color: rsRank == null ? "var(--text3)" : rsRank >= 80 ? C.pos : "var(--text)" }}>{rsRank ?? "—"}</b>/99 vs the Nifty 500
             </div>
           </div>
         </div>
         {g.checks.filter(([, ok]) => ok != null).map(([t, ok]) => (
           <div key={t} style={{ display: "flex", gap: 8, fontSize: 12, padding: "3px 0", color: ok ? "var(--text)" : "var(--text3)" }}>
-            <span style={{ color: ok ? "#4ADE80" : "#DC143C", width: 12 }}>{ok ? "✓" : "✗"}</span>{t}
+            <span style={{ color: ok ? C.pos : C.neg, width: 12 }}>{ok ? "✓" : "✗"}</span>{t}
           </div>
         ))}
         <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 8 }}>
@@ -4012,7 +4087,7 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist }) {
         <div className="card" style={{ marginBottom: 12 }}>
           <div className="label" style={{ marginBottom: 8 }}>Suggested plan</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, fontFamily: "var(--mono)" }}>
-            {[["ENTRY", `₹${plan.entry}`, "var(--text)"], ["STOP", `₹${plan.stop}`, "#DC143C"], ["RISK", `${plan.riskPct}%`, plan.riskPct > 6 ? "#F59E0B" : "var(--text)"]].map(([l, v, col]) => (
+            {[["ENTRY", `₹${plan.entry}`, "var(--text)"], ["STOP", `₹${plan.stop}`, C.neg], ["RISK", `${plan.riskPct}%`, plan.riskPct > 6 ? C.warn : "var(--text)"]].map(([l, v, col]) => (
               <div key={l} style={{ background: "var(--bg3)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 8px" }}>
                 <div style={{ fontSize: 9, color: "var(--text3)" }}>{l}</div>
                 <div style={{ fontSize: 13, fontWeight: 700, color: col }}>{v}</div>
@@ -4033,7 +4108,7 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist }) {
 }
 
 // ─── SECTOR ROTATION (D) ──────────────────────────────────────────────────────
-const QUAD_COLOR = { LEADING: "#4ADE80", WEAKENING: "#F59E0B", LAGGING: "#DC143C", IMPROVING: "#3987E5" };
+const QUAD_COLOR = { LEADING: C.pos, WEAKENING: C.warn, LAGGING: C.neg, IMPROVING: "#3987E5" };
 function MqSectorRotation({ data, onSelect }) {
   const hist = data?.sector_history;
   if (!hist) return null;
@@ -4305,12 +4380,12 @@ function SizingAdvice({ portfolio, trades, riskPct, onApply }) {
           <button className="chip" style={{ fontSize: 10 }} onClick={() => onApply(s.pct)}>Use {s.pct}%</button>
         )}
       </div>
-      <div style={{ fontSize: 11, color: over ? "#F59E0B" : "var(--text3)", marginTop: 4, fontFamily: "var(--mono)" }}>
+      <div style={{ fontSize: 11, color: over ? C.warn : "var(--text3)", marginTop: 4, fontFamily: "var(--mono)" }}>
         Portfolio heat {heat.toFixed(1)}% → {after.toFixed(1)}% after this trade · cap {s.heatCap}%
       </div>
-      {s.pct === 0 && <div style={{ fontSize: 11, color: "#F59E0B", marginTop: 4 }}>⚠ Market rules say no new entries today.</div>}
-      {s.pct > 0 && above && <div style={{ fontSize: 11, color: "#F59E0B", marginTop: 4 }}>⚠ {riskPct}% is above today's suggested risk.</div>}
-      {s.pct > 0 && over && <div style={{ fontSize: 11, color: "#F59E0B", marginTop: 4 }}>⚠ This would take total open risk over the {s.heatCap}% cap.</div>}
+      {s.pct === 0 && <div style={{ fontSize: 11, color: C.warn, marginTop: 4 }}>⚠ Market rules say no new entries today.</div>}
+      {s.pct > 0 && above && <div style={{ fontSize: 11, color: C.warn, marginTop: 4 }}>⚠ {riskPct}% is above today's suggested risk.</div>}
+      {s.pct > 0 && over && <div style={{ fontSize: 11, color: C.warn, marginTop: 4 }}>⚠ This would take total open risk over the {s.heatCap}% cap.</div>}
     </div>
   );
 }
@@ -4352,7 +4427,7 @@ function positionHealth(t, trend, mq, livePrice) {
   const st = getDaysHeldStatus(t.setupType, days);
   if (/Decision needed/.test(st.label)) bump(1, `Day ${days}: past the time limit for a ${t.setupType}`);
   const label = ["HOLD", "TIGHTEN STOP", "EXIT"][level];
-  return { level, label, color: ["#4ADE80", "#F59E0B", "#DC143C"][level], reasons: reasons.sort((a, b) => b.l - a.l).map(r => r.why) };
+  return { level, label, color: [C.pos, C.warn, C.neg][level], reasons: reasons.sort((a, b) => b.l - a.l).map(r => r.why) };
 }
 
 function PositionHealth({ trade, livePrice }) {
@@ -4370,7 +4445,7 @@ function PositionHealth({ trade, livePrice }) {
   const h = positionHealth(trade, trend, mq, livePrice);
   if (results) {
     h.reasons.unshift(`Results ${results.inDays === 0 ? "today" : results.inDays === 1 ? "tomorrow" : `in ${results.inDays} days`} (${mqFmtDate(results.date)}) — decide before the gap`);
-    if (h.level < 1) { h.level = 1; h.label = "TIGHTEN STOP"; h.color = "#F59E0B"; }
+    if (h.level < 1) { h.level = 1; h.label = "TIGHTEN STOP"; h.color = C.warn; }
   }
   return (
     <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
@@ -4429,7 +4504,7 @@ function DisciplineStats({ closed, portfolio }) {
     <div className="card" style={{ marginBottom: 14 }}>
       <div className="label" style={{ marginBottom: 6 }}>Discipline</div>
       <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-        <span style={{ fontFamily: "var(--mono)", fontSize: 24, fontWeight: 800, color: avgScore >= 0.8 ? "#4ADE80" : avgScore >= 0.6 ? "#F59E0B" : "#DC143C" }}>{Math.round(avgScore * 100)}%</span>
+        <span style={{ fontFamily: "var(--mono)", fontSize: 24, fontWeight: 800, color: avgScore >= 0.8 ? C.pos : avgScore >= 0.6 ? C.warn : C.neg }}>{Math.round(avgScore * 100)}%</span>
         <span style={{ fontSize: 11, color: "var(--text3)" }}>of the rules followed on average · {scored.length} trades</span>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", columnGap: 12, fontSize: 12, marginTop: 10 }}>
@@ -4508,8 +4583,8 @@ function MqSignalBacktest({ bt }) {
         {[["Follow signal", bt.strat.ret, bt.strat.maxDD, `${bt.strat.exposure}%`], ["Buy & hold", bt.hold.ret, bt.hold.maxDD, "100%"]].map(([l, r, dd, ex]) => (
           <Fragment key={l}>
             <span style={{ fontFamily: "inherit", color: "var(--text2)", paddingTop: 4 }}>{l}</span>
-            <span style={{ textAlign: "right", paddingTop: 4, color: r >= 0 ? "#4ADE80" : "#DC143C" }}>{r > 0 ? "+" : ""}{r}%</span>
-            <span style={{ textAlign: "right", paddingTop: 4, color: "#DC143C" }}>{dd}%</span>
+            <span style={{ textAlign: "right", paddingTop: 4, color: r >= 0 ? C.pos : C.neg }}>{r > 0 ? "+" : ""}{r}%</span>
+            <span style={{ textAlign: "right", paddingTop: 4, color: C.neg }}>{dd}%</span>
             <span style={{ textAlign: "right", paddingTop: 4, color: "var(--text2)" }}>{ex}</span>
           </Fragment>
         ))}
@@ -4535,14 +4610,14 @@ function MqThemes({ themes, onPickStock }) {
             <span style={{ fontSize: 12, fontWeight: 700, flex: 1, minWidth: 0 }}>{t.name} <span style={{ fontSize: 10, color: "var(--text3)", fontWeight: 400 }}>{t.n}</span></span>
             <span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{t.p50 ?? "—"}%</span>
             <span style={{ fontSize: 9, fontWeight: 700, color: MQ_DIM_COLOR[t.status], width: 34, textAlign: "right" }}>{t.status}</span>
-            <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: (t.ret1m ?? 0) >= 0 ? "#4ADE80" : "#DC143C", width: 48, textAlign: "right" }}>{t.ret1m == null ? "—" : `${t.ret1m > 0 ? "+" : ""}${t.ret1m}%`}</span>
+            <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: (t.ret1m ?? 0) >= 0 ? C.pos : C.neg, width: 48, textAlign: "right" }}>{t.ret1m == null ? "—" : `${t.ret1m > 0 ? "+" : ""}${t.ret1m}%`}</span>
           </div>
           {t.top?.length > 0 && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
               {t.top.slice(0, 4).map(x => (
                 <button key={x.sym} onClick={() => onPickStock?.(x.sym)} title={`Open ${x.sym}`}
                   style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "var(--mono)", fontSize: 10, color: "var(--text2)", textDecoration: "underline dotted", textUnderlineOffset: 3 }}>
-                  {x.sym} <span style={{ color: x.ret3m >= 0 ? "#4ADE80" : "#DC143C" }}>{x.ret3m > 0 ? "+" : ""}{x.ret3m}%</span>
+                  {x.sym} <span style={{ color: x.ret3m >= 0 ? C.pos : C.neg }}>{x.ret3m > 0 ? "+" : ""}{x.ret3m}%</span>
                 </button>
               ))}
             </div>
@@ -4582,11 +4657,11 @@ function EtfPanel({ lockout, onPickStock }) {
   const [rows, setRows] = useState(null);
   useEffect(() => { let alive = true; fetchEtfTrends().then(x => alive && setRows(x)).catch(() => alive && setRows([])); return () => { alive = false; }; }, []);
   if (!rows?.length) return null;
-  const col = { UP: "#4ADE80", DOWN: "#DC143C", MIXED: "#F59E0B" };
+  const col = { UP: C.pos, DOWN: C.neg, MIXED: C.warn };
   return (
     <div style={{ ...mqCardStyle, borderColor: lockout ? "rgba(245,158,11,0.4)" : "var(--border)" }}>
       <div style={{ ...mqHeadStyle, marginBottom: 4 }}>INDEX ETFS</div>
-      <div style={{ fontSize: 11, color: lockout ? "#F59E0B" : "var(--text3)", marginBottom: 8 }}>
+      <div style={{ fontSize: 11, color: lockout ? C.warn : "var(--text3)", marginBottom: 8 }}>
         {lockout ? "Lockout rally: index ETFs often give the cleanest risk/reward." : "Trend of the main index ETFs (vs 50 & 200-day SMA)."}
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", columnGap: 12, fontSize: 12 }}>
@@ -4598,8 +4673,8 @@ function EtfPanel({ lockout, onPickStock }) {
               <div style={{ fontSize: 10, color: "var(--text3)" }}>{r.name}</div>
             </div>
             <span style={{ padding: "6px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontSize: 10, fontWeight: 700, color: col[r.trend] || "var(--text3)" }}>{r.trend}</span>
-            <span style={{ padding: "6px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: (r.ret1m ?? 0) >= 0 ? "#4ADE80" : "#DC143C" }}>{r.ret1m == null ? "—" : `${r.ret1m > 0 ? "+" : ""}${r.ret1m.toFixed(1)}%`}</span>
-            <span style={{ padding: "6px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontSize: 11, color: r.above10 ? "#4ADE80" : "#DC143C" }}>{r.above10 ? "above" : "below"}</span>
+            <span style={{ padding: "6px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", color: (r.ret1m ?? 0) >= 0 ? C.pos : C.neg }}>{r.ret1m == null ? "—" : `${r.ret1m > 0 ? "+" : ""}${r.ret1m.toFixed(1)}%`}</span>
+            <span style={{ padding: "6px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontSize: 11, color: r.above10 ? C.pos : C.neg }}>{r.above10 ? "above" : "below"}</span>
           </Fragment>
         ))}
       </div>
@@ -4709,7 +4784,7 @@ function WatchButton({ symbol, watchlist, setWatchlist }) {
   };
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-      <button className="chip" onClick={toggle} aria-pressed={Boolean(w)} style={w ? { borderColor: "#F59E0B", color: "#F59E0B" } : {}}>
+      <button className="chip" onClick={toggle} aria-pressed={Boolean(w)} style={w ? { borderColor: C.warn, color: C.warn } : {}}>
         {w ? "★ Watching" : "☆ Watch"}
       </button>
       {w && (
@@ -4738,13 +4813,13 @@ function WatchlistPanel({ watchlist, setWatchlist, onPickStock }) {
           <Fragment key={w.sym}>
             <div style={{ padding: "7px 0", borderTop: "1px solid var(--border)", minWidth: 0 }}>
               <button onClick={() => onPickStock?.(w.sym)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", fontFamily: "var(--display)", fontWeight: 700, textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{w.sym}</button>
-              <div style={{ fontSize: 10, color: al.length ? "#F59E0B" : "var(--text3)" }}>
+              <div style={{ fontSize: 10, color: al.length ? C.warn : "var(--text3)" }}>
                 {al.length ? al.map(a => `${ALERT_ICON[a.kind]} ${a.text}`).join(" · ") : sector || ""}{w.level ? ` · alert ≥ ₹${w.level}` : ""}
               </div>
             </div>
             <div style={{ padding: "7px 0", borderTop: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>
               {q?.price != null ? `₹${q.price.toFixed(2)}` : "—"}
-              {Number.isFinite(q?.changePct) && <div style={{ fontSize: 10, color: q.changePct >= 0 ? "#4ADE80" : "#DC143C" }}>{q.changePct >= 0 ? "+" : ""}{q.changePct.toFixed(2)}%</div>}
+              {Number.isFinite(q?.changePct) && <div style={{ fontSize: 10, color: q.changePct >= 0 ? C.pos : C.neg }}>{q.changePct >= 0 ? "+" : ""}{q.changePct.toFixed(2)}%</div>}
             </div>
             <div style={{ padding: "7px 0", borderTop: "1px solid var(--border)", textAlign: "right" }}>
               <button onClick={() => setWatchlist(prev => prev.filter(x => x.sym !== w.sym))} aria-label={`Remove ${w.sym}`} style={{ background: "none", border: "none", color: "var(--text3)", cursor: "pointer", fontSize: 14 }}>×</button>
@@ -4811,7 +4886,7 @@ function ZerodhaImport({ trades, setTrades }) {
           </div>
         </div>
       )}
-      {state?.done != null && <div style={{ fontSize: 12, color: "#4ADE80", marginTop: 8 }}>✓ Imported {state.done} trades. They're tagged with the market conditions at entry.</div>}
+      {state?.done != null && <div style={{ fontSize: 12, color: C.pos, marginTop: 8 }}>✓ Imported {state.done} trades. They're tagged with the market conditions at entry.</div>}
     </div>
   );
 }
@@ -4858,7 +4933,7 @@ function EquityRisk({ closed, portfolio }) {
       <div className="label" style={{ marginBottom: 6 }}>Equity curve · {sorted.length} closed trades</div>
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: "block" }} role="img" aria-label="Cumulative P&L by trade">
         <line x1="4" x2={W - 40} y1={y(0)} y2={y(0)} stroke="var(--border)" strokeDasharray="3 3" />
-        <path d={path} fill="none" stroke={eq >= 0 ? "#4ADE80" : "#DC143C"} strokeWidth="1.8" strokeLinejoin="round" />
+        <path d={path} fill="none" stroke={eq >= 0 ? C.pos : C.neg} strokeWidth="1.8" strokeLinejoin="round" />
         <text x={W - 36} y={y(eq) + 3} fontSize="9" fill="var(--text2)" fontFamily="var(--mono)">{eq >= 0 ? "+" : ""}{Math.round(eq / 1000)}k</text>
       </svg>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8, fontSize: 12 }}>
@@ -4872,7 +4947,7 @@ function EquityRisk({ closed, portfolio }) {
             {counts.map((c, i) => (
               <div key={i} title={`${labels[i]}: ${c}`} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
                 <span style={{ fontSize: 9, color: "var(--text3)", fontFamily: "var(--mono)" }}>{c || ""}</span>
-                <div style={{ width: "100%", height: `${(c / maxC) * 34}px`, minHeight: c ? 2 : 0, borderRadius: 3, background: i < 2 ? "#DC143C" : "#4ADE80", opacity: 0.75 }} />
+                <div style={{ width: "100%", height: `${(c / maxC) * 34}px`, minHeight: c ? 2 : 0, borderRadius: 3, background: i < 2 ? C.neg : C.pos, opacity: 0.75 }} />
               </div>
             ))}
           </div>
@@ -4885,7 +4960,7 @@ function EquityRisk({ closed, portfolio }) {
       {mc && (
         <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)", fontSize: 12, color: "var(--text2)", lineHeight: 1.55 }}>
           <b style={{ color: "var(--text)" }}>Next {mc.n} trades, if they look like your last {rets.length}</b> (2,000 random reshuffles):<br />
-          Chance of a 10% drawdown: <b style={{ color: mc.p10 > 30 ? "#DC143C" : "var(--text)" }}>{mc.p10}%</b> · 20% drawdown: <b style={{ color: mc.p20 > 10 ? "#DC143C" : "var(--text)" }}>{mc.p20}%</b><br />
+          Chance of a 10% drawdown: <b style={{ color: mc.p10 > 30 ? C.neg : "var(--text)" }}>{mc.p10}%</b> · 20% drawdown: <b style={{ color: mc.p20 > 10 ? C.neg : "var(--text)" }}>{mc.p20}%</b><br />
           Median outcome {mc.median > 0 ? "+" : ""}{mc.median}% · bad case (5%) {mc.worst5 > 0 ? "+" : ""}{mc.worst5}%
           {rets.length < 30 && <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 4 }}>Small sample ({rets.length} trades) — treat as a rough guide; it firms up past ~30 trades.</div>}
         </div>
@@ -4942,7 +5017,7 @@ function ExitReplay({ closed }) {
   const a = avg(r => r.actual), b10 = avg(r => r.s10.ret), b20 = avg(r => r.s20.ret);
   const best = [["your exits", a], ["10-day SMA trail", b10], ["20-day SMA trail", b20]].filter(x => x[1] != null).sort((x, y) => y[1] - x[1])[0];
   const pct = (v) => (v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(1)}%`);
-  const col = (v) => (v == null ? "var(--text3)" : v >= 0 ? "#4ADE80" : "#DC143C");
+  const col = (v) => (v == null ? "var(--text3)" : v >= 0 ? C.pos : C.neg);
   return (
     <div className="card" style={{ marginBottom: 14 }}>
       <div className="label" style={{ marginBottom: 4 }}>Exit replay · last {recent.length} trades</div>
@@ -5014,7 +5089,7 @@ function GlobalBrief() {
     <div className="card" style={{ marginBottom: 14 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <div className="label">{pre ? "Pre-market · global cues" : "Global markets"}</div>
-        {tone && <span style={{ fontSize: 11, color: tone === "positive" ? "#4ADE80" : tone === "negative" ? "#DC143C" : "var(--text3)" }}>US futures {tone}</span>}
+        {tone && <span style={{ fontSize: 11, color: tone === "positive" ? C.pos : tone === "negative" ? C.neg : "var(--text3)" }}>US futures {tone}</span>}
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", columnGap: 14, rowGap: 6, marginTop: 8 }}>
         {rows.map(r => (
@@ -5022,7 +5097,7 @@ function GlobalBrief() {
             <span style={{ color: "var(--text2)", whiteSpace: "nowrap" }}>{r.name}</span>
             <span style={{ fontFamily: "var(--mono)", whiteSpace: "nowrap" }}>
               <span style={{ color: "var(--text3)", fontSize: 10, marginRight: 4 }}>{fmt(r)}</span>
-              <span style={{ color: r.t === "USDINR=X" ? (r.chg > 0 ? "#DC143C" : "#4ADE80") : r.chg >= 0 ? "#4ADE80" : "#DC143C" }}>{r.chg >= 0 ? "+" : ""}{r.chg.toFixed(2)}%</span>
+              <span style={{ color: r.t === "USDINR=X" ? (r.chg > 0 ? C.neg : C.pos) : r.chg >= 0 ? C.pos : C.neg }}>{r.chg >= 0 ? "+" : ""}{r.chg.toFixed(2)}%</span>
             </span>
           </div>
         ))}
@@ -5074,11 +5149,11 @@ async function reportImage(text) {
   const c = document.createElement("canvas"); c.width = W; c.height = H;
   const ctx = c.getContext("2d");
   ctx.fillStyle = "#080C0F"; ctx.fillRect(0, 0, W, H);
-  ctx.fillStyle = "#DC143C"; ctx.fillRect(0, 0, W, 10);
+  ctx.fillStyle = C.neg; ctx.fillRect(0, 0, W, 10);
   ctx.fillStyle = "#F5F0E6"; ctx.font = "bold 40px ui-sans-serif, system-ui, sans-serif"; ctx.fillText(lines[0], pad, pad + 40);
   ctx.font = "32px ui-monospace, Menlo, Consolas, monospace";
   body.forEach((l, k) => {
-    ctx.fillStyle = /^⦿/.test(l) ? "#F5F0E6" : /^Signal|^Leading|^Follow/.test(l) ? "#D4CCB6" : "#A39C89";
+    ctx.fillStyle = /^⦿/.test(l) ? "#F5F0E6" : /^Signal|^Leading|^Follow/.test(l) ? "#D4CCB6" : C.muted;
     ctx.fillText(l, pad, pad + 110 + k * lh);
   });
   ctx.fillStyle = "#5A5548"; ctx.font = "26px ui-sans-serif, system-ui, sans-serif";
@@ -5189,7 +5264,7 @@ function BottomNav({ page, setPage }) {
   return (
     <div style={{
       position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 200,
-      background: "rgba(10,10,10,0.98)", backdropFilter: "blur(24px)",
+      background: "var(--bar)", backdropFilter: "blur(24px)",
       borderTop: "1px solid var(--border2)",
       boxShadow: "none",
       display: "flex",
@@ -5224,6 +5299,7 @@ export default function App() {
   } = useSyncedAppState();
   const [prefill, setPrefill] = useState(null);
   const [calcSymbol, setCalcSymbol] = useState(null); // stock picked in QUAD → opens in CALC
+  const [showTour, setShowTour] = useState(() => { try { return localStorage.getItem("td_tour_done") !== "1"; } catch (_) { return false; } });
   const [stockSym, setStockSym] = useState(null);     // stock detail page
   const [stockBack, setStockBack] = useState("scan");
   const [tradesSub, setTradesSub] = useState(() => { try { return localStorage.getItem("td_trades_sub") || "journal"; } catch (_) { return "journal"; } });
@@ -5291,6 +5367,9 @@ export default function App() {
       {page === "stock" && stockSym && (
         <StockPage symbol={stockSym} onBack={() => setPage(stockBack || "scan")} onPlan={pickStock} watchlist={watchlist} setWatchlist={setWatchlist} />
       )}
+
+      {page === "today" && <div style={{ padding: "0 16px 120px", marginTop: -100 }}><AppSettings onTour={() => setShowTour(true)} /></div>}
+      {showTour && <Tour onDone={() => { setShowTour(false); try { localStorage.setItem("td_tour_done", "1"); } catch (_) {} }} />}
 
       <BottomNav page={page} setPage={setPage} />
     </div>
