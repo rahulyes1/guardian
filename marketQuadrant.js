@@ -18,7 +18,7 @@ export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 let API_BASE = "";
 export function setApiBase(url) { API_BASE = String(url || "").replace(/\/+$/, ""); }
 
-const LOCAL_KEY       = "td_mq_v12";  // v12: trade plans for every stock (IDEAS)
+const LOCAL_KEY       = "td_mq_v13";  // v13: market monitor, coiling scan, delivery %
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
@@ -93,7 +93,7 @@ export function configureSharedStore(getClient) { sharedClientGetter = getClient
 
 function looksValid(d) {
   return d && MQ_SIGNALS.includes(d.overall) && Array.isArray(d.history) && typeof d.total === "number" && d.total >= 400
-    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d && Array.isArray(d.scans.ep) && d.rs_of && d.scan_stats && d.plan_of;
+    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d && Array.isArray(d.scans.ep) && d.rs_of && d.scan_stats && d.plan_of && d.market_monitor && Array.isArray(d.scans.coil);
 }
 async function readShared() {
   const sb = sharedClientGetter?.();
@@ -283,7 +283,7 @@ export function tradePlan(closes, i = closes.length - 1) {
  * Returns { scanId: { signals, days, hit, avg, excess, from, to } }.
  */
 export function scanBacktest(axis, stocks, volumes, last, horizon = 10, lookback = 250) {
-  const ids = ["pivots", "ep", "tight", "reclaim50", "leaders"];
+  const ids = ["pivots", "ep", "tight", "reclaim50", "leaders", "coil"];
   const acc = Object.fromEntries(ids.map(id => [id, { n: 0, up: 0, sum: 0, ex: 0, days: new Set() }]));
   const start = Math.max(60, last - horizon - lookback), end = last - horizon;
   for (let t = start; t <= end; t++) {
@@ -317,6 +317,14 @@ export function scanBacktest(axis, stocks, volumes, last, horizon = 10, lookback
       }
       if (s50 != null && st.s50[t - 1] != null && x > s50 && p <= st.s50[t - 1]) hit("reclaim50", st);
       if (st.s10[t] != null && s50 != null && s200 != null && h != null && x > st.s10[t] && x > s50 && x > s200 && x >= h * 0.95) hit("leaders", st);
+      if (s50 != null && x > s50) {
+        const rng = (i) => { const w = c.slice(i - 9, i + 1).filter(y => y != null); return w.length >= 8 ? Math.max(...w) / Math.min(...w) - 1 : null; };
+        const now = rng(t);
+        if (now != null && now <= 0.05) {
+          let tight = true; for (let k = 1; k <= 10; k++) { const r = rng(t - k); if (r != null && r < now) { tight = false; break; } }
+          if (tight) hit("coil", st);
+        }
+      }
     }
   }
   const out = {};
@@ -846,9 +854,57 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   }
   const planOf = {};
   for (const [ticker, closes] of Object.entries(aligned)) { const p = tradePlan(closes, last); if (p) planOf[ticker.replace(/.NS$/, "")] = { entry: p.entry, stop: p.stop, riskPct: p.riskPct, breaking: p.breaking }; }
+  // Coiling (Stockbee "anticipation"): strong stock going quiet before a possible breakout —
+  // RS 80+, above the 50-SMA, last 10 closes within 5% and the tightest 10-day range of the past
+  // 20 sessions, volume drying up.
+  const coil = [];
+  for (const st of stocks) {
+    const c = st.closes, cl = c[last], rs = rsOf[st.sym];
+    if (cl == null || rs == null || rs < 80 || st.s50[last] == null || cl <= st.s50[last]) continue;
+    const rng = (i) => { const w = c.slice(i - 9, i + 1).filter(x => x != null); return w.length >= 8 ? Math.max(...w) / Math.min(...w) - 1 : null; };
+    const now = rng(last); if (now == null || now > 0.05) continue;
+    let tightest = true; for (let k = 1; k <= 10; k++) { const r = rng(last - k); if (r != null && r < now) { tightest = false; break; } }
+    if (!tightest) continue;
+    const g = gradeSetup({ closes: c, vols: volumes?.[st.ticker] || null, i: last, s50: st.s50[last], s200: st.s200[last], rs });
+    if (g.volDry === false) continue;
+    coil.push({ sym: st.sym, sector: sectorMap[st.sym] || "Other", range10: r1(now * 100), ret3m: ret3(st),
+      off_high: st.h252[last] != null ? r1((cl / st.h252[last] - 1) * 100) : null });
+  }
+  coil.sort((a, b) => (rsOf[b.sym] ?? 0) - (rsOf[a.sym] ?? 0));
+  scans.coil = coil.slice(0, 15); scans.coil_total = coil.length;
+
+  // Market Monitor (Stockbee-style breadth of momentum): stocks up / down ≥4% on rising volume
+  const mmDay = (i) => {
+    let up = 0, dn = 0, q25u = 0, q25d = 0;
+    for (const st of stocks) {
+      const c = st.closes, v = volumes?.[st.ticker];
+      if (c[i] == null || c[i - 1] == null) continue;
+      const chg = c[i] / c[i - 1] - 1, volUp = v ? (v[i] != null && v[i - 1] != null && v[i] > v[i - 1]) : true;
+      if (chg >= 0.04 && volUp) up++; else if (chg <= -0.04 && volUp) dn++;
+      const q = i >= 63 && c[i - 63] != null ? c[i] / c[i - 63] - 1 : null;
+      if (q != null && q >= 0.25) q25u++; else if (q != null && q <= -0.25) q25d++;
+    }
+    return { up, dn, q25u, q25d };
+  };
+  const mmRows = [];
+  const mmStart = Math.max(64, last - 260);
+  const daily = []; for (let i = mmStart; i <= last; i++) daily.push({ i, ...mmDay(i) });
+  const ratio = (k, n) => { const w = daily.slice(Math.max(0, k - n + 1), k + 1); const u = w.reduce((a, x) => a + x.up, 0), dd = w.reduce((a, x) => a + x.dn, 0); return dd ? r1(u / dd) : (u ? 9.9 : null); };
+  daily.forEach((x, k) => mmRows.push({ d: axis[x.i], up: x.up, dn: x.dn, r5: ratio(k, 5), r10: ratio(k, 10), q25u: x.q25u, q25d: x.q25d }));
+  // What happened to the average stock over the next 10 sessions after strong / weak readings
+  const mmBt = { strong: [], weak: [], mid: [] };
+  daily.forEach((x, k) => {
+    const t = x.i; if (t + 10 > last) return;
+    let s = 0, n = 0; for (const st of stocks) { const a = st.closes[t], b = st.closes[t + 10]; if (a != null && b != null) { s += b / a - 1; n++; } }
+    if (!n) return; const r10 = mmRows[k].r10; if (r10 == null) return;
+    (r10 >= 2 ? mmBt.strong : r10 <= 0.5 ? mmBt.weak : mmBt.mid).push(s / n);
+  });
+  const avgP = (xs) => (xs.length ? { days: xs.length, fwd: r1((xs.reduce((a, b) => a + b, 0) / xs.length) * 100), up: Math.round((xs.filter(v => v > 0).length / xs.length) * 100) } : null);
+  const marketMonitor = { rows: mmRows.slice(-30), bt: { strong: avgP(mmBt.strong), weak: avgP(mmBt.weak), mid: avgP(mmBt.mid) } };
+
   const enrich = (rows) => (rows || []).forEach(r => { r.rs = rsOf[r.sym] ?? null; r.grade = gradeOf[r.sym] ?? null; r.plan = planOf[r.sym] ?? null; });
   enrich(leaders);
-  for (const k of ["pivots", "tight", "reclaim50", "ep", "ipo"]) enrich(scans[k]);
+  for (const k of ["pivots", "tight", "reclaim50", "ep", "ipo", "coil"]) enrich(scans[k]);
   for (const rows of Object.values(sectorStocks)) enrich(rows);
   for (const t of themes) enrich(t.top);
 
@@ -862,7 +918,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     swing_state: swingState, momentum_sign: momentumSign, momentum_dir: momentumDir,
     momentum_leaders: momentumLeaders, environment,
     follow_through: computeFollowThrough(axis, aligned, volumes),
-    leaders_new: leadersNew, scans, scan_stats: scanStats, rs_of: rsOf, rs_breaks: rsBreaks, grade_of: gradeOf, plan_of: planOf,
+    leaders_new: leadersNew, scans, scan_stats: scanStats, rs_of: rsOf, rs_breaks: rsBreaks, grade_of: gradeOf, plan_of: planOf, market_monitor: marketMonitor,
     lows_ok: newLows <= LOWS_OK_MAX, lows_ok_max: LOWS_OK_MAX,
     pct_above_20: pct20,
     swing_confidence: Math.round(score), momentum_change: r1(mom.raw - mom.ma),
@@ -932,13 +988,13 @@ async function fetchBhav() {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 12000);
-    const r = await fetch(API_BASE + "/api/nse?type=bhav&v=2", { signal: ctrl.signal }) /* v=2: response includes volume */;
+    const r = await fetch(API_BASE + "/api/nse?type=bhav&v=3", { signal: ctrl.signal }) /* v=2: response includes volume */;
     clearTimeout(t);
     if (!r.ok) return null;
     const j = await r.json();
     if (!j?.date || !j.closes) return null;
     const closes = {};
-    for (const [s, v] of Object.entries(j.closes)) closes[s] = { prev: v[0], close: v[1], vol: v[2] ?? null };
+    for (const [s, v] of Object.entries(j.closes)) closes[s] = { prev: v[0], close: v[1], vol: v[2] ?? null, deliv: v[3] ?? null };
     return { date: j.date, closes };
   } catch (_) { return null; }
 }
@@ -987,6 +1043,11 @@ async function computeFresh(onProgress) {
   if (verification) verification.volumes_filled = fillVolumesFromBhav(axis, volumes, bhavData);
   const result = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, volumes, await themesPromise, (await eventsPromise)?.results || null);
   if (droppedDay) result.pending_day = droppedDay;
+  // Delivery % for the result day (from NSE's bhavcopy): share of traded quantity actually delivered
+  if (bhavData?.date === result.as_of) {
+    result.deliv_of = {};
+    for (const t of Object.keys(aligned)) { const sym = t.replace(/\.NS$/, ""); const dv = bhavData.closes[sym]?.deliv; if (dv != null) result.deliv_of[sym] = dv; }
+  }
   const idx = await indexPromise;
   result.signal_backtest = idx ? backtestSignal(result.history, idx) : null;
   return result;
@@ -1014,7 +1075,7 @@ export function upcomingResults(cal, sym, days = 7) {
 }
 
 // ─── wider universe: NSE Microcap 250 (loaded on demand, scans only) ─────────
-const MICRO_KEY = "td_mq_micro_v3"; // v3: RS + grades + plans
+const MICRO_KEY = "td_mq_micro_v4"; // v4: + coiling
 let _microInflight = null;
 export async function loadMicrocapScans({ force = false } = {}) {
   if (!force) {

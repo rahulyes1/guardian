@@ -1,7 +1,9 @@
 // Vercel Node.js serverless function — official NSE data (source of truth)
 //   /api/nse?type=indices  latest ind_close_all file  → { date, indices: { "Nifty 50": {...}, "Nifty 500": {...} } }
-//   /api/nse?type=bhav     latest sec_bhavdata_full   → { date, closes: { SYMBOL: [prev, close, volume] } }
+//   /api/nse?type=bhav     latest sec_bhavdata_full   → { date, closes: { SYMBOL: [prev, close, volume, delivery%] } }
 //   /api/nse?type=live     NSE allIndices feed        → { date, time, indices: { "NIFTY 50": {...}, ... } }
+//   /api/nse?type=flows    FII/DII cash market activity (latest day)  → { date, fii: {buy,sell,net}, dii: {...} }  (₹ crore)
+//   /api/nse?type=deals    bulk + block deals (latest day)            → { date, deals: [{ sym, client, side, qty, price, kind }] }
 //   /api/nse?type=events   NSE board-meeting calendar → { from, to, results: { SYMBOL: ["YYYY-MM-DD", ...] } }
 //                          (financial results only; 10 days back to 21 days ahead)
 // Errors return { error } with a non-200 status and are never cached.
@@ -75,7 +77,7 @@ export default async function handler(req, res) {
         (d) => `https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_${d}.csv`, parseBhavFullCsv, started);
       if (!parsed) return fail(502, "NSE bhavcopy unavailable", { tried });
       const closes = {};
-      for (const [s, v] of Object.entries(parsed.closes)) closes[s] = [v.prev, v.close, v.vol];
+      for (const [s, v] of Object.entries(parsed.closes)) closes[s] = [v.prev, v.close, v.vol, v.deliv];
       res.setHeader("Cache-Control", `public, max-age=300, s-maxage=${cacheFor(parsed.date)}`);
       return res.json({ source: "nse-sec_bhavdata_full", date: parsed.date, closes });
     }
@@ -88,6 +90,27 @@ export default async function handler(req, res) {
       const indices = Object.fromEntries(keep.filter((k) => parsed.indices[k]).map((k) => [k, parsed.indices[k]]));
       res.setHeader("Cache-Control", "public, max-age=15, s-maxage=20");
       return res.json({ source: "nse-allIndices", date: parsed.date, time: parsed.time, indices });
+    }
+
+    if (type === "flows") {
+      const r = await get("https://www.nseindia.com/api/fiidiiTradeReact", { json: true, timeout: 6000 });
+      const rows = r.status === 200 && Array.isArray(r.body) ? r.body : null;
+      if (!rows?.length) return fail(502, `NSE FII/DII data unavailable (${r.status || r.error})`);
+      const pick = (re) => rows.find((x) => re.test(x.category || ""));
+      const conv = (x) => (x ? { buy: Number(x.buyValue), sell: Number(x.sellValue), net: Number(x.netValue) } : null);
+      res.setHeader("Cache-Control", "public, max-age=900, s-maxage=1800");
+      return res.json({ source: "nse-fiidii", date: parseNseDate(rows[0].date), fii: conv(pick(/FII|FPI/i)), dii: conv(pick(/DII/i)) });
+    }
+
+    if (type === "deals") {
+      const r = await get("https://www.nseindia.com/api/snapshot-capital-market-largedeal", { json: true, timeout: 7000 });
+      const b = r.status === 200 ? r.body : null;
+      if (!b) return fail(502, `NSE deals data unavailable (${r.status || r.error})`);
+      const take = (arr, kind) => (Array.isArray(arr) ? arr : []).map((x) => ({
+        sym: x.symbol, client: x.clientName, side: x.buySell, qty: Number(x.qty), price: Number(x.watp), kind,
+      })).filter((x) => x.sym && Number.isFinite(x.qty));
+      res.setHeader("Cache-Control", "public, max-age=900, s-maxage=1800");
+      return res.json({ source: "nse-largedeal", date: parseNseDate(b.as_on_date), deals: [...take(b.BLOCK_DEALS_DATA, "block"), ...take(b.BULK_DEALS_DATA, "bulk")] });
     }
 
     if (type === "events") {

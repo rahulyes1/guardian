@@ -32,7 +32,7 @@ const THEME_TOKENS = {
   heatHot: C.neg,
 };
 
-const SETUP_TYPES = ["Breakout", "Pullback", "U&R", "Range Break", "Momentum"];
+const SETUP_TYPES = ["Breakout", "Pullback", "U&R", "Range Break", "Momentum", "EP", "IPO base", "Coiling"];
 const SEARCH_API_DEBOUNCE_MS = 300;
 const SEARCH_RESULT_LIMIT = 10;
 const LIVE_REFRESH_INTERVAL_MS = 15000;
@@ -1391,6 +1391,7 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
                 {refreshing ? "..." : "↺"}
               </button>
             )}
+            <button className="btn-ghost" style={{ padding: "8px 12px", fontSize: 12, borderRadius: 8 }} onClick={() => setPage("journal")}>Journal ›</button>
             <button className="btn-primary" style={{ padding: "8px 14px", fontSize: 12, borderRadius: 8 }} onClick={() => onPlan?.(null)}>+ Plan a trade</button>
           </div>
         ))}
@@ -1743,8 +1744,9 @@ function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillS
 }
 
 // ─── JOURNAL PAGE ────────────────────────────────────────────────────────────
-function JournalPage({ trades, setTrades, prefill, setPrefill }) {
+function JournalPage({ trades, setTrades, prefill, setPrefill, onOpenStock }) {
   const [step, setStep] = useState(0); // 0=list, 1=form
+  const [ticked, setTicked] = useState([]); // pre-trade checklist for the chosen setup
 
   const emptyForm = {
     symbol: "",
@@ -1851,6 +1853,7 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
       date: new Date().toISOString(),
       marketSignal: currentMarketSignal(), // QUAD signal at entry (null if no recent data)
       marketTags: currentMarketTags(form.symbol), // signal, environment, follow-through, sector status at entry
+      checklist: PLAYBOOK_SETUPS[form.setupType] ? { setup: form.setupType, ticked: [...ticked].sort(), total: PLAYBOOK_SETUPS[form.setupType].rules.length } : null,
       entries,
       currentStop,
       targets,
@@ -1866,6 +1869,7 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
     };
     setTrades([...trades, trade]);
     setForm(emptyForm);
+    setTicked([]);
     setSymbolInfo(null);
     setStep(0);
   };
@@ -1917,12 +1921,15 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {SETUP_TYPES.map(s => (
             <button key={s} className={`chip ${form.setupType === s ? "active" : ""}`}
-              onClick={() => setForm(f => ({ ...f, setupType: s }))}>
+              onClick={() => { setForm(f => ({ ...f, setupType: s })); setTicked([]); }}>
               {s}
             </button>
           ))}
         </div>
       </div>
+
+      <PreTradeChecklist setup={form.setupType} ticked={ticked}
+        onToggle={(i) => setTicked(t => (t.includes(i) ? t.filter(x => x !== i) : [...t, i]))} />
 
       {/* Entry Legs */}
       <div className="card" style={{ marginBottom: 12 }}>
@@ -2037,7 +2044,7 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
         <div style={{ marginBottom: 16 }}>
           <div className="label" style={{ marginBottom: 8 }}>Open / Partial ({openTrades.length})</div>
           {openTrades.map(t => (
-            <JournalTradeCard key={t.id} trade={t} onUpdateTrade={updateTrade} onDelete={deleteTrade} />
+            <JournalTradeCard key={t.id} trade={t} onUpdateTrade={updateTrade} onDelete={deleteTrade} onOpenStock={onOpenStock} />
           ))}
         </div>
       )}
@@ -2046,7 +2053,7 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
         <div>
           <div className="label" style={{ marginBottom: 8 }}>Closed ({closedTrades.length})</div>
           {closedTrades.map(t => (
-            <JournalTradeCard key={t.id} trade={t} onUpdateTrade={updateTrade} onDelete={deleteTrade} />
+            <JournalTradeCard key={t.id} trade={t} onUpdateTrade={updateTrade} onDelete={deleteTrade} onOpenStock={onOpenStock} />
           ))}
         </div>
       )}
@@ -2063,7 +2070,7 @@ function JournalPage({ trades, setTrades, prefill, setPrefill }) {
 }
 
 // ─── JOURNAL TRADE CARD ───────────────────────────────────────────────────────
-function JournalTradeCard({ trade, onUpdateTrade, onDelete }) {
+function JournalTradeCard({ trade, onUpdateTrade, onDelete, onOpenStock }) {
   const [mode, setMode] = useState(null); // null | "pyramid" | "updateSL" | "exit"
   const [pyramidForm, setPyramidForm] = useState({ price: "", qty: "", notes: "" });
   const [newSL, setNewSL] = useState("");
@@ -2193,7 +2200,10 @@ function JournalTradeCard({ trade, onUpdateTrade, onDelete }) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
         <div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <div style={{ fontFamily: "var(--display)", fontSize: 22, letterSpacing: "0.04em" }}>{trade.symbol}</div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+              <div style={{ fontFamily: "var(--display)", fontSize: 22, letterSpacing: "0.04em" }}>{trade.symbol}</div>
+              {onOpenStock && <button className="chip" style={{ fontSize: 10, padding: "2px 8px" }} onClick={() => onOpenStock(normalizeSymbol(trade.symbol))}>Chart ›</button>}
+            </div>
             {trade.status === "partial" && (
               <span className="tag" style={{ background: "rgba(220,20,60,0.08)", color: "var(--violet)", border: "1px solid rgba(220,20,60,0.2)" }}>PARTIAL</span>
             )}
@@ -3197,7 +3207,9 @@ function MarketQuadrantPage({ onPickStock }) {
 
       <MqEnvironment data={data} />
       <EtfPanel lockout={data.environment?.lockout} onPickStock={onPickStock} />
+      <MqFlowsDeals data={data} onPickStock={onPickStock} />
       <MqFollowThrough data={data} />
+      <MqMarketMonitor mm={data.market_monitor} />
 
       <MqVerificationBadge data={data} />
 
@@ -3519,6 +3531,7 @@ function AppSettings({ onTour }) {
 
 function MarketBrief({ onOpenQuad, onOpenScan }) {
   const { data, loading, error, progress, retry } = useMarketQuadrant();
+  const { flows } = useFlowsDeals();
   if (!data?.history) {
     return (
       <div className="card" style={{ marginBottom: 14 }}>
@@ -3590,6 +3603,7 @@ function MarketBrief({ onOpenQuad, onOpenScan }) {
           Leading sectors: {d.momentum_leaders.slice(0, 4).map(m => `${m.name} +${m.ret1m}%`).join(" · ")}
         </div>
       )}
+      <FlowsLine flows={flows} />
 
       <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
         <button className="btn-primary" style={{ flex: 1, padding: "10px 8px", fontSize: 12 }} onClick={onOpenScan}>
@@ -3606,7 +3620,9 @@ function MarketBrief({ onOpenQuad, onOpenScan }) {
 
 const SCAN_DEFS = [
   { id: "pivots", label: "Pivots today", hint: "Up ≥4.5% today on volume above yesterday's and the 50-day average — fresh institutional demand.",
-    cols: [["CHG", r => r.chg != null ? `+${r.chg}%` : "—"], ["VOL×", r => r.volx != null ? `${r.volx}×` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"]] },
+    cols: [["CHG", r => r.chg != null ? `+${r.chg}%` : "—"], ["VOL×", r => r.volx != null ? `${r.volx}×` : "—"], ["DELIV", r => r.deliv != null ? `${Math.round(r.deliv)}%` : "—"]] },
+  { id: "coil", label: "Coiling", hint: "Anticipation setups: RS 80+, above the 50-SMA, the tightest 10-day range in a month and volume drying up — strong stocks going quiet before a possible breakout.",
+    cols: [["RANGE", r => r.range10 != null ? `${r.range10}%` : "—"], ["HIGH", r => r.off_high != null ? `${r.off_high}%` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"]] },
   { id: "leaders", label: "Leaders · hot sectors", hint: "Above 10/50/200-SMA, within 5% of 52-week high, in a HOT or WARM sector.",
     cols: [["12M", r => r.ret12m != null ? `${r.ret12m > 0 ? "+" : ""}${r.ret12m}%` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"], ["HIGH", r => r.off_high != null ? `${r.off_high}%` : "—"]] },
   { id: "tight", label: "Tight near highs", hint: "Above 50 & 200-SMA, within 10% of the 52-week high, last 10 closes in a ≤6% range — low-volatility setups.",
@@ -3625,6 +3641,7 @@ const SCAN_SORT = {
   ipo: (a, b) => (b.breakout - a.breakout) || (b.from_listing - a.from_listing),
   leaders: (a, b) => (b.ret12m ?? b.ret3m ?? -999) - (a.ret12m ?? a.ret3m ?? -999),
   tight: (a, b) => (b.ret3m ?? -999) - (a.ret3m ?? -999),
+  coil: (a, b) => (b.rs ?? 0) - (a.rs ?? 0),
   reclaim50: (a, b) => (b.ret3m ?? -999) - (a.ret3m ?? -999),
 };
 
@@ -3667,19 +3684,19 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
   const statusOf = Object.fromEntries((data.sectors || []).map(s => [s.name, s.status]));
   const hot = (l) => ["HOT", "WARM"].includes(statusOf[l.sector]);
   const base = {
-    pivots: data.scans.pivots || [], tight: data.scans.tight || [], reclaim50: data.scans.reclaim50 || [],
-    ep: data.scans.ep || [], ipo: data.scans.ipo || [], leaders: (data.leaders || []).filter(hot),
+    pivots: (data.scans.pivots || []).map(r => ({ ...r, deliv: data.deliv_of?.[r.sym] ?? null })), tight: data.scans.tight || [], reclaim50: data.scans.reclaim50 || [],
+    ep: data.scans.ep || [], ipo: data.scans.ipo || [], leaders: (data.leaders || []).filter(hot), coil: data.scans.coil || [],
   };
   const totals = { pivots: data.scans.pivots_total, tight: data.scans.tight_total, reclaim50: data.scans.reclaim50_total,
-    ep: data.scans.ep_total || 0, ipo: data.scans.ipo_total || 0, leaders: base.leaders.length };
+    ep: data.scans.ep_total || 0, ipo: data.scans.ipo_total || 0, leaders: base.leaders.length, coil: data.scans.coil_total || 0 };
   const lists = { ...base };
   if (micro && microData?.scans) {
     const m = microData.scans, tag = (xs) => (xs || []).map(x => ({ ...x, micro: true }));
-    const add = { pivots: tag(m.pivots), tight: tag(m.tight), reclaim50: tag(m.reclaim50), ep: tag(m.ep), ipo: tag(m.ipo), leaders: tag((microData.leaders || []).filter(hot)) };
+    const add = { pivots: tag(m.pivots), tight: tag(m.tight), reclaim50: tag(m.reclaim50), ep: tag(m.ep), ipo: tag(m.ipo), leaders: tag((microData.leaders || []).filter(hot)), coil: tag(m.coil) };
     for (const k of Object.keys(add)) {
       const seen = new Set(base[k].map(x => x.sym));
       lists[k] = [...base[k], ...add[k].filter(x => !seen.has(x.sym))].sort(SCAN_SORT[k]).slice(0, 25);
-      totals[k] = (totals[k] || 0) + ({ pivots: m.pivots_total, tight: m.tight_total, reclaim50: m.reclaim50_total, ep: m.ep_total, ipo: m.ipo_total, leaders: add.leaders.length }[k] || 0);
+      totals[k] = (totals[k] || 0) + ({ pivots: m.pivots_total, tight: m.tight_total, reclaim50: m.reclaim50_total, ep: m.ep_total, ipo: m.ipo_total, leaders: add.leaders.length, coil: m.coil_total }[k] || 0);
     }
   }
   const isWatch = tab === "watch";
@@ -3798,7 +3815,7 @@ async function fetchStockDetail(sym) {
   const url = `/api/spark?symbols=${encodeURIComponent(`${tk},${IDX_TICKER}`)}&range=2y&interval=1d&vol=260`;
   const [sparkRes, bhavRes] = await Promise.all([
     fetch(url).then(r => (r.ok ? r.json() : null)).catch(() => null),
-    fetch("/api/nse?type=bhav&v=2").then(r => (r.ok ? r.json() : null)).catch(() => null),
+    fetch("/api/nse?type=bhav&v=3").then(r => (r.ok ? r.json() : null)).catch(() => null),
   ]);
   const items = Object.fromEntries((sparkRes?.spark?.result || []).map(it => [it.symbol, it]));
   const s = items[tk], ix = items[IDX_TICKER];
@@ -3827,13 +3844,14 @@ async function fetchStockDetail(sym) {
     }
   }
   const idx = dates.map(d => id[d]?.c ?? null);
+  const delivery = b && b[3] != null && bhavRes?.date ? { pct: b[3], date: bhavRes.date } : null;
   return {
-    sym, dates, closes, vols, idx, verified,
+    sym, dates, closes, vols, idx, verified, delivery,
     s10: smaSeries(closes, 10, 8), s50: smaSeries(closes, 50, 40), s200: smaSeries(closes, 200, 150),
   };
 }
 
-function StockChart({ d, from, series = STOCK_SERIES }) {
+function StockChart({ d, from, series = STOCK_SERIES, marks = [] }) {
   const [hover, setHover] = useState(null);
   const n = d.dates.length, start = Math.max(0, n - from);
   const idx = Array.from({ length: n - start }, (_, k) => start + k);
@@ -3871,6 +3889,15 @@ function StockChart({ d, from, series = STOCK_SERIES }) {
           <rect key={i} x={x(k) - 0.6} width="1.2" y={H + 6 + VH - (d.vols[i] / maxV) * VH} height={(d.vols[i] / maxV) * VH}
             fill={d.closes[i] >= (d.closes[i - 1] ?? d.closes[i]) ? C.pos : C.neg} opacity="0.55" />
         ) : null)}
+        {/* Trade replay: your buys (▲ below) and sells (▼ above), on the first chart bar on/after the trade day */}
+        {marks.map((m, j) => {
+          const k = idx.findIndex(i => d.dates[i] >= m.day);
+          if (k < 0 || (k === 0 && d.dates[idx[0]] > m.day)) return null;
+          const px = x(k), py = y(Math.min(hi, Math.max(lo, m.price)));
+          return m.side === "buy"
+            ? <path key={j} d={`M${px},${py + 4} l-4,7 h8 z`} fill={C.pos} stroke="var(--bg2)" strokeWidth="1"><title>{`Bought ₹${m.price} on ${mqFmtDate(m.day)}`}</title></path>
+            : <path key={j} d={`M${px},${py - 4} l-4,-7 h8 z`} fill={C.neg} stroke="var(--bg2)" strokeWidth="1"><title>{`Sold ₹${m.price} on ${mqFmtDate(m.day)}`}</title></path>;
+        })}
         {hi_ != null && (
           <g>
             <line x1={x(hover)} x2={x(hover)} y1={padT} y2={H + VH + 6} stroke="var(--text3)" strokeWidth="1" />
@@ -3906,8 +3933,12 @@ function ResultsWarning({ symbol, style }) {
   );
 }
 
-function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist }) {
+function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [] }) {
   const { data: mq } = useMarketQuadrant();
+  const { deals } = useFlowsDeals();
+  const myDeals = (deals?.deals || []).filter(x => x.sym === symbol).filter((x, i, arr) => arr.findIndex(y => y.client === x.client && y.side === x.side && y.qty === x.qty && y.price === x.price) === i);
+  const marks = tradeMarks(trades, symbol);
+  const myTrades = (trades || []).filter(t => normalizeSymbol(t.symbol) === symbol);
   const [d, setD] = useState(null);
   const [err, setErr] = useState(null);
   const [range, setRange] = useState(250);
@@ -3972,6 +4003,16 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist }) {
         </div>
         <div style={{ marginTop: 10 }}><WatchButton symbol={symbol} watchlist={watchlist} setWatchlist={setWatchlist} /></div>
         <ResultsWarning symbol={symbol} style={{ marginTop: 8 }} />
+        {d.delivery && (
+          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 6 }}>
+            Delivery <b style={{ color: d.delivery.pct >= 50 ? C.pos : "var(--text)" }}>{Math.round(d.delivery.pct)}%</b> of traded shares on {mqFmtDate(d.delivery.date)} (NSE){d.delivery.pct >= 50 ? " — mostly real buying/selling, not intraday churn" : ""}
+          </div>
+        )}
+        {myDeals.length > 0 && (
+          <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 6 }}>
+            {myDeals.slice(0, 3).map((x, i) => <div key={i}><b style={{ color: x.side === "BUY" ? C.pos : C.neg }}>{x.kind} {x.side.toLowerCase()}</b> · {x.client} · {(x.qty / 1e5).toFixed(1)}L sh @ ₹{x.price}</div>)}
+          </div>
+        )}
         <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 4 }}>
           {sector || "—"}{secInfo && <span style={{ color: MQ_DIM_COLOR[secInfo.status] }}> · {secInfo.status}</span>}{secInfo?.quadrant && ` · ${secInfo.quadrant.toLowerCase()}`} · {offHigh.toFixed(1)}% from 52w high
         </div>
@@ -3990,7 +4031,18 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist }) {
           <span><span style={{ display: "inline-block", width: 10, height: 2, background: "var(--text)", marginRight: 4, verticalAlign: "middle" }} />Price</span>
           {(weekly ? WEEKLY_SERIES : STOCK_SERIES).map(s => <span key={s.key}><span style={{ display: "inline-block", width: 10, height: 2, background: s.color, marginRight: 4, verticalAlign: "middle" }} />{s.label}</span>)}
         </div>
-        <StockChart d={weekly ? wk : d} from={range} series={weekly ? WEEKLY_SERIES : STOCK_SERIES} />
+        <StockChart d={weekly ? wk : d} from={range} series={weekly ? WEEKLY_SERIES : STOCK_SERIES} marks={marks} />
+        {myTrades.length > 0 && (
+          <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 8, borderTop: "1px solid var(--border)", paddingTop: 6 }}>
+            <div style={{ color: "var(--text3)", marginBottom: 3 }}>Your trades in {symbol} <span style={{ color: C.pos }}>▲ buy</span> <span style={{ color: C.neg }}>▼ sell</span></div>
+            {myTrades.slice(0, 5).map(t => (
+              <div key={t.id} style={{ display: "flex", justifyContent: "space-between", fontFamily: "var(--mono)" }}>
+                <span>{mqFmtDate(new Date(Date.parse(t.entries?.[0]?.date || t.date) + 19800000).toISOString().slice(0, 10))} · {t.setupType} · {t.status}</span>
+                <span style={{ color: (t.pnl || 0) >= 0 ? C.pos : C.neg }}>{t.status === "closed" ? `${(t.pnl || 0) >= 0 ? "+" : ""}${formatINR(t.pnl || 0)}` : `@ ₹${t.avgEntry}`}</span>
+              </div>
+            ))}
+          </div>
+        )}
         {wTrend && <div style={{ fontSize: 11, marginTop: 6, color: wTrend.above && wTrend.rising ? C.pos : !wTrend.above && !wTrend.rising ? C.neg : C.warn }}>{wTrend.label}</div>}
       </div>
 
@@ -4440,6 +4492,7 @@ function disciplineScore(t, mq, portfolio) {
     ["Sector HOT/WARM", ctx.sectorStatus ? ["HOT", "WARM"].includes(ctx.sectorStatus) : null],
     ["Risk within suggested size", sugg && riskPct != null ? riskPct <= sugg.pct + 0.1 : null],
     ["Had a stop", t.source === "zerodha" && !((t.currentStop || t.stop) > 0) ? null : (t.currentStop || t.stop) > 0],
+    ["Pre-trade checklist complete", t.checklist ? t.checklist.ticked.length === t.checklist.total : null],
   ];
   const known = checks.filter(c => c[1] != null);
   return { score: known.filter(c => c[1]).length, of: known.length, checks };
@@ -5216,13 +5269,13 @@ function readMicro() {
   try { return JSON.parse(localStorage.getItem("td_mq_micro_v3") || "null")?.data || null; } catch (_) { return null; }
 }
 
-const IDEA_TAG = { pivot: "Pivot today", tight: "Tight", ep: "EP", epr: "EP ★ results", ipo: "IPO base", ipoup: "IPO ↑ new high", leader: "Leader", watch: "★ Watching" };
+const IDEA_TAG = { coil: "Coiling", deliv: "High delivery", block: "Block/bulk buy", pivot: "Pivot today", tight: "Tight", ep: "EP", epr: "EP ★ results", ipo: "IPO base", ipoup: "IPO ↑ new high", leader: "Leader", watch: "★ Watching" };
 
 /**
  * One ranked, de-duplicated list of what's worth acting on today.
  * Score: grade (A 30 / B 15) + strength/5 + 6 per reason + hot-sector and watchlist bonuses.
  */
-function buildIdeas(d, micro, watchlist) {
+function buildIdeas(d, micro, watchlist, blockBuys = null) {
   if (!d?.scans) return [];
   const status = Object.fromEntries((d.sectors || []).map(s => [s.name, s.status]));
   const map = new Map();
@@ -5242,11 +5295,15 @@ function buildIdeas(d, micro, watchlist) {
     (sc.tight || []).forEach(r => add(r, "tight", isMicro));
     (sc.ep || []).forEach(r => add(r, r.results ? "epr" : "ep", isMicro));
     (sc.ipo || []).forEach(r => add(r, r.breakout ? "ipoup" : "ipo", isMicro));
+    (sc.coil || []).forEach(r => add(r, "coil", isMicro));
   };
   take(d.scans, false);
   (d.leaders || []).filter(l => ["HOT", "WARM"].includes(status[l.sector])).forEach(r => add(r, "leader", false));
   if (micro?.scans) take(micro.scans, true);
   for (const w of watchlist || []) add({ sym: w.sym }, "watch", false);
+  // Delivery-backed moves: most of today's traded quantity was taken as delivery (NSE)
+  for (const x of map.values()) if ((x.tags.has("pivot") || x.tags.has("coil")) && (d.deliv_of?.[x.sym] ?? 0) >= 50) x.tags.add("deliv");
+  for (const sym of blockBuys || []) if (map.has(sym)) map.get(sym).tags.add("block");
   const G = { A: 30, B: 15, C: 0 };
   return [...map.values()].map(x => {
     const st = status[x.sector];
@@ -5288,6 +5345,8 @@ function IdeaRow({ x, portfolio, riskPct, onOpen, onPlan, compact }) {
 
 function IdeasPage({ watchlist, portfolio, onOpenStock, onPlan }) {
   const { data, loading, error, progress, retry } = useMarketQuadrant();
+  const { deals } = useFlowsDeals();
+  const blockBuys = (deals?.deals || []).filter(x => x.side === "BUY").map(x => x.sym);
   const [filter, setFilter] = useState(() => { try { return localStorage.getItem("td_ideas_filter") || "all"; } catch (_) { return "all"; } });
   const pick = (f) => { setFilter(f); try { localStorage.setItem("td_ideas_filter", f); } catch (_) {} };
   const head = (
@@ -5305,7 +5364,7 @@ function IdeasPage({ watchlist, portfolio, onOpenStock, onPlan }) {
     );
   }
   const micro = readMicro();
-  const all = buildIdeas(data, micro, watchlist);
+  const all = buildIdeas(data, micro, watchlist, blockBuys);
   const rows = all.filter(x => filter === "a" ? x.grade === "A" : filter === "watch" ? x.tags.has("watch") : filter === "n500" ? !x.micro : true);
   const s = suggestedRisk(data);
   return (
@@ -5376,6 +5435,323 @@ function PlanSheet({ open, onClose, children }) {
   );
 }
 
+// ─── PLAYBOOK · Market Monitor · flows & deals ───────────────────────────────
+
+// Setup library: rules (also the pre-trade checklist) and which scan finds live examples
+const PLAYBOOK_SETUPS = {
+  "Breakout": { scan: "pivots", rules: ["RS 80+ and above a rising 50-day SMA", "Base of 3+ weeks within 15% of the high", "Breaks out on volume well above average", "Market allows new longs (not CASH / No money)", "Stop under the breakout-day low, max 8%"] },
+  "Pullback": { scan: "reclaim50", rules: ["Leader in an uptrend (above 50 & 200-day SMA)", "Pulls back to the 10/20-day SMA on lighter volume", "Turns up with a higher close", "Stop under the pullback low"] },
+  "U&R": { scan: "reclaim50", rules: ["Undercuts a prior low, then closes back above it", "Volume expands on the reclaim", "Sector HOT or WARM", "Stop under the undercut low"] },
+  "Range Break": { scan: "tight", rules: ["Tight range (≤ 8%) for 2+ weeks near highs", "Closes out of the range on rising volume", "Stop inside the range"] },
+  "Momentum": { scan: "pivots", rules: ["4%+ burst on rising volume", "Already a momentum stock (RS 80+)", "Plan to sell into strength in 3–5 days", "Stop under the burst-day low"] },
+  "EP": { scan: "ep", rules: ["≥ 8% move on 3×+ volume around news or results", "Holds above the gap-day low", "Fresh catalyst, not a stale story", "Stop under the gap-day low"] },
+  "IPO base": { scan: "ipo", rules: ["Listed within the last 12 months", "First base formed after listing", "Clears the post-listing high on volume", "Stop under the base"] },
+  "Coiling": { scan: "coil", rules: ["RS 80+ and above the 50-day SMA", "Tightest 10-day range in a month", "Volume drying up", "Buy at/just before the breakout; stop under the coil"] },
+};
+const MISTAKES = ["Chased entry", "No/late stop", "Oversized", "Sold too early", "Held a loser", "Against market rule", "Broke my setup rules", "FOMO trade"];
+const EMOTIONS = ["Calm", "Confident", "Anxious", "Greedy", "Bored", "Revenge"];
+
+function PreTradeChecklist({ setup, ticked, onToggle }) {
+  const def = PLAYBOOK_SETUPS[setup];
+  if (!def) return null;
+  const all = ticked.length === def.rules.length;
+  return (
+    <div className="card" style={{ marginBottom: 12, borderColor: all ? `${C.pos}66` : "var(--border)" }}>
+      <div className="label" style={{ marginBottom: 6 }}>Pre-trade checklist · {setup} <span style={{ color: all ? C.pos : "var(--text3)" }}>{ticked.length}/{def.rules.length}</span></div>
+      {def.rules.map((r, i) => (
+        <label key={r} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12, padding: "4px 0", cursor: "pointer", color: ticked.includes(i) ? "var(--text)" : "var(--text2)" }}>
+          <input type="checkbox" checked={ticked.includes(i)} onChange={() => onToggle(i)} style={{ width: 16, height: 16, marginTop: 1, accentColor: C.pos }} />
+          {r}
+        </label>
+      ))}
+      {!all && <div style={{ fontSize: 11, color: C.warn, marginTop: 4 }}>Unticked rules are saved with the trade and count against your discipline score.</div>}
+    </div>
+  );
+}
+
+// ── Market Monitor (QUAD) ──
+function MqMarketMonitor({ mm }) {
+  if (!mm?.rows?.length) return null;
+  const rows = mm.rows.slice(-10).reverse();
+  const last = mm.rows[mm.rows.length - 1];
+  const tone = (r) => (r == null ? "var(--text3)" : r >= 2 ? C.pos : r <= 0.5 ? C.neg : "var(--text)");
+  const b = mm.bt || {};
+  const line = (k, label) => b[k] ? <span>{label}: next 10 sessions avg {b[k].fwd > 0 ? "+" : ""}{b[k].fwd}% ({b[k].up}% up, {b[k].days}d)</span> : null;
+  return (
+    <div style={mqCardStyle}>
+      <div style={{ ...mqHeadStyle, marginBottom: 4 }}>MARKET MONITOR</div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8 }}>Stocks up / down ≥4% on rising volume each day (Stockbee-style). 10-day ratio above 2 = momentum-friendly, below 0.5 = breakouts tend to fail.</div>
+      <div style={{ display: "flex", gap: 14, marginBottom: 8, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12 }}>5-day ratio <b style={{ fontFamily: "var(--mono)", color: tone(last.r5) }}>{last.r5 ?? "—"}</b></span>
+        <span style={{ fontSize: 12 }}>10-day ratio <b style={{ fontFamily: "var(--mono)", color: tone(last.r10) }}>{last.r10 ?? "—"}</b></span>
+        <span style={{ fontSize: 12, color: "var(--text3)" }}>Up 25% in a quarter <b style={{ color: C.pos }}>{last.q25u}</b> · down 25% <b style={{ color: C.neg }}>{last.q25d}</b></span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto auto", columnGap: 12, fontSize: 11, fontFamily: "var(--mono)" }}>
+        {["DAY", "UP 4%", "DOWN 4%", "5D", "10D"].map((h, i) => <span key={h} style={{ fontSize: 9, color: "var(--text3)", textAlign: i ? "right" : "left", paddingBottom: 3 }}>{h}</span>)}
+        {rows.map(r => (
+          <Fragment key={r.d}>
+            <span style={{ borderTop: "1px solid var(--border)", padding: "3px 0", color: "var(--text2)" }}>{mqFmtDate(r.d)}</span>
+            <span style={{ borderTop: "1px solid var(--border)", padding: "3px 0", textAlign: "right", color: C.pos }}>{r.up}</span>
+            <span style={{ borderTop: "1px solid var(--border)", padding: "3px 0", textAlign: "right", color: C.neg }}>{r.dn}</span>
+            <span style={{ borderTop: "1px solid var(--border)", padding: "3px 0", textAlign: "right", color: tone(r.r5) }}>{r.r5 ?? "—"}</span>
+            <span style={{ borderTop: "1px solid var(--border)", padding: "3px 0", textAlign: "right", color: tone(r.r10) }}>{r.r10 ?? "—"}</span>
+          </Fragment>
+        ))}
+      </div>
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 8, lineHeight: 1.5 }}>
+        Past year, for the average Nifty 500 stock — {line("strong", "10D ≥ 2")}{b.strong && b.mid ? " · " : ""}{line("mid", "in between")}{(b.strong || b.mid) && b.weak ? " · " : ""}{line("weak", "10D ≤ 0.5")}.
+        {b.strong && b.mid && b.strong.fwd <= b.mid.fwd ? " Over this period strong readings did not lead to better returns — treat it as context, not a signal." : ""}
+      </div>
+    </div>
+  );
+}
+
+// ── FII/DII flows + bulk/block deals ──
+let _flowsCache = null, _dealsCache = null;
+async function fetchFlows() {
+  if (_flowsCache && Date.now() - _flowsCache.at < 15 * 60000) return _flowsCache.d;
+  const d = await fetch("/api/nse?type=flows").then(r => (r.ok ? r.json() : null)).catch(() => null);
+  _flowsCache = { at: Date.now(), d }; return d;
+}
+async function fetchDeals() {
+  if (_dealsCache && Date.now() - _dealsCache.at < 15 * 60000) return _dealsCache.d;
+  const d = await fetch("/api/nse?type=deals").then(r => (r.ok ? r.json() : null)).catch(() => null);
+  _dealsCache = { at: Date.now(), d }; return d;
+}
+function useFlowsDeals() {
+  const [s, set] = useState({ flows: null, deals: null });
+  useEffect(() => { let alive = true; Promise.all([fetchFlows(), fetchDeals()]).then(([flows, deals]) => alive && set({ flows, deals })); return () => { alive = false; }; }, []);
+  return s;
+}
+const crore = (v) => `${v >= 0 ? "+" : "−"}₹${Math.abs(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })} cr`;
+function FlowsLine({ flows }) {
+  if (!flows?.fii) return null;
+  return (
+    <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 8 }} title="FII/DII cash-market net buying (NSE, provisional)">
+      Flows {mqFmtDate(flows.date)}: FII <b style={{ color: flows.fii.net >= 0 ? C.pos : C.neg }}>{crore(flows.fii.net)}</b> · DII <b style={{ color: flows.dii?.net >= 0 ? C.pos : C.neg }}>{flows.dii ? crore(flows.dii.net) : "—"}</b>
+    </div>
+  );
+}
+function MqFlowsDeals({ data, onPickStock }) {
+  const { flows, deals } = useFlowsDeals();
+  if (!flows && !deals) return null;
+  const known = data?.sector_of || {};
+  // NSE can list the same trade under both bulk and block deals — keep one
+  const seen = new Set();
+  const big = (deals?.deals || []).filter(x => known[x.sym]).filter(x => { const k = [x.sym, x.client, x.side, x.qty, x.price].join("|"); if (seen.has(k)) return false; seen.add(k); return true; })
+    .map(x => ({ ...x, value: x.qty * x.price })).sort((a, b) => b.value - a.value).slice(0, 10);
+  return (
+    <div style={mqCardStyle}>
+      <div style={{ ...mqHeadStyle, marginBottom: 8 }}>INSTITUTIONS</div>
+      {flows?.fii && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+          {[["FII / FPI", flows.fii], ["DII", flows.dii]].map(([l, f]) => f && (
+            <div key={l} style={{ background: "var(--bg3)", border: "1px solid var(--border)", borderRadius: 10, padding: "8px 10px" }}>
+              <div style={{ fontSize: 10, color: "var(--text3)" }}>{l} · {mqFmtDate(flows.date)}</div>
+              <div style={{ fontFamily: "var(--mono)", fontSize: 16, fontWeight: 700, color: f.net >= 0 ? C.pos : C.neg }}>{crore(f.net)}</div>
+              <div style={{ fontSize: 10, color: "var(--text3)", fontFamily: "var(--mono)" }}>buy {Math.round(f.buy).toLocaleString("en-IN")} · sell {Math.round(f.sell).toLocaleString("en-IN")}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {big.length > 0 && (
+        <>
+          <div style={{ fontSize: 10, color: "var(--text3)", marginBottom: 4 }}>Largest bulk/block deals in tracked stocks · {mqFmtDate(deals.date)}</div>
+          {big.map((x, i) => (
+            <div key={i} style={{ display: "flex", gap: 8, fontSize: 11, padding: "4px 0", borderTop: "1px solid var(--border)", alignItems: "baseline" }}>
+              <button onClick={() => onPickStock?.(x.sym)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", fontFamily: "var(--display)", fontWeight: 700, textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{x.sym}</button>
+              <span style={{ color: x.side === "BUY" ? C.pos : C.neg, fontWeight: 700, fontSize: 10 }}>{x.side}</span>
+              <span style={{ color: "var(--text3)", flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{x.client}</span>
+              <span style={{ fontFamily: "var(--mono)", color: "var(--text2)" }}>₹{(x.value / 1e7).toFixed(1)} cr</span>
+            </div>
+          ))}
+        </>
+      )}
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>Source: NSE (provisional figures, latest session).</div>
+    </div>
+  );
+}
+
+// ── PLAYBOOK ──
+function setupRecord(closed, mq, setup) {
+  const ts = closed.filter(t => t.setupType === setup);
+  if (!ts.length) return null;
+  const wins = ts.filter(t => (t.pnl || 0) > 0).length;
+  const rs = ts.filter(t => t.riskAmount > 0).map(t => (t.pnl || 0) / t.riskAmount);
+  const byEnv = {};
+  for (const t of ts) { const e = tradeContext(t, mq).env || "?"; (byEnv[e] ||= []).push(t); }
+  const best = Object.entries(byEnv).filter(([e, xs]) => e !== "?" && xs.length >= 2)
+    .map(([e, xs]) => [e, xs.reduce((a, t) => a + (t.pnl || 0), 0) / xs.length]).sort((a, b) => b[1] - a[1])[0];
+  return { n: ts.length, wr: Math.round((wins / ts.length) * 100), avgR: rs.length ? rs.reduce((a, b) => a + b, 0) / rs.length : null, pnl: ts.reduce((a, t) => a + (t.pnl || 0), 0), best: best?.[0] || null };
+}
+
+function PlaybookSetups({ trades, onOpenStock }) {
+  const { data: mq } = useMarketQuadrant();
+  const closed = trades.filter(t => t.status === "closed");
+  return (
+    <div>
+      {Object.entries(PLAYBOOK_SETUPS).map(([name, def]) => {
+        const live = mq?.scans?.[def.scan] || [];
+        const rec = setupRecord(closed, mq, name);
+        const edge = mq?.scan_stats?.[def.scan];
+        return (
+          <div key={name} className="card" style={{ marginBottom: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <div style={{ fontFamily: "var(--display)", fontSize: 18 }}>{name}</div>
+              <span style={{ fontSize: 11, color: "var(--text3)" }}>{live.length ? `${live.length} today` : "none today"}</span>
+            </div>
+            <ul style={{ margin: "6px 0 8px 16px", padding: 0, fontSize: 12, color: "var(--text2)", lineHeight: 1.6 }}>
+              {def.rules.map(r => <li key={r}>{r}</li>)}
+            </ul>
+            {live.length > 0 && (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+                {live.slice(0, 6).map(x => (
+                  <button key={x.sym} onClick={() => onOpenStock?.(x.sym)} className="chip" style={{ fontSize: 11 }}>
+                    {x.sym}{x.grade ? ` · ${x.grade}` : ""}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div style={{ fontSize: 11, color: "var(--text3)", borderTop: "1px solid var(--border)", paddingTop: 6, lineHeight: 1.5 }}>
+              <b style={{ color: "var(--text2)" }}>You:</b>{" "}
+              {rec ? <>{rec.n} trades · {rec.wr}% wins{rec.avgR != null ? ` · avg ${rec.avgR > 0 ? "+" : ""}${rec.avgR.toFixed(2)}R` : ""} · <span style={{ color: rec.pnl >= 0 ? C.pos : C.neg }}>{rec.pnl >= 0 ? "+" : ""}{formatINR(rec.pnl)}</span>{rec.best ? ` · best in ${rec.best}` : ""}</> : "no closed trades with this setup yet"}
+              {edge && <><br /><b style={{ color: "var(--text2)" }}>Market, past year:</b> {edge.hit}% higher after 10 sessions · {edge.excess > 0 ? "+" : ""}{edge.excess} vs average stock</>}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function PnlCalendar({ closed }) {
+  const byDay = {};
+  for (const t of closed) {
+    for (const x of t.exits || []) { const d = new Date(Date.parse(x.date) + 19800000).toISOString().slice(0, 10); byDay[d] = (byDay[d] || 0) + (x.pnl || 0); }
+    if (!(t.exits || []).length && t.date) { const d = new Date(Date.parse(t.date) + 19800000).toISOString().slice(0, 10); byDay[d] = (byDay[d] || 0) + (t.pnl || 0); }
+  }
+  const today = new Date(Date.now() + 19800000); const monday = new Date(today); monday.setUTCDate(today.getUTCDate() - ((today.getUTCDay() + 6) % 7));
+  const weeks = [];
+  for (let w = 11; w >= 0; w--) {
+    const days = [];
+    for (let k = 0; k < 5; k++) { const d = new Date(monday); d.setUTCDate(monday.getUTCDate() - w * 7 + k); const key = d.toISOString().slice(0, 10); days.push({ key, v: byDay[key] ?? null }); }
+    weeks.push(days);
+  }
+  const max = Math.max(1, ...Object.values(byDay).map(Math.abs));
+  const cell = (v) => (v == null ? "var(--bg3)" : v >= 0 ? `rgba(74,222,128,${(0.2 + 0.8 * Math.abs(v) / max).toFixed(2)})` : `rgba(220,20,60,${(0.2 + 0.8 * Math.abs(v) / max).toFixed(2)})`);
+  const total = weeks.flat().reduce((a, d) => a + (d.v || 0), 0);
+  return (
+    <div className="card" style={{ marginBottom: 12 }}>
+      <div className="label" style={{ marginBottom: 8 }}>P&amp;L calendar · last 12 weeks <span style={{ color: total >= 0 ? C.pos : C.neg, fontFamily: "var(--mono)" }}>{total >= 0 ? "+" : ""}{formatINR(total)}</span></div>
+      <div style={{ display: "grid", gridTemplateColumns: "auto repeat(12, 1fr)", gap: 3, alignItems: "center" }}>
+        {["M", "T", "W", "T", "F"].map((dl, k) => (
+          <Fragment key={k}>
+            <span style={{ fontSize: 9, color: "var(--text3)", paddingRight: 4 }}>{dl}</span>
+            {weeks.map((wk, w) => <span key={w} title={`${mqFmtDate(wk[k].key)}: ${wk[k].v == null ? "no closed trades" : formatINR(wk[k].v)}`} style={{ height: 14, borderRadius: 3, background: cell(wk[k].v) }} />)}
+          </Fragment>
+        ))}
+      </div>
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>Each square is a trading day (by exit date): green = profit, red = loss, darker = bigger.</div>
+    </div>
+  );
+}
+
+function PlaybookReview({ trades, setTrades, onOpenStock }) {
+  const closed = trades.filter(t => t.status === "closed").sort((a, b) => ((a.exits?.slice(-1)[0]?.date || a.date) < (b.exits?.slice(-1)[0]?.date || b.date) ? 1 : -1));
+  const update = (id, patch) => setTrades(trades.map(t => (t.id === id ? { ...t, ...patch } : t)));
+  const cost = {};
+  for (const t of closed) for (const m of t.mistakes || []) { cost[m] ||= { n: 0, pnl: 0 }; cost[m].n++; cost[m].pnl += t.pnl || 0; }
+  const emo = {};
+  for (const t of closed) if (t.emotion) { emo[t.emotion] ||= { n: 0, w: 0 }; emo[t.emotion].n++; if ((t.pnl || 0) > 0) emo[t.emotion].w++; }
+  return (
+    <div>
+      <PnlCalendar closed={closed} />
+      {(Object.keys(cost).length > 0 || Object.keys(emo).length > 0) && (
+        <div className="card" style={{ marginBottom: 12 }}>
+          {Object.keys(cost).length > 0 && (
+            <>
+              <div className="label" style={{ marginBottom: 6 }}>What your mistakes cost</div>
+              {Object.entries(cost).sort((a, b) => a[1].pnl - b[1].pnl).map(([m, c]) => (
+                <div key={m} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "3px 0" }}>
+                  <span style={{ color: "var(--text2)" }}>{m} <span style={{ color: "var(--text3)" }}>×{c.n}</span></span>
+                  <span style={{ fontFamily: "var(--mono)", color: c.pnl >= 0 ? C.pos : C.neg }}>{c.pnl >= 0 ? "+" : ""}{formatINR(c.pnl)}</span>
+                </div>
+              ))}
+            </>
+          )}
+          {Object.keys(emo).length > 0 && (
+            <div style={{ marginTop: Object.keys(cost).length ? 10 : 0 }}>
+              <div className="label" style={{ marginBottom: 6 }}>Win rate by mood</div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 12 }}>
+                {Object.entries(emo).map(([e, c]) => <span key={e} style={{ color: "var(--text2)" }}>{e} <b style={{ color: c.w / c.n > 0.5 ? C.pos : "var(--text)" }}>{Math.round((c.w / c.n) * 100)}%</b> <span style={{ color: "var(--text3)" }}>({c.n})</span></span>)}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      <div className="card">
+        <div className="label" style={{ marginBottom: 4 }}>Review your recent trades</div>
+        <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 6 }}>Tag what went wrong and how you felt — the summaries above build from these.</div>
+        {closed.length === 0 && <div style={{ fontSize: 12, color: "var(--text3)", padding: "12px 0" }}>No closed trades yet.</div>}
+        {closed.slice(0, 20).map(t => (
+          <div key={t.id} style={{ borderTop: "1px solid var(--border)", padding: "8px 0" }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+              <button onClick={() => onOpenStock?.(normalizeSymbol(t.symbol))} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", fontFamily: "var(--display)", fontWeight: 700, textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{t.symbol}</button>
+              <span style={{ fontSize: 10, color: "var(--text3)" }}>{t.setupType}{t.checklist ? ` · checklist ${t.checklist.ticked.length}/${t.checklist.total}` : ""}</span>
+              <span style={{ flex: 1 }} />
+              <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: (t.pnl || 0) >= 0 ? C.pos : C.neg }}>{(t.pnl || 0) >= 0 ? "+" : ""}{formatINR(t.pnl || 0)}</span>
+            </div>
+            <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 6 }}>
+              {MISTAKES.map(m => {
+                const on = (t.mistakes || []).includes(m);
+                return <button key={m} className="chip" aria-pressed={on} onClick={() => update(t.id, { mistakes: on ? t.mistakes.filter(x => x !== m) : [...(t.mistakes || []), m] })}
+                  style={{ fontSize: 10, padding: "2px 8px", ...(on ? { borderColor: C.neg, color: C.neg } : {}) }}>{m}</button>;
+              })}
+            </div>
+            <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 5 }}>
+              {EMOTIONS.map(e => (
+                <button key={e} className="chip" aria-pressed={t.emotion === e} onClick={() => update(t.id, { emotion: t.emotion === e ? null : e })}
+                  style={{ fontSize: 10, padding: "2px 8px", ...(t.emotion === e ? { borderColor: "var(--text)", color: "var(--text)" } : {}) }}>{e}</button>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PlaybookPage({ trades, setTrades, portfolio, sub, setSub, onOpenStock, onOpenJournal }) {
+  return (
+    <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+        <div className="section-title">Playbook</div>
+        <button className="chip" onClick={onOpenJournal}>Journal ›</button>
+      </div>
+      <div style={{ fontSize: 13, color: "var(--text3)", marginBottom: 12 }}>Your setups, rules and how you actually trade them.</div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        {[["setups", "Setups"], ["review", "Review"], ["stats", "Stats"]].map(([id, l]) => (
+          <button key={id} className="chip" aria-pressed={sub === id} onClick={() => setSub(id)} style={sub === id ? { borderColor: "var(--text)", color: "var(--text)", flex: 1 } : { flex: 1 }}>{l}</button>
+        ))}
+      </div>
+      {sub === "review" ? <PlaybookReview trades={trades} setTrades={setTrades} onOpenStock={onOpenStock} />
+        : sub === "stats" ? <div style={{ margin: "0 -16px" }}><AnalyticsPage trades={trades} portfolio={portfolio} /></div>
+        : <PlaybookSetups trades={trades} onOpenStock={onOpenStock} />}
+    </div>
+  );
+}
+
+// ── Trade replay: your entries/exits for a symbol as chart marks ──
+function tradeMarks(trades, symbol) {
+  const out = [];
+  for (const t of trades || []) {
+    if (normalizeSymbol(t.symbol) !== symbol) continue;
+    for (const e of t.entries || []) if (e.date && e.price) out.push({ day: new Date(Date.parse(e.date) + 19800000).toISOString().slice(0, 10), price: e.price, side: "buy" });
+    for (const x of t.exits || []) if (x.date && x.price) out.push({ day: new Date(Date.parse(x.date) + 19800000).toISOString().slice(0, 10), price: x.price, side: "sell" });
+  }
+  return out;
+}
+
 // ─── BOTTOM NAV ──────────────────────────────────────────────────────────────
 function BottomNav({ page, setPage }) {
   const tabs = [
@@ -5394,9 +5770,9 @@ function BottomNav({ page, setPage }) {
         <path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.2 1 2V17h6v-.3c0-.8.4-1.5 1-2A7 7 0 0 0 12 2z"/>
       </svg>
     )},
-    { id: "trades", label: "TRADES", icon: (
+    { id: "playbook", label: "PLAYBOOK", icon: (
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="18" x2="8" y2="15"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="16" y1="18" x2="16" y2="14"/>
+        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="9" y1="7" x2="16" y2="7"/><line x1="9" y1="11" x2="14" y2="11"/>
       </svg>
     )},
     { id: "quadrant", label: "QUAD", icon: (
@@ -5447,12 +5823,18 @@ export default function App() {
   const [showTour, setShowTour] = useState(() => { try { return localStorage.getItem("td_tour_done") !== "1"; } catch (_) { return false; } });
   const [stockSym, setStockSym] = useState(null);     // stock detail page
   const [stockBack, setStockBack] = useState("scan");
-  const [tradesSub, setTradesSub] = useState(() => { try { return localStorage.getItem("td_trades_sub") || "journal"; } catch (_) { return "journal"; } });
-  const chooseTradesSub = (v) => { setTradesSub(v); try { localStorage.setItem("td_trades_sub", v); } catch (_) {} };
-  // Old page ids (LOG / STATS) now live inside TRADES
+  const [pbSub, setPbSub] = useState(() => { try { return localStorage.getItem("td_playbook_sub") || "setups"; } catch (_) { return "setups"; } });
+  const choosePbSub = (v) => { setPbSub(v); try { localStorage.setItem("td_playbook_sub", v); } catch (_) {} };
+  // Remember where the journal was opened from, for its back button
+  const lastPageRef = useRef("today");
+  const [journalBack, setJournalBack] = useState("today");
   useEffect(() => {
-    if (page === "journal") { chooseTradesSub("journal"); setPage("trades"); }
-    if (page === "analytics") { chooseTradesSub("stats"); setPage("trades"); }
+    if (page === "journal") setJournalBack(lastPageRef.current === "journal" ? "today" : lastPageRef.current);
+    else lastPageRef.current = page;
+  }, [page]);
+  // Old page ids (TRADES / STATS) now live in PLAYBOOK
+  useEffect(() => {
+    if (page === "trades" || page === "analytics") { choosePbSub("stats"); setPage("playbook"); }
     if (page === "calc") { setPage("today"); setPlanOpen(true); }
   }, [page]);
   const indicesTicker = useIndicesTicker();
@@ -5507,9 +5889,18 @@ export default function App() {
             prefillSymbol={calcSymbol} onPrefillUsed={() => setCalcSymbol(null)} />
         </SectionBoundary>
       </PlanSheet>
-      {page === "trades" && (
-        <TradesPage sub={tradesSub} setSub={chooseTradesSub}
-          journalProps={{ trades, setTrades, prefill, setPrefill }} statsProps={{ trades, portfolio }} />
+      {page === "playbook" && (
+        <PlaybookPage trades={trades} setTrades={setTrades} portfolio={portfolio} sub={pbSub} setSub={choosePbSub}
+          onOpenStock={openStock} onOpenJournal={() => setPage("journal")} />
+      )}
+      {page === "journal" && (
+        <div>
+          <div style={{ padding: "12px 16px 0" }}>
+            <button className="btn-ghost" style={{ padding: "6px 10px", fontSize: 12 }} onClick={() => setPage(journalBack || "today")}>‹ Back</button>
+          </div>
+          <ZerodhaImport trades={trades} setTrades={setTrades} />
+          <JournalPage trades={trades} setTrades={setTrades} prefill={prefill} setPrefill={setPrefill} onOpenStock={openStock} />
+        </div>
       )}
       {page === "scan" && (
         <ScanPage onPickStock={openStock} watchlist={watchlist} setWatchlist={setWatchlist} />
@@ -5518,7 +5909,7 @@ export default function App() {
         <MarketQuadrantPage onPickStock={openStock} />
       )}
       {page === "stock" && stockSym && (
-        <StockPage symbol={stockSym} onBack={() => setPage(stockBack || "scan")} onPlan={pickStock} watchlist={watchlist} setWatchlist={setWatchlist} />
+        <StockPage symbol={stockSym} onBack={() => setPage(stockBack || "scan")} onPlan={pickStock} watchlist={watchlist} setWatchlist={setWatchlist} trades={trades} />
       )}
 
       {page === "today" && <div style={{ padding: "0 16px 120px", marginTop: -100 }}><AppSettings onTour={() => setShowTour(true)} /></div>}

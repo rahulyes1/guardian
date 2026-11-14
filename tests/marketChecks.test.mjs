@@ -80,7 +80,7 @@ test("parses NSE's bhavcopy and keeps only equity series", () => {
   ].join("\n");
   const p = parseBhavFullCsv(csv);
   assert.equal(p.date, "2026-11-12");
-  assert.deepEqual(p.closes.RELIANCE, { prev: 1335.4, close: 1339.7, vol: 13807921 });
+  assert.deepEqual(p.closes.RELIANCE, { prev: 1335.4, close: 1339.7, vol: 13807921, deliv: 53.29 });
   assert.ok(p.closes["21STCENMGM"]);
   assert.equal(p.closes.SGBJUN28, undefined);
 });
