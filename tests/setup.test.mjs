@@ -40,3 +40,14 @@ test("trade plan: entry above the 10-day closing high, stop under recent closes,
   assert.ok(wide.riskPct <= 8.01);
   assert.match(wide.note, /capped/);
 });
+
+test("a half-posted newest day is set aside instead of computed on", async () => {
+  const { trimIncompleteLastDay } = await import("../marketQuadrant.js");
+  const axis = ["2026-11-12", "2026-11-13"];
+  const aligned = { "A.NS": [1, 2], "B.NS": [1, null], "C.NS": [1, null], "D.NS": [1, 2] };
+  assert.equal(trimIncompleteLastDay(axis, aligned), "2026-11-13"); // 50% coverage < 90%
+  assert.deepEqual(axis, ["2026-11-12"]);
+  assert.deepEqual(aligned["A.NS"], [1]);
+  const full = { "A.NS": [1, 2], "B.NS": [1, 2] };
+  assert.equal(trimIncompleteLastDay(["d1", "d2"], full), null);
+});

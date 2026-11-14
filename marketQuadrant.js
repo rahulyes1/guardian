@@ -18,7 +18,7 @@ export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 let API_BASE = "";
 export function setApiBase(url) { API_BASE = String(url || "").replace(/\/+$/, ""); }
 
-const LOCAL_KEY       = "td_mq_v11";  // v11: RS rank, grades, scan backtests
+const LOCAL_KEY       = "td_mq_v12";  // v12: trade plans for every stock (IDEAS)
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
@@ -93,7 +93,7 @@ export function configureSharedStore(getClient) { sharedClientGetter = getClient
 
 function looksValid(d) {
   return d && MQ_SIGNALS.includes(d.overall) && Array.isArray(d.history) && typeof d.total === "number" && d.total >= 400
-    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d && Array.isArray(d.scans.ep) && d.rs_of && d.scan_stats;
+    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d && Array.isArray(d.scans.ep) && d.rs_of && d.scan_stats && d.plan_of;
 }
 async function readShared() {
   const sb = sharedClientGetter?.();
@@ -844,7 +844,9 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     gradeOf[st.sym] = gradeSetup({ closes: st.closes, vols: volumes?.[st.ticker] || null, i: last, s50: st.s50[last], s200: st.s200[last],
       rs: rsOf[st.sym], sectorStatus: statusOfSector[sectorMap[st.sym] || "Other"], envOk }).grade;
   }
-  const enrich = (rows) => (rows || []).forEach(r => { r.rs = rsOf[r.sym] ?? null; r.grade = gradeOf[r.sym] ?? null; });
+  const planOf = {};
+  for (const [ticker, closes] of Object.entries(aligned)) { const p = tradePlan(closes, last); if (p) planOf[ticker.replace(/.NS$/, "")] = { entry: p.entry, stop: p.stop, riskPct: p.riskPct, breaking: p.breaking }; }
+  const enrich = (rows) => (rows || []).forEach(r => { r.rs = rsOf[r.sym] ?? null; r.grade = gradeOf[r.sym] ?? null; r.plan = planOf[r.sym] ?? null; });
   enrich(leaders);
   for (const k of ["pivots", "tight", "reclaim50", "ep", "ipo"]) enrich(scans[k]);
   for (const rows of Object.values(sectorStocks)) enrich(rows);
@@ -860,7 +862,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     swing_state: swingState, momentum_sign: momentumSign, momentum_dir: momentumDir,
     momentum_leaders: momentumLeaders, environment,
     follow_through: computeFollowThrough(axis, aligned, volumes),
-    leaders_new: leadersNew, scans, scan_stats: scanStats, rs_of: rsOf, rs_breaks: rsBreaks, grade_of: gradeOf,
+    leaders_new: leadersNew, scans, scan_stats: scanStats, rs_of: rsOf, rs_breaks: rsBreaks, grade_of: gradeOf, plan_of: planOf,
     lows_ok: newLows <= LOWS_OK_MAX, lows_ok_max: LOWS_OK_MAX,
     pct_above_20: pct20,
     swing_confidence: Math.round(score), momentum_change: r1(mom.raw - mom.ma),
@@ -883,6 +885,22 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
  * If Yahoo is missing the newest session entirely, that day is added from NSE.
  * Returns the verification summary (or null when the bhavcopy is unavailable).
  */
+/**
+ * Never compute on a half-populated day: if the newest date has closes for fewer than
+ * `minCoverage` of stocks (Yahoo posts some bars late) and NSE didn't fill it, drop that
+ * date so results use the last complete session. Returns the dropped date or null.
+ */
+export function trimIncompleteLastDay(axis, aligned, minCoverage = 0.9) {
+  const last = axis.length - 1;
+  if (last < 1) return null;
+  const series = Object.values(aligned);
+  const have = series.filter(c => c[last] != null).length;
+  if (!series.length || have / series.length >= minCoverage) return null;
+  const dropped = axis.pop();
+  for (const c of series) c.pop();
+  return dropped;
+}
+
 /** Where Yahoo has no volume for the bhavcopy day, use NSE's traded quantity. Returns count filled. */
 export function fillVolumesFromBhav(axis, volumes, bhav) {
   const i = bhav?.date ? axis.indexOf(bhav.date) : -1;
@@ -963,9 +981,12 @@ async function computeFresh(onProgress) {
   onProgress("Verifying closes against NSE…", 85);
   const bhavData = await bhavPromise;
   const verification = applyNseCloses(axis, aligned, bhavData);
+  const droppedDay = trimIncompleteLastDay(axis, aligned); // e.g. Yahoo half-posted and NSE file not out yet
+  if (droppedDay) onProgress(`${droppedDay} incomplete on Yahoo and not yet on NSE — using the last complete session`, 82);
   const volumes = alignVolumes(axis, allVol);
   if (verification) verification.volumes_filled = fillVolumesFromBhav(axis, volumes, bhavData);
   const result = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, volumes, await themesPromise, (await eventsPromise)?.results || null);
+  if (droppedDay) result.pending_day = droppedDay;
   const idx = await indexPromise;
   result.signal_backtest = idx ? backtestSignal(result.history, idx) : null;
   return result;
@@ -993,7 +1014,7 @@ export function upcomingResults(cal, sym, days = 7) {
 }
 
 // ─── wider universe: NSE Microcap 250 (loaded on demand, scans only) ─────────
-const MICRO_KEY = "td_mq_micro_v2"; // v2: RS + grades
+const MICRO_KEY = "td_mq_micro_v3"; // v3: RS + grades + plans
 let _microInflight = null;
 export async function loadMicrocapScans({ force = false } = {}) {
   if (!force) {
@@ -1015,11 +1036,12 @@ export async function loadMicrocapScans({ force = false } = {}) {
     if (got < tickers.length * 0.8) throw new Error(`Only got data for ${got}/${tickers.length} microcaps — try again shortly.`);
     const { axis, aligned } = alignByDate(allData);
     const verification = applyNseCloses(axis, aligned, bhav);
+    trimIncompleteLastDay(axis, aligned);
     const vols = alignVolumes(axis, allVol);
     if (verification) verification.volumes_filled = fillVolumesFromBhav(axis, vols, bhav);
     const r = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, vols, null, cal?.results || null,
       { rsBreaks: getLastMarketQuadrant()?.rs_breaks || null });
-    const data = { as_of: r.as_of, final: r.final, verification, total: r.total, scans: r.scans, leaders: r.leaders, sector_of: r.sector_of, rs_of: r.rs_of, grade_of: r.grade_of };
+    const data = { as_of: r.as_of, final: r.final, verification, total: r.total, scans: r.scans, leaders: r.leaders, sector_of: r.sector_of, rs_of: r.rs_of, grade_of: r.grade_of, plan_of: r.plan_of };
     try { localStorage.setItem(MICRO_KEY, JSON.stringify({ data, savedAt: Date.now() })); } catch (_) {}
     return data;
   })().finally(() => { _microInflight = null; });

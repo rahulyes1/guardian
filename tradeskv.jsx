@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, Fragment } from "react";
+import { useState, useEffect, useRef, Fragment, Component } from "react";
 import { getSupabaseClient } from "./supabaseClient.js";
 import {
   MQ_SIGNALS, loadMarketQuadrant, getLastMarketQuadrant, subscribeProgress, signalOnDate, configureSharedStore,
@@ -1309,7 +1309,7 @@ function TopBar({ regime, portfolio, page, indicesData }) {
 }
 
 // ─── TODAY PAGE ─────────────────────────────────────────────────────────────
-function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, trades, setPage, watchlist, onOpenStock }) {
+function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, trades, setPage, watchlist, onOpenStock, onPlan }) {
   const cfg = REGIME_CONFIG[regime];
   const openTrades = trades.filter(t => t.status === "open" || t.status === "partial").map(normalizeTrade);
   const totalRisk = openTrades.reduce((s, t) => s + (t.riskAmount || 0), 0);
@@ -1370,114 +1370,77 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
     return s + (lp.price - t.avgEntry) * (t.remainingQty || t.totalQty || 0);
   }, 0);
 
+  const secHead = (t, right) => (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "4px 0 10px" }}>
+      <div className="section-title" style={{ fontSize: 20 }}>{t}</div>{right}
+    </div>
+  );
   return (
     <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
-      {/* Market brief — regime and rules come from the data, not a manual toggle */}
-      <MarketBrief onOpenQuad={() => setPage("quadrant")} onOpenScan={() => setPage("scan")} />
-      <WatchAlertsCard watchlist={watchlist} onOpen={onOpenStock} />
-      <GlobalBrief />
+      {/* 1 · Market — signal, environment, today's rule, what changed */}
+      <SectionBoundary name="Market brief">
+        <MarketBrief onOpenQuad={() => setPage("quadrant")} onOpenScan={() => setPage("scan")} />
+      </SectionBoundary>
 
-      {/* Portfolio Value Edit */}
-      <div className="card" style={{ marginBottom: 14 }}>
-        <div className="label">Portfolio Value</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div className="big-num" style={{ color: THEME_TOKENS.portfolioValue, flex: 1 }}>{formatINR(portfolio)}</div>
-          <button className="btn-ghost" style={{ padding: "8px 14px", fontSize: 12 }}
-            onClick={() => {
-              const v = prompt("Enter portfolio value:", portfolio);
-              if (v && !isNaN(v)) setPortfolio(Number(v));
-            }}>
-            Edit
-          </button>
-        </div>
-      </div>
-
-      {/* Stats Grid */}
-      <div className="grid-2" style={{ marginBottom: 14 }}>
-        <div className="card-sm">
-          <div className="label">Open Risk</div>
-          <div style={{ fontFamily: "var(--mono)", fontSize: 18, color: THEME_TOKENS.openRiskValue, marginTop: 4 }}>
-            {formatINR(totalRisk)}
-          </div>
-          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>{pct(totalRisk, portfolio) || "0.0"}% of portfolio</div>
-        </div>
-        <div className="card-sm">
-          <div className="label">Heat</div>
-          <div style={{ fontFamily: "var(--mono)", fontSize: 18, color: getHeatColor(heat), marginTop: 4 }}>
-            {heat}%
-          </div>
-          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>{formatINR(totalRisk)} deployed</div>
-        </div>
-        {Object.keys(livePrices).length > 0 && (
-          <div className="card-sm" style={{ gridColumn: "1 / -1" }}>
-            <div className="label">Unrealized P&amp;L (live)</div>
-            <div style={{ fontFamily: "var(--mono)", fontSize: 18, color: totalUnrealized >= 0 ? "var(--green)" : "var(--red)", marginTop: 4 }}>
-              {totalUnrealized >= 0 ? "+" : ""}{formatINR(totalUnrealized)}
-            </div>
-            <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>{pct(totalUnrealized, portfolio)}% of portfolio</div>
-          </div>
-        )}
-        <div className="card-sm">
-          <div className="label">Today P&amp;L</div>
-          <div style={{ fontFamily: "var(--mono)", fontSize: 18, color: hasTodayActivity ? (todayPnl >= 0 ? "var(--green)" : "var(--red)") : "var(--text3)", marginTop: 4 }}>
-            {hasTodayActivity ? `${todayPnl >= 0 ? "+" : ""}${formatINR(todayPnl)}` : "—"}
-          </div>
-          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>closed today</div>
-        </div>
-        <div className="card-sm">
-          <div className="label">Overall P&amp;L</div>
-          <div style={{ fontFamily: "var(--mono)", fontSize: 18, color: closedTrades.length > 0 ? (overallPnl >= 0 ? "var(--green)" : "var(--red)") : "var(--text3)", marginTop: 4 }}>
-            {closedTrades.length > 0 ? `${overallPnl >= 0 ? "+" : ""}${formatINR(overallPnl)}` : "—"}
-          </div>
-          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>{closedTrades.length} closed trades</div>
-        </div>
-      </div>
-
-      {/* Open Positions */}
-      <div style={{ marginBottom: 14 }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-          <div className="section-title" style={{ fontSize: 20 }}>Open Positions</div>
+      {/* 2 · Your book — what needs action first */}
+      <SectionBoundary name="Your positions">
+        {secHead("Your positions", (
           <div style={{ display: "flex", gap: 8 }}>
             {openTrades.length > 0 && (
-              <button className="btn-ghost" style={{ padding: "8px 12px", fontSize: 12, borderRadius: 8 }}
-                onClick={() => refreshPrices({ force: true })} disabled={refreshing}>
-                {refreshing ? "..." : "↺ Prices"}
+              <button className="btn-ghost" style={{ padding: "8px 12px", fontSize: 12, borderRadius: 8 }} onClick={() => refreshPrices({ force: true })} disabled={refreshing}>
+                {refreshing ? "..." : "↺"}
               </button>
             )}
-            <button className="btn-primary" style={{ padding: "8px 16px", fontSize: 12, borderRadius: 8 }}
-              onClick={() => setPage("journal")}>
-              + Add
-            </button>
+            <button className="btn-primary" style={{ padding: "8px 14px", fontSize: 12, borderRadius: 8 }} onClick={() => onPlan?.(null)}>+ Plan a trade</button>
           </div>
+        ))}
+        <div className="card" style={{ marginBottom: 10, padding: "10px 14px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr 1fr", gap: 8, alignItems: "end" }}>
+            <div>
+              <div className="label">Portfolio</div>
+              <button onClick={() => { const v = prompt("Enter portfolio value:", portfolio); if (v && !isNaN(v)) setPortfolio(Number(v)); }}
+                title="Edit portfolio value" style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "var(--mono)", fontSize: 17, color: "var(--text)", textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{formatINR(portfolio)}</button>
+            </div>
+            <div>
+              <div className="label">Heat</div>
+              <div style={{ fontFamily: "var(--mono)", fontSize: 17, color: getHeatColor(heat) }}>{heat}%</div>
+            </div>
+            <div>
+              <div className="label">{Object.keys(livePrices).length ? "Open P&L" : "Open risk"}</div>
+              {Object.keys(livePrices).length
+                ? <div style={{ fontFamily: "var(--mono)", fontSize: 17, color: totalUnrealized >= 0 ? "var(--green)" : "var(--red)" }}>{totalUnrealized >= 0 ? "+" : ""}{formatINR(totalUnrealized)}</div>
+                : <div style={{ fontFamily: "var(--mono)", fontSize: 17 }}>{formatINR(totalRisk)}</div>}
+            </div>
+          </div>
+          {(hasTodayActivity || closedTrades.length > 0) && (
+            <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 6 }}>
+              {hasTodayActivity ? <>Closed today <b style={{ color: todayPnl >= 0 ? "var(--green)" : "var(--red)" }}>{todayPnl >= 0 ? "+" : ""}{formatINR(todayPnl)}</b> · </> : null}
+              All closed trades <b style={{ color: overallPnl >= 0 ? "var(--green)" : "var(--red)" }}>{overallPnl >= 0 ? "+" : ""}{formatINR(overallPnl)}</b> ({closedTrades.length})
+            </div>
+          )}
         </div>
         {openTrades.length === 0 ? (
-          <div className="card" style={{ textAlign: "center", padding: "32px 16px" }}>
-            <div style={{ fontSize: 32, marginBottom: 8 }}>📋</div>
+          <div className="card" style={{ textAlign: "center", padding: "22px 16px", marginBottom: 14 }}>
             <div style={{ color: "var(--text2)", fontSize: 14, marginBottom: 4 }}>Book is clear</div>
-            <div style={{ color: "var(--text3)", fontSize: 12 }}>Start from regime and next valid setup</div>
+            <div style={{ color: "var(--text3)", fontSize: 12 }}>Pick from today's best setups below, or plan your own.</div>
           </div>
         ) : (
-          openTrades.map(t => (
-            <OpenTradeCard key={t.id} trade={t} livePrice={livePrices[normalizeSymbol(t.symbol)]} />
-          ))
+          <div style={{ marginBottom: 14 }}>
+            {[...openTrades].sort((x, y) => (livePrices[normalizeSymbol(y.symbol)] ? 0 : 1) - (livePrices[normalizeSymbol(x.symbol)] ? 0 : 1)).map(t => (
+              <OpenTradeCard key={t.id} trade={t} livePrice={livePrices[normalizeSymbol(t.symbol)]} />
+            ))}
+          </div>
         )}
-      </div>
+      </SectionBoundary>
 
-      {/* Quick Stats */}
-      {trades.length > 0 && (
-        <div className="card">
-          <div className="label" style={{ marginBottom: 10 }}>Quick Stats</div>
-          {[
-            ["Win Rate", `${trades.filter(t=>t.status==='closed'&&(t.pnl||0)>0).length}/${trades.filter(t=>t.status==='closed').length} wins`],
-            ["Total P&L", formatINR(trades.filter(t=>t.status==='closed').reduce((s,t)=>s+(t.pnl||0),0))],
-          ].map(([l,v]) => (
-            <div key={l} className="result-row">
-              <span className="result-label">{l}</span>
-              <span className="result-val">{v}</span>
-            </div>
-          ))}
-        </div>
-      )}
+      {/* 3 · Best setups for today, sized for the current rule */}
+      <SectionBoundary name="Best setups">
+        <BestSetups watchlist={watchlist} portfolio={portfolio} onOpenStock={onOpenStock} onPlan={onPlan} onSeeAll={() => setPage("ideas")} />
+      </SectionBoundary>
+
+      {/* 4 · Watchlist and global cues */}
+      <SectionBoundary name="Watchlist alerts"><WatchAlertsCard watchlist={watchlist} onOpen={onOpenStock} /></SectionBoundary>
+      <SectionBoundary name="Global markets"><GlobalBrief /></SectionBoundary>
     </div>
   );
 }
@@ -3591,7 +3554,7 @@ function MarketBrief({ onOpenQuad, onOpenScan }) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
         <div className="label">Market Brief · {mqFmtDate(d.as_of)}</div>
         <span style={{ fontSize: 10, color: verified ? C.pos : d.final ? "var(--amber)" : "var(--text3)" }}>
-          {verified ? "✓ NSE-verified" : d.final ? "awaiting NSE close" : "intraday"}
+          {verified ? "✓ NSE-verified" : d.final ? "awaiting NSE close" : "intraday"}{d.pending_day ? ` · ${mqFmtDate(d.pending_day)} pending` : ""}
         </span>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 4 }}>
@@ -5231,6 +5194,188 @@ function MqRotationMap({ data, onSelect }) {
   );
 }
 
+// ─── IDEAS · plan sheet · error-safe sections ────────────────────────────────
+
+/** Keeps one broken section from blanking the whole page; offers a retry. */
+class SectionBoundary extends Component {
+  constructor(p) { super(p); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err) { console.warn(`[${this.props.name}]`, err); }
+  render() {
+    if (!this.state.err) return this.props.children;
+    return (
+      <div className="card" style={{ marginBottom: 14, fontSize: 12, color: "var(--text3)" }}>
+        {this.props.name} couldn't load.{" "}
+        <button className="chip" style={{ fontSize: 10 }} onClick={() => this.setState({ err: null })}>Retry</button>
+      </div>
+    );
+  }
+}
+
+function readMicro() {
+  try { return JSON.parse(localStorage.getItem("td_mq_micro_v3") || "null")?.data || null; } catch (_) { return null; }
+}
+
+const IDEA_TAG = { pivot: "Pivot today", tight: "Tight", ep: "EP", epr: "EP ★ results", ipo: "IPO base", ipoup: "IPO ↑ new high", leader: "Leader", watch: "★ Watching" };
+
+/**
+ * One ranked, de-duplicated list of what's worth acting on today.
+ * Score: grade (A 30 / B 15) + strength/5 + 6 per reason + hot-sector and watchlist bonuses.
+ */
+function buildIdeas(d, micro, watchlist) {
+  if (!d?.scans) return [];
+  const status = Object.fromEntries((d.sectors || []).map(s => [s.name, s.status]));
+  const map = new Map();
+  const add = (r, tag, isMicro) => {
+    if (!r?.sym) return;
+    const src = isMicro ? micro : d;
+    const x = map.get(r.sym) || {
+      sym: r.sym, sector: r.sector || src?.sector_of?.[r.sym] || d.sector_of?.[r.sym] || "Other",
+      rs: r.rs ?? src?.rs_of?.[r.sym] ?? null, grade: r.grade ?? src?.grade_of?.[r.sym] ?? null,
+      plan: r.plan ?? src?.plan_of?.[r.sym] ?? null, tags: new Set(), micro: !!isMicro,
+    };
+    x.tags.add(tag); map.set(r.sym, x);
+  };
+  const take = (sc, isMicro) => {
+    if (!sc) return;
+    (sc.pivots || []).forEach(r => add(r, "pivot", isMicro));
+    (sc.tight || []).forEach(r => add(r, "tight", isMicro));
+    (sc.ep || []).forEach(r => add(r, r.results ? "epr" : "ep", isMicro));
+    (sc.ipo || []).forEach(r => add(r, r.breakout ? "ipoup" : "ipo", isMicro));
+  };
+  take(d.scans, false);
+  (d.leaders || []).filter(l => ["HOT", "WARM"].includes(status[l.sector])).forEach(r => add(r, "leader", false));
+  if (micro?.scans) take(micro.scans, true);
+  for (const w of watchlist || []) add({ sym: w.sym }, "watch", false);
+  const G = { A: 30, B: 15, C: 0 };
+  return [...map.values()].map(x => {
+    const st = status[x.sector];
+    const score = (G[x.grade] ?? 0) + (x.rs ?? 0) / 5 + x.tags.size * 6 + (st === "HOT" ? 6 : st === "WARM" ? 3 : 0) + (x.tags.has("watch") ? 8 : 0);
+    return { ...x, sectorStatus: st, score: Math.round(score) };
+  }).sort((a, b) => b.score - a.score);
+}
+
+function sizeFor(plan, portfolio, riskPct) {
+  if (!plan || !portfolio || !(riskPct > 0) || !(plan.entry > plan.stop)) return null;
+  const qty = Math.floor((portfolio * riskPct / 100) / (plan.entry - plan.stop));
+  return qty > 0 ? { qty, value: qty * plan.entry } : null;
+}
+
+function IdeaRow({ x, portfolio, riskPct, onOpen, onPlan, compact }) {
+  const size = sizeFor(x.plan, portfolio, riskPct);
+  return (
+    <div style={{ padding: "9px 0", borderTop: "1px solid var(--border)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <button onClick={() => onOpen?.(x.sym)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", fontFamily: "var(--display)", fontWeight: 700, fontSize: 14, textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{x.sym}</button>
+        <RsBadge rs={x.rs} grade={x.grade} />
+        {x.micro && <span style={{ fontSize: 9, color: "var(--text3)", border: "1px solid var(--border)", borderRadius: 6, padding: "0 4px" }}>micro</span>}
+        <span style={{ flex: 1 }} />
+        {x.plan && <button className="chip" style={{ fontSize: 10, padding: "3px 10px" }} onClick={() => onPlan?.({ symbol: x.sym, entry: x.plan.entry, stop: x.plan.stop })}>Plan</button>}
+      </div>
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 3 }}>
+        {x.sector}{x.sectorStatus && x.sectorStatus !== "—" && <span style={{ color: MQ_DIM_COLOR[x.sectorStatus] }}> · {x.sectorStatus}</span>}
+        {" · "}{[...x.tags].map(t => IDEA_TAG[t]).join(" · ")}
+      </div>
+      {x.plan && !compact && (
+        <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 4, fontFamily: "var(--mono)" }}>
+          Entry ₹{x.plan.entry} · Stop ₹{x.plan.stop} ({x.plan.riskPct}%)
+          {size ? <span style={{ color: "var(--text)" }}> · {size.qty} sh ≈ {formatINR(size.value)}</span> : riskPct === 0 ? <span style={{ color: C.warn }}> · no new entries today</span> : null}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function IdeasPage({ watchlist, portfolio, onOpenStock, onPlan }) {
+  const { data, loading, error, progress, retry } = useMarketQuadrant();
+  const [filter, setFilter] = useState(() => { try { return localStorage.getItem("td_ideas_filter") || "all"; } catch (_) { return "all"; } });
+  const pick = (f) => { setFilter(f); try { localStorage.setItem("td_ideas_filter", f); } catch (_) {} };
+  const head = (
+    <div style={{ marginBottom: 12 }}>
+      <div className="section-title">Ideas</div>
+      <div style={{ fontSize: 13, color: "var(--text3)", marginTop: 4 }}>Everything worth a look today, in one ranked list — sized for today's market.</div>
+    </div>
+  );
+  if (!data?.scans) {
+    return (
+      <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
+        {head}
+        <div className="card">{error ? <><div style={{ color: "var(--red)", fontSize: 12 }}>{error}</div><button className="btn-ghost" style={{ marginTop: 10 }} onClick={retry}>Retry</button></> : <><div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 10 }}>{loading ? progress.msg : "Loading…"}</div><Skeleton lines={6} /></>}</div>
+      </div>
+    );
+  }
+  const micro = readMicro();
+  const all = buildIdeas(data, micro, watchlist);
+  const rows = all.filter(x => filter === "a" ? x.grade === "A" : filter === "watch" ? x.tags.has("watch") : filter === "n500" ? !x.micro : true);
+  const s = suggestedRisk(data);
+  return (
+    <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
+      {head}
+      <div className="card" style={{ marginBottom: 12, padding: "10px 14px" }}>
+        <div style={{ fontSize: 12, color: "var(--text)" }}>{briefRule(data)}</div>
+        <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 4 }}>
+          Sizes use {s?.pct ?? 0}% risk per trade ({s?.why || "—"}) on {formatINR(portfolio)}. Based on {mqFmtDate(data.as_of)} closes{data.verification?.date === data.as_of ? " ✓ NSE" : ""}.
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 6, overflowX: "auto", marginBottom: 10, scrollbarWidth: "none" }}>
+        {[["all", `All ${all.length}`], ["a", `A-grade ${all.filter(x => x.grade === "A").length}`], ["watch", `★ Watchlist ${all.filter(x => x.tags.has("watch")).length}`], ["n500", "Nifty 500 only"]].map(([id, l]) => (
+          <button key={id} className="chip" aria-pressed={filter === id} onClick={() => pick(id)} style={filter === id ? { borderColor: "var(--text)", color: "var(--text)", whiteSpace: "nowrap" } : { whiteSpace: "nowrap" }}>{l}</button>
+        ))}
+      </div>
+      <div className="card" style={{ paddingTop: 6 }}>
+        {rows.length === 0 ? <div style={{ fontSize: 12, color: "var(--text3)", padding: "16px 0", textAlign: "center" }}>Nothing here today.</div>
+          : rows.slice(0, 40).map(x => <IdeaRow key={x.sym} x={x} portfolio={portfolio} riskPct={s?.pct ?? 0} onOpen={onOpenStock} onPlan={onPlan} />)}
+        {rows.length > 40 && <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 8 }}>Showing the top 40 of {rows.length}.</div>}
+      </div>
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 10, lineHeight: 1.5 }}>
+        Ranked by grade, strength, how many lists a stock appears in, sector heat and your watchlist. Entry/stop come from closing prices — check the chart. {micro ? "Includes Microcap 250 (loaded from SCAN)." : "Turn on Microcap 250 in SCAN to include microcaps."} Ideas, not recommendations.
+      </div>
+    </div>
+  );
+}
+
+function BestSetups({ watchlist, portfolio, onOpenStock, onPlan, onSeeAll }) {
+  const { data } = useMarketQuadrant();
+  if (!data?.scans) return null;
+  const top = buildIdeas(data, readMicro(), watchlist).filter(x => x.plan).slice(0, 5);
+  const s = suggestedRisk(data);
+  if (!top.length) return null;
+  return (
+    <div className="card" style={{ marginBottom: 14, paddingTop: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 2 }}>
+        <div className="label">Today's best setups</div>
+        <button className="chip" style={{ fontSize: 10 }} onClick={onSeeAll}>All ideas ›</button>
+      </div>
+      {s?.pct === 0 && <div style={{ fontSize: 11, color: C.warn, margin: "4px 0" }}>Market rules say no new entries today — watch only.</div>}
+      {top.map(x => <IdeaRow key={x.sym} x={x} portfolio={portfolio} riskPct={s?.pct ?? 0} onOpen={onOpenStock} onPlan={onPlan} />)}
+    </div>
+  );
+}
+
+/** The calculator as a slide-up sheet, available from anywhere. */
+function PlanSheet({ open, onClose, children }) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => e.key === "Escape" && onClose();
+    document.addEventListener("keydown", onKey);
+    document.body.style.overflow = "hidden";
+    return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = ""; };
+  }, [open]);
+  if (!open) return null;
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Plan a trade" style={{ position: "fixed", inset: 0, zIndex: 400, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "flex-end", justifyContent: "center" }}
+      onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div style={{ width: "100%", maxWidth: 480, maxHeight: "92vh", overflowY: "auto", background: "var(--bg)", borderTopLeftRadius: 18, borderTopRightRadius: 18, borderTop: "1px solid var(--border)", position: "relative" }}>
+        <div style={{ position: "sticky", top: 0, zIndex: 2, background: "var(--bg)", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px 0" }}>
+          <span style={{ width: 36, height: 4, borderRadius: 2, background: "var(--border2)", margin: "0 auto" }} />
+          <button onClick={onClose} aria-label="Close" style={{ position: "absolute", right: 12, top: 6, background: "none", border: "none", color: "var(--text2)", fontSize: 22, cursor: "pointer" }}>×</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 // ─── BOTTOM NAV ──────────────────────────────────────────────────────────────
 function BottomNav({ page, setPage }) {
   const tabs = [
@@ -5244,9 +5389,9 @@ function BottomNav({ page, setPage }) {
         <circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><polyline points="8 12 10 10 12 12 14 9"/>
       </svg>
     )},
-    { id: "calc", label: "CALC", icon: (
+    { id: "ideas", label: "IDEAS", icon: (
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="6" x2="16" y2="6"/><line x1="8" y1="10" x2="10" y2="10"/><line x1="14" y1="10" x2="16" y2="10"/><line x1="8" y1="14" x2="10" y2="14"/><line x1="14" y1="14" x2="16" y2="14"/><line x1="8" y1="18" x2="10" y2="18"/><line x1="14" y1="18" x2="16" y2="18"/>
+        <path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.2 1 2V17h6v-.3c0-.8.4-1.5 1-2A7 7 0 0 0 12 2z"/>
       </svg>
     )},
     { id: "trades", label: "TRADES", icon: (
@@ -5308,6 +5453,7 @@ export default function App() {
   useEffect(() => {
     if (page === "journal") { chooseTradesSub("journal"); setPage("trades"); }
     if (page === "analytics") { chooseTradesSub("stats"); setPage("trades"); }
+    if (page === "calc") { setPage("today"); setPlanOpen(true); }
   }, [page]);
   const indicesTicker = useIndicesTicker();
 
@@ -5321,7 +5467,8 @@ export default function App() {
     setRegimeSince(new Date().toISOString());
   };
 
-  const pickStock = (p) => { setCalcSymbol(p); setPage("calc"); window.scrollTo(0, 0); };
+  const [planOpen, setPlanOpen] = useState(false);
+  const pickStock = (p) => { setCalcSymbol(p || null); setPlanOpen(true); };
   const openStock = (sym) => { setStockSym(sym); setStockBack(page === "stock" ? stockBack : page); setPage("stock"); window.scrollTo(0, 0); };
 
   // Regime follows QUAD's Bias automatically (BULL/BEAR from Nifty 500 breadth), so the
@@ -5337,6 +5484,7 @@ export default function App() {
 
   const handleSendToJournal = (data) => {
     setPrefill(data);
+    setPlanOpen(false);
     setPage("journal");
   };
 
@@ -5348,12 +5496,17 @@ export default function App() {
 
       {page === "today" && (
         <TodayPage regime={regime} setRegime={handleRegimeChange} regimeSince={regimeSince} portfolio={portfolio} setPortfolio={setPortfolio} trades={trades} setPage={setPage}
-          watchlist={watchlist} onOpenStock={openStock} />
+          watchlist={watchlist} onOpenStock={openStock} onPlan={pickStock} />
       )}
-      {page === "calc" && (
-        <CalcPage portfolio={portfolio} trades={trades} onSendToJournal={handleSendToJournal} onOpenQuadrant={() => setPage("quadrant")}
-          prefillSymbol={calcSymbol} onPrefillUsed={() => setCalcSymbol(null)} />
+      {page === "ideas" && (
+        <IdeasPage watchlist={watchlist} portfolio={portfolio} onOpenStock={openStock} onPlan={pickStock} />
       )}
+      <PlanSheet open={planOpen} onClose={() => setPlanOpen(false)}>
+        <SectionBoundary name="Trade calculator">
+          <CalcPage portfolio={portfolio} trades={trades} onSendToJournal={handleSendToJournal} onOpenQuadrant={() => { setPlanOpen(false); setPage("quadrant"); }}
+            prefillSymbol={calcSymbol} onPrefillUsed={() => setCalcSymbol(null)} />
+        </SectionBoundary>
+      </PlanSheet>
       {page === "trades" && (
         <TradesPage sub={tradesSub} setSub={chooseTradesSub}
           journalProps={{ trades, setTrades, prefill, setPrefill }} statsProps={{ trades, portfolio }} />
