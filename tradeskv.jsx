@@ -3536,6 +3536,46 @@ function Tour({ onDone }) {
     </div>
   );
 }
+// Web Push: alerts that arrive even when the app is closed (sent by the GitHub job)
+const VAPID_PUBLIC_KEY = "BOfMpRJYlyp46brGiuduUaTZc64NIIgi0f3JriXHejdrDsEz8zbEF_4MeeYSmQ9TuMG32Myfu0umK_2MPL4nNLQ";
+function b64ToBytes(b64) {
+  const pad = "=".repeat((4 - (b64.length % 4)) % 4);
+  const raw = atob((b64 + pad).replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+async function enablePush() {
+  if (typeof Notification === "undefined" || !("serviceWorker" in navigator)) return { ok: false, reason: "This browser can't receive push alerts. On iPhone, add the app to your Home Screen first." };
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") return { ok: false, reason: "Notifications are blocked for this site." };
+  const reg = await navigator.serviceWorker.ready;
+  if (!reg?.pushManager) return { ok: false, reason: "Push isn't supported here. On iPhone, open the app from the Home Screen." };
+  const sub = (await reg.pushManager.getSubscription()) || (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(VAPID_PUBLIC_KEY) }));
+  const sb = getSupabaseClient();
+  const user = sb ? (await sb.auth.getUser()).data?.user : null;
+  if (!user) return { ok: false, reason: "Cloud sync isn't ready yet — try again in a moment." };
+  const { error } = await sb.from("push_subscriptions").upsert({ endpoint: sub.endpoint, user_id: user.id, subscription: sub.toJSON() }, { onConflict: "endpoint" });
+  if (error) return { ok: false, reason: error.message };
+  try { localStorage.setItem("td_push_on", "1"); } catch (_) {}
+  return { ok: true };
+}
+function PushToggle() {
+  const [st, setSt] = useState(() => { try { return localStorage.getItem("td_push_on") === "1" ? "on" : "off"; } catch (_) { return "off"; } });
+  const [msg, setMsg] = useState(null);
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 12, color: "var(--text2)", flex: 1 }}>Phone alerts — stop hits, price levels, signal changes (even when the app is closed)</span>
+        <button className="chip" disabled={st === "busy"} aria-pressed={st === "on"}
+          style={st === "on" ? { borderColor: C.pos, color: C.pos } : {}}
+          onClick={async () => { setSt("busy"); setMsg(null); const r = await enablePush().catch(e => ({ ok: false, reason: e.message })); setSt(r.ok ? "on" : "off"); if (!r.ok) setMsg(r.reason); }}>
+          {st === "on" ? "On ✓" : st === "busy" ? "…" : "Turn on"}
+        </button>
+      </div>
+      {msg && <div style={{ fontSize: 11, color: C.warn, marginTop: 4 }}>{msg}</div>}
+    </div>
+  );
+}
+
 function AppSettings({ onTour }) {
   const setTheme = (t) => { try { localStorage.setItem("td_theme", t); } catch (_) {} location.reload(); };
   return (
@@ -3550,6 +3590,7 @@ function AppSettings({ onTour }) {
         <span style={{ flex: 1 }} />
         <button className="chip" onClick={onTour}>Show tour</button>
       </div>
+      <PushToggle />
     </div>
   );
 }
@@ -4754,7 +4795,7 @@ function WatchAlertsCard({ watchlist, onOpen }) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
         <div className="label">Watchlist alerts · {watchlist.length} watched</div>
         {perm === "default" && (
-          <button className="chip" style={{ fontSize: 10 }} onClick={() => Notification.requestPermission().then(setPerm)}>Notify me</button>
+          <button className="chip" style={{ fontSize: 10 }} onClick={() => enablePush().finally(() => setPerm(Notification.permission))}>Notify me</button>
         )}
       </div>
       {alerts.length === 0 ? (

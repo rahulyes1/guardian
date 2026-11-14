@@ -2,3 +2,4 @@ node_modules
 dist
 .vercel
 backend/cache/nse_symbols.csv
+.secrets
