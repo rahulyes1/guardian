@@ -176,7 +176,9 @@ async function fetchSparkBatch(nsTickers) {
     closes[item.symbol] = byDay;
     if (Array.isArray(item.volTail)) {
       const off = ts.length - item.volTail.length, vb = {};
-      item.volTail.forEach((v, k) => { if (v != null && ts[off + k] != null) vb[istDayKey(ts[off + k])] = v; });
+      // Only keep a volume when that bar also has a close: Yahoo sometimes posts a bar with no
+      // close and a partial intraday volume; those days are filled from NSE's full figures instead.
+      item.volTail.forEach((v, k) => { if (v != null && ts[off + k] != null && cl[off + k] != null) vb[istDayKey(ts[off + k])] = v; });
       vols[item.symbol] = vb;
     }
   }
