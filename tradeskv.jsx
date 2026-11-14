@@ -6,6 +6,7 @@ import {
   rsScore, rsRating, gradeSetup, tradePlan,
 } from "./marketQuadrant.js";
 import { INDEX_KEYS, reconcileIndex } from "./lib/marketChecks.js";
+import { parseTradebook, buildTrades } from "./lib/tradeImport.js";
 import { useSyncedAppState } from "./appStateSync.js";
 // ─── THEME & CONSTANTS ───────────────────────────────────────────────────────
 const REGIME_CONFIG = {
@@ -2601,6 +2602,8 @@ function AnalyticsPage({ trades, portfolio }) {
 
       <MarketContextStats closed={closed} />
       <DisciplineStats closed={closed} portfolio={portfolio} />
+      <EquityRisk closed={closed} portfolio={portfolio} />
+      <ExitReplay closed={closed} />
 
       {/* By Setup */}
       {setupStats.length > 0 && (
@@ -4233,6 +4236,7 @@ function TradesPage({ sub, setSub, journalProps, statsProps }) {
             style={sub === id ? { borderColor: "var(--text)", color: "var(--text)", flex: 1 } : { flex: 1 }}>{l}</button>
         ))}
       </div>
+      {sub === "journal" && <ZerodhaImport trades={journalProps.trades} setTrades={journalProps.setTrades} />}
       {sub === "stats" ? <AnalyticsPage {...statsProps} /> : <JournalPage {...journalProps} />}
     </div>
   );
@@ -4380,7 +4384,7 @@ function disciplineScore(t, mq, portfolio) {
     ["Environment wasn't No money", ctx.env ? ctx.env !== "NO MONEY" : null],
     ["Sector HOT/WARM", ctx.sectorStatus ? ["HOT", "WARM"].includes(ctx.sectorStatus) : null],
     ["Risk within suggested size", sugg && riskPct != null ? riskPct <= sugg.pct + 0.1 : null],
-    ["Had a stop", (t.currentStop || t.stop) > 0],
+    ["Had a stop", t.source === "zerodha" && !((t.currentStop || t.stop) > 0) ? null : (t.currentStop || t.stop) > 0],
   ];
   const known = checks.filter(c => c[1] != null);
   return { score: known.filter(c => c[1]).length, of: known.length, checks };
@@ -4731,6 +4735,227 @@ function WatchlistPanel({ watchlist, setWatchlist, onPickStock }) {
           </Fragment>
         );
       })}
+    </div>
+  );
+}
+
+// ─── C · F · G: Zerodha import, exit replay, equity & risk ───────────────────
+
+function ZerodhaImport({ trades, setTrades }) {
+  const [state, setState] = useState(null); // { preview } | { error } | { done }
+  const fileRef = useRef(null);
+  const onFile = async (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (!f) return;
+    try {
+      const text = await f.text();
+      const { fills, skippedSegment } = parseTradebook(text);
+      const existing = new Set((trades || []).flatMap(t => t.importIds || []));
+      const r = buildTrades(fills, existing);
+      setState({ preview: { ...r, skippedSegment, file: f.name } });
+    } catch (err) { setState({ error: err.message || String(err) }); }
+  };
+  const confirm = () => {
+    const p = state.preview;
+    // stamp market context by entry date so stats work immediately
+    const mq = getLastMarketQuadrant();
+    const tagged = p.trades.map(t => {
+      const row = historyOnDate(mq, t.entries[0]?.date);
+      return row ? { ...t, marketSignal: row.sig || null } : t;
+    });
+    setTrades([...(trades || []), ...tagged]);
+    setState({ done: p.trades.length });
+  };
+  return (
+    <div className="card" style={{ margin: "12px 16px 0" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <div>
+          <div className="label">Import from Zerodha</div>
+          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>Console → Reports → Tradebook → Equity → download CSV</div>
+        </div>
+        <button className="btn-ghost" style={{ fontSize: 12, padding: "8px 12px" }} onClick={() => fileRef.current?.click()}>Choose CSV</button>
+        <input ref={fileRef} type="file" accept=".csv,text/csv" onChange={onFile} style={{ display: "none" }} />
+      </div>
+      {state?.error && <div style={{ fontSize: 12, color: "var(--red)", marginTop: 8 }}>{state.error}</div>}
+      {state?.preview && (
+        <div style={{ marginTop: 10, fontSize: 12, color: "var(--text2)", lineHeight: 1.6 }}>
+          <b style={{ color: "var(--text)" }}>{state.preview.file}</b><br />
+          {state.preview.closed} closed trades · {state.preview.open} open positions to add
+          {state.preview.duplicates ? ` · ${state.preview.duplicates} fills already imported (skipped)` : ""}
+          {state.preview.skippedShort ? ` · ${state.preview.skippedShort} short sells skipped` : ""}
+          {state.preview.skippedSegment ? ` · ${state.preview.skippedSegment} F&O/other rows skipped` : ""}
+          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 4 }}>Stops aren't in the tradebook, so R-multiples and the stop check are skipped for imported trades — add a stop to a trade to include it.</div>
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button className="btn-primary" style={{ flex: 1, padding: "8px" }} disabled={!state.preview.trades.length} onClick={confirm}>
+              Import {state.preview.trades.length} trade{state.preview.trades.length === 1 ? "" : "s"}
+            </button>
+            <button className="btn-ghost" style={{ padding: "8px 12px" }} onClick={() => setState(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {state?.done != null && <div style={{ fontSize: 12, color: "#4ADE80", marginTop: 8 }}>✓ Imported {state.done} trades. They're tagged with the market conditions at entry.</div>}
+    </div>
+  );
+}
+
+// ── G: equity curve, drawdown, return distribution, Monte Carlo ──
+function tradeReturnPct(t, portfolio) {
+  return portfolio ? ((t.pnl || 0) / portfolio) * 100 : null;
+}
+function exitDate(t) {
+  const x = (t.exits || []).slice(-1)[0];
+  return x?.date || t.date;
+}
+function monteCarlo(rets, n = 50, runs = 2000) {
+  if (rets.length < 10) return null; // too few trades for a meaningful reshuffle
+  let dd10 = 0, dd20 = 0; const ends = [];
+  for (let r = 0; r < runs; r++) {
+    let eq = 100, peak = 100, worst = 0;
+    for (let k = 0; k < n; k++) {
+      eq *= 1 + rets[Math.floor(Math.random() * rets.length)] / 100;
+      peak = Math.max(peak, eq); worst = Math.min(worst, eq / peak - 1);
+    }
+    if (worst <= -0.1) dd10++; if (worst <= -0.2) dd20++;
+    ends.push(eq - 100);
+  }
+  ends.sort((a, b) => a - b);
+  return { n, p10: Math.round((dd10 / runs) * 100), p20: Math.round((dd20 / runs) * 100), median: +ends[Math.floor(runs / 2)].toFixed(1), worst5: +ends[Math.floor(runs * 0.05)].toFixed(1) };
+}
+
+function EquityRisk({ closed, portfolio }) {
+  const sorted = [...closed].sort((a, b) => (exitDate(a) < exitDate(b) ? -1 : 1));
+  if (sorted.length < 2 || !portfolio) return null;
+  const pts = []; let eq = 0, peak = 0, maxDD = 0;
+  for (const t of sorted) { eq += t.pnl || 0; peak = Math.max(peak, eq); maxDD = Math.min(maxDD, eq - peak); pts.push({ d: exitDate(t), eq }); }
+  const rets = sorted.map(t => tradeReturnPct(t, portfolio)).filter(Number.isFinite);
+  const mc = monteCarlo(rets);
+  const W = 340, H = 100, lo = Math.min(0, ...pts.map(p => p.eq)), hi = Math.max(0, ...pts.map(p => p.eq)), sp = hi - lo || 1;
+  const x = (i) => 4 + (i / Math.max(1, pts.length - 1)) * (W - 44), y = (v) => 6 + (1 - (v - lo) / sp) * (H - 12);
+  const path = pts.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.eq).toFixed(1)}`).join("");
+  const rs = sorted.filter(t => t.riskAmount > 0).map(t => (t.pnl || 0) / t.riskAmount);
+  const bins = [[-Infinity, -1], [-1, 0], [0, 1], [1, 2], [2, 3], [3, Infinity]], labels = ["<−1R", "−1–0", "0–1", "1–2", "2–3", "3R+"];
+  const counts = bins.map(([a, b]) => rs.filter(r => r >= a && r < b).length), maxC = Math.max(1, ...counts);
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="label" style={{ marginBottom: 6 }}>Equity curve · {sorted.length} closed trades</div>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: "block" }} role="img" aria-label="Cumulative P&L by trade">
+        <line x1="4" x2={W - 40} y1={y(0)} y2={y(0)} stroke="var(--border)" strokeDasharray="3 3" />
+        <path d={path} fill="none" stroke={eq >= 0 ? "#4ADE80" : "#DC143C"} strokeWidth="1.8" strokeLinejoin="round" />
+        <text x={W - 36} y={y(eq) + 3} fontSize="9" fill="var(--text2)" fontFamily="var(--mono)">{eq >= 0 ? "+" : ""}{Math.round(eq / 1000)}k</text>
+      </svg>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8, fontSize: 12 }}>
+        <div><span style={{ color: "var(--text3)" }}>Total</span> <b style={{ color: eq >= 0 ? "var(--green)" : "var(--red)", fontFamily: "var(--mono)" }}>{eq >= 0 ? "+" : ""}{formatINR(eq)}</b></div>
+        <div><span style={{ color: "var(--text3)" }}>Worst drawdown</span> <b style={{ color: "var(--red)", fontFamily: "var(--mono)" }}>{formatINR(maxDD)}</b> <span style={{ color: "var(--text3)" }}>({((maxDD / portfolio) * 100).toFixed(1)}%)</span></div>
+      </div>
+      {rs.length >= 3 && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 10, color: "var(--text3)", marginBottom: 4 }}>R-multiples ({rs.length} trades with a stop)</div>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 50 }}>
+            {counts.map((c, i) => (
+              <div key={i} title={`${labels[i]}: ${c}`} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+                <span style={{ fontSize: 9, color: "var(--text3)", fontFamily: "var(--mono)" }}>{c || ""}</span>
+                <div style={{ width: "100%", height: `${(c / maxC) * 34}px`, minHeight: c ? 2 : 0, borderRadius: 3, background: i < 2 ? "#DC143C" : "#4ADE80", opacity: 0.75 }} />
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 4, fontSize: 9, color: "var(--text3)", marginTop: 2 }}>{labels.map(l => <span key={l} style={{ flex: 1, textAlign: "center" }}>{l}</span>)}</div>
+        </div>
+      )}
+      {!mc && rets.length > 0 && rets.length < 10 && (
+        <div style={{ marginTop: 10, fontSize: 11, color: "var(--text3)" }}>Drawdown odds appear after 10 closed trades ({rets.length} so far).</div>
+      )}
+      {mc && (
+        <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)", fontSize: 12, color: "var(--text2)", lineHeight: 1.55 }}>
+          <b style={{ color: "var(--text)" }}>Next {mc.n} trades, if they look like your last {rets.length}</b> (2,000 random reshuffles):<br />
+          Chance of a 10% drawdown: <b style={{ color: mc.p10 > 30 ? "#DC143C" : "var(--text)" }}>{mc.p10}%</b> · 20% drawdown: <b style={{ color: mc.p20 > 10 ? "#DC143C" : "var(--text)" }}>{mc.p20}%</b><br />
+          Median outcome {mc.median > 0 ? "+" : ""}{mc.median}% · bad case (5%) {mc.worst5 > 0 ? "+" : ""}{mc.worst5}%
+          {rets.length < 30 && <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 4 }}>Small sample ({rets.length} trades) — treat as a rough guide; it firms up past ~30 trades.</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── F: exit replay — what trailing the 10 / 20-day SMA would have done ──
+const _detailCache = new Map();
+function cachedDetail(sym) {
+  const key = `${sym}|${istDayKey(Math.floor(Date.now() / 1000))}`;
+  if (!_detailCache.has(key)) _detailCache.set(key, fetchStockDetail(sym).catch(() => null));
+  return _detailCache.get(key);
+}
+/** Simulate exits from the first entry: close below the N-day SMA → exit at that close. */
+function replayExit(d, entryDate, entryPrice, period, maxDays = 120) {
+  const s = smaSeries(d.closes, period, Math.ceil(period * 0.75));
+  const day = new Date(Date.parse(entryDate) + 19800000).toISOString().slice(0, 10);
+  let i = d.dates.findIndex(x => x >= day);
+  if (i < 0) return null;
+  for (let k = i + 1; k < d.closes.length && k <= i + maxDays; k++) {
+    if (s[k] != null && d.closes[k] < s[k]) return { ret: (d.closes[k] / entryPrice - 1) * 100, days: k - i, open: false };
+  }
+  const last = Math.min(d.closes.length - 1, i + maxDays);
+  return { ret: (d.closes[last] / entryPrice - 1) * 100, days: last - i, open: last === d.closes.length - 1 };
+}
+
+function ExitReplay({ closed }) {
+  const [rows, setRows] = useState(null);
+  const recent = [...closed].sort((a, b) => (exitDate(a) < exitDate(b) ? 1 : -1)).slice(0, 15);
+  const key = recent.map(t => t.id).join(",");
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const out = [];
+      for (const t of recent) {
+        const sym = normalizeSymbol(t.symbol), e0 = t.entries?.[0];
+        const entry = t.avgEntry || e0?.price, qty = t.totalQty || e0?.qty;
+        if (!entry || !qty || !e0?.date) continue;
+        const d = await cachedDetail(sym);
+        if (!d) continue;
+        const actual = ((t.pnl || 0) / (entry * qty)) * 100;
+        out.push({ sym, actual, s10: replayExit(d, e0.date, entry, 10), s20: replayExit(d, e0.date, entry, 20) });
+        if (alive) setRows([...out]);
+      }
+      if (alive) setRows(out);
+    })();
+    return () => { alive = false; };
+  }, [key]);
+  if (!closed.length) return null;
+  const done = (rows || []).filter(r => r.s10 && r.s20);
+  const avg = (f) => (done.length ? done.reduce((a, r) => a + f(r), 0) / done.length : null);
+  const a = avg(r => r.actual), b10 = avg(r => r.s10.ret), b20 = avg(r => r.s20.ret);
+  const best = [["your exits", a], ["10-day SMA trail", b10], ["20-day SMA trail", b20]].filter(x => x[1] != null).sort((x, y) => y[1] - x[1])[0];
+  const pct = (v) => (v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(1)}%`);
+  const col = (v) => (v == null ? "var(--text3)" : v >= 0 ? "#4ADE80" : "#DC143C");
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="label" style={{ marginBottom: 4 }}>Exit replay · last {recent.length} trades</div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 10 }}>Your actual return vs exiting at the first close below the 10- or 20-day SMA (same entry, closing prices).</div>
+      {rows && rows.length < recent.length && <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 6 }}>Loading {rows.length}/{recent.length}…</div>}
+      {!rows ? <div style={{ fontSize: 12, color: "var(--text3)" }}>Loading price history…</div> : (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", columnGap: 12, fontSize: 12, fontFamily: "var(--mono)" }}>
+          {["", "ACTUAL", "10-SMA", "20-SMA"].map((h, i) => <span key={i} style={{ fontSize: 9, color: "var(--text3)", textAlign: i ? "right" : "left", paddingBottom: 4 }}>{h}</span>)}
+          {rows.map(r => (
+            <Fragment key={r.sym + r.actual}>
+              <span style={{ padding: "5px 0", borderTop: "1px solid var(--border)", fontFamily: "var(--display)", fontWeight: 700 }}>{r.sym}</span>
+              <span style={{ padding: "5px 0", borderTop: "1px solid var(--border)", textAlign: "right", color: col(r.actual) }}>{pct(r.actual)}</span>
+              <span style={{ padding: "5px 0", borderTop: "1px solid var(--border)", textAlign: "right", color: col(r.s10?.ret) }}>{pct(r.s10?.ret)}{r.s10?.open ? "*" : ""}</span>
+              <span style={{ padding: "5px 0", borderTop: "1px solid var(--border)", textAlign: "right", color: col(r.s20?.ret) }}>{pct(r.s20?.ret)}{r.s20?.open ? "*" : ""}</span>
+            </Fragment>
+          ))}
+          {done.length > 1 && (
+            <>
+              <span style={{ padding: "6px 0", borderTop: "1px solid var(--text3)", fontWeight: 700 }}>Average</span>
+              {[a, b10, b20].map((v, i) => <span key={i} style={{ padding: "6px 0", borderTop: "1px solid var(--text3)", textAlign: "right", fontWeight: 700, color: col(v) }}>{pct(v)}</span>)}
+            </>
+          )}
+        </div>
+      )}
+      {done.length > 1 && best && (
+        <div style={{ fontSize: 12, color: "var(--text)", marginTop: 10 }}>
+          {best[0] === "your exits" ? "Your own exits did best on these trades." : `Trailing the ${best[0].replace(" trail", "")} would have averaged ${pct(best[1])} vs your ${pct(a)}.`}
+        </div>
+      )}
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>* still above the average today (not exited yet). Ignores costs and intraday moves.</div>
     </div>
   );
 }
