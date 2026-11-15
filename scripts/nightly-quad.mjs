@@ -8,7 +8,7 @@
 //   DRY_RUN=1 node scripts/nightly-quad.mjs      # compute + print, don't publish
 import fs from "node:fs";
 import { createClient } from "@supabase/supabase-js";
-import { setApiBase, loadMarketQuadrant, isVerified } from "../marketQuadrant.js";
+import { setApiBase, loadMarketQuadrant, isVerified, setPriorPicks, computeLongBacktest, loadMicrocapScans } from "../marketQuadrant.js";
 
 const APP = (process.env.APP_URL || "https://guardian-swart-theta.vercel.app").replace(/\/$/, "");
 const SB_URL = process.env.SUPABASE_URL, SB_KEY = process.env.SUPABASE_PUBLISHABLE_KEY;
@@ -26,6 +26,17 @@ const finish = (code) => {
 };
 
 setApiBase(APP);
+// Supabase first: earlier evenings' picks feed the forward test
+const sb = SB_URL && SB_KEY ? createClient(SB_URL, SB_KEY, { auth: { persistSession: false, autoRefreshToken: false } }) : null;
+if (sb) {
+  const { error: authErr } = await sb.auth.signInAnonymously();
+  if (authErr) { log(`❌ Supabase sign-in failed: ${authErr.message}`); finish(1); }
+  const { data: prior, error: pErr } = await sb.from("market_quadrant").select("as_of, picks:data->picks").order("as_of", { ascending: false }).limit(60);
+  if (pErr) log(`⚠️ Couldn't read earlier picks: ${pErr.message}`);
+  const list = (prior || []).map(x => x.picks).filter(p => p?.d && Array.isArray(p.rows));
+  setPriorPicks(list);
+  log(`Forward test: ${list.length} earlier evenings of picks loaded`);
+}
 let r;
 try {
   r = await loadMarketQuadrant({ force: true });
@@ -41,15 +52,20 @@ if (!r.final || !isVerified(r)) {
   log(`⚠️ Not published: result is ${r.final ? "not yet verified against NSE (bhavcopy for " + r.as_of + " not out)" : "intraday"}. The 22:00 IST run will retry.`);
   finish(0);
 }
+// Extras published with the result (each optional — a failure doesn't block publishing)
+try { r.micro = await loadMicrocapScans({ force: true }); log(`Microcap 250: ${r.micro.total} stocks computed`); }
+catch (e) { log(`⚠️ Microcap scans skipped: ${e.message}`); }
+try {
+  r.long_bt = await computeLongBacktest();
+  log(`5-year records: ${r.long_bt.from} → ${r.long_bt.to}, ${r.long_bt.stocks} stocks`);
+} catch (e) { log(`⚠️ 5-year records skipped: ${e.message}`); }
+if (r.forward) log(`Forward test: ${r.forward.done} scored, avg ${r.forward.avg ?? "—"}%, vs average stock ${r.forward.vs ?? "—"}`);
 if (DRY) { log("Dry run — not published."); finish(0); }
 if (!SB_URL || !SB_KEY) {
   log("⚠️ Not published: add SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY as GitHub Actions secrets to enable nightly publishing.");
   finish(0);
 }
 
-const sb = createClient(SB_URL, SB_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
-const { error: authErr } = await sb.auth.signInAnonymously();
-if (authErr) { log(`❌ Supabase sign-in failed: ${authErr.message}`); finish(1); }
 const { error } = await sb.from("market_quadrant").upsert(
   { as_of: r.as_of, data: r, computed_at: r.updated_at },
   { onConflict: "as_of" }

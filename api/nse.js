@@ -4,6 +4,8 @@
 //   /api/nse?type=live     NSE allIndices feed        → { date, time, indices: { "NIFTY 50": {...}, ... } }
 //   /api/nse?type=flows    FII/DII cash market activity (latest day)  → { date, fii: {buy,sell,net}, dii: {...} }  (₹ crore)
 //   /api/nse?type=deals    bulk + block deals (latest day)            → { date, deals: [{ sym, client, side, qty, price, kind }] }
+//   /api/nse?type=surv     F&O ban, ASM/GSM, narrow price bands → { ban: [SYM], asm: {SYM: stage}, gsm: {...}, band: {SYM: %}, ok }
+//   /api/nse?type=pastresults&symbol=X  results dates in the last ~2 years → { dates: [...] }
 //   /api/nse?type=events   NSE board-meeting calendar → { from, to, results: { SYMBOL: ["YYYY-MM-DD", ...] } }
 //                          (financial results only; 10 days back to 21 days ahead)
 // Errors return { error } with a non-200 status and are never cached.
@@ -129,7 +131,56 @@ export default async function handler(req, res) {
       return res.json({ source: "nse-event-calendar", from, to, results });
     }
 
-    return fail(400, "type must be indices, bhav, live or events");
+    // Surveillance: F&O ban list (archives CSV), ASM / GSM stages (NSE API), narrow price bands (sec_list.csv)
+    if (type === "surv") {
+      const [ban, asm, gsm, bands] = await Promise.all([
+        get("https://nsearchives.nseindia.com/content/fo/fo_secban.csv", { timeout: 5000 }),
+        get("https://www.nseindia.com/api/reportASM", { json: true, timeout: 6000 }),
+        get("https://www.nseindia.com/api/reportGSM", { json: true, timeout: 6000 }),
+        get("https://nsearchives.nseindia.com/content/equities/sec_list.csv", { timeout: 6000 }),
+      ]);
+      const out = { ban: [], asm: {}, gsm: {}, band: {}, ok: {} };
+      if (ban.status === 200) {
+        out.ok.ban = true;
+        for (const l of String(ban.body).split(/\r?\n/).slice(1)) {
+          const sym = l.split(",").map(x => x.trim()).find(x => /^[A-Z][A-Z0-9&-]+$/.test(x));
+          if (sym) out.ban.push(sym);
+        }
+      }
+      const stages = (body, into) => {
+        const rows = [body?.longterm?.data, body?.shortterm?.data, body?.data, Array.isArray(body) ? body : null].filter(Array.isArray).flat();
+        for (const x of rows) if (x?.symbol) into[x.symbol] = String(x.asmSurvIndicator || x.gsmSurvIndicator || x.survCode || x.stage || "listed").slice(0, 24);
+      };
+      if (asm.status === 200) { out.ok.asm = true; stages(asm.body, out.asm); }
+      if (gsm.status === 200) { out.ok.gsm = true; stages(gsm.body, out.gsm); }
+      if (bands.status === 200) {
+        const lines = String(bands.body).split(/\r?\n/);
+        const h = (lines[0] || "").toUpperCase().split(",").map(x => x.trim());
+        const iS = h.indexOf("SYMBOL"), iB = h.findIndex(x => /BAND/.test(x));
+        if (iS >= 0 && iB >= 0) {
+          out.ok.band = true;
+          for (const l of lines.slice(1)) { const c = l.split(","); const b = parseFloat(c[iB]); if (c[iS] && b > 0 && b <= 10) out.band[c[iS].trim()] = b; }
+        }
+      }
+      res.setHeader("Cache-Control", "public, max-age=3600, s-maxage=3600");
+      return res.json({ source: "nse-surveillance", ...out });
+    }
+
+    // Past results dates for one stock (board meetings whose purpose mentions results, ~2 years)
+    if (type === "pastresults") {
+      const sym = String(req.query.symbol || "").toUpperCase().replace(/[^A-Z0-9&-]/g, "");
+      if (!sym) return fail(400, "symbol required");
+      const dmy = (ms) => { const d = new Date(ms + 19800000); return `${String(d.getUTCDate()).padStart(2, "0")}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${d.getUTCFullYear()}`; };
+      const url = `https://www.nseindia.com/api/event-calendar?index=equities&symbol=${encodeURIComponent(sym)}&from_date=${dmy(Date.now() - 730 * 86400000)}&to_date=${dmy(Date.now())}`;
+      const r = await get(url, { json: true, timeout: 7000 });
+      const rows = r.status === 200 ? (Array.isArray(r.body) ? r.body : r.body?.data || []) : null;
+      if (!rows) return fail(502, `NSE event calendar unavailable (${r.status || r.error})`);
+      const dates = [...new Set(rows.filter(e => e?.symbol === sym && /result/i.test(e.purpose || "")).map(e => parseNseDate(e.date)).filter(Boolean))].sort();
+      res.setHeader("Cache-Control", "public, max-age=21600, s-maxage=43200");
+      return res.json({ source: "nse-event-calendar", symbol: sym, dates });
+    }
+
+    return fail(400, "type must be indices, bhav, live, events, flows, deals, surv or pastresults");
   } catch (e) {
     return fail(500, e.message || String(e));
   }

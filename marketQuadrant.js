@@ -18,7 +18,7 @@ export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 let API_BASE = "";
 export function setApiBase(url) { API_BASE = String(url || "").replace(/\/+$/, ""); }
 
-const LOCAL_KEY       = "td_mq_v18";  // v16: accuracy fixes (universe-scaled green light, MBI infinities, listings)
+const LOCAL_KEY       = "td_mq_v19";  // v16: accuracy fixes (universe-scaled green light, MBI infinities, listings)
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
@@ -160,8 +160,8 @@ async function fetchSectorMap() {
 }
 
 // Returns { closes: { "RELIANCE.NS": { "2025-01-02": close } }, vols: { "RELIANCE.NS": { "2026-07-01": volume } } }
-async function fetchSparkBatch(nsTickers) {
-  const url = `${API_BASE}/api/spark?symbols=${encodeURIComponent(nsTickers.join(","))}&range=${RANGE}&interval=1d&vol=${VOL_DAYS}`;
+async function fetchSparkBatch(nsTickers, { range = RANGE, vol = VOL_DAYS } = {}) {
+  const url = `${API_BASE}/api/spark?symbols=${encodeURIComponent(nsTickers.join(","))}&range=${range}&interval=1d&vol=${vol}`;
   const r = await fetch(url);
   if (!r.ok) throw new Error(`Spark API HTTP ${r.status}`);
   const json = await r.json();
@@ -323,7 +323,7 @@ export function scanBacktest(axis, stocks, volumes, last, horizon = 10, lookback
       const r = fwd.get(st); if (r == null) return;
       add(acc[id], r);
       if (t >= recentFrom) add(accR[id], r);
-      if (qAt(st, t, id === "tight" || id === "coil")) add(accQ[id], r);
+      if (qAt(st, t, id === "tight" || id === "coil" || id === "pb21")) add(accQ[id], r);
     };
     for (const st of stocks) {
       if (!fwd.has(st)) continue;
@@ -928,6 +928,10 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     const sym = ticker.replace(/\.NS$/, "");
     if (rsOf[sym] == null) { const v = rsScore(closes, last); if (v != null) rsOf[sym] = rsRating(v, rsBreaks); }
   }
+  // Rank inside its own sector (1 = strongest), for sectors with 3+ ranked stocks
+  const srankOf = {};
+  { const bySec = {}; for (const st of stocks) { const r = rsOf[st.sym]; if (r != null) (bySec[sectorMap[st.sym] || "Other"] ||= []).push([st.sym, r]); }
+    for (const [sec, xs] of Object.entries(bySec)) { if (sec === "Other" || xs.length < 3) continue; xs.sort((a, b) => b[1] - a[1]); xs.forEach(([sym], k) => { srankOf[sym] = [k + 1, xs.length]; }); } }
   const envOk = overall !== "CASH" && environment.name !== "NO MONEY";
   const statusOfSector = Object.fromEntries(sectors.map(x => [x.name, x.status]));
   const gradeOf = {};
@@ -957,7 +961,9 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   const setups = { htf: [], pb21: [], first52: [] };
   for (const st of stocks) {
     const hits = setupHits(st, last, (rsOf[st.sym] ?? 0) >= 80);
-    for (const id of hits) setups[id].push({ ...base(st), e21: st.e21[last] != null ? r1((st.closes[last] / st.e21[last] - 1) * 100) : null });
+    const w10 = st.closes.slice(last - 9, last + 1).filter(v => v != null);
+    const range10 = w10.length >= 8 ? r1((Math.max(...w10) / Math.min(...w10) - 1) * 100) : null;
+    for (const id of hits) setups[id].push({ ...base(st), range10, e21: st.e21[last] != null ? r1((st.closes[last] / st.e21[last] - 1) * 100) : null });
   }
   for (const [id, rows] of Object.entries(setups)) { rows.sort((a, b) => (rsOf[b.sym] ?? 0) - (rsOf[a.sym] ?? 0)); scans[id] = rows.slice(0, 15); scans[id + "_total"] = rows.length; }
   scans.coil = coil.slice(0, 15); scans.coil_total = coil.length;
@@ -976,7 +982,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     return { up, dn, q25u, q25d };
   };
   const mmRows = [];
-  const mmStart = Math.max(64, last - 260);
+  const mmStart = Math.max(64, opts.long ? 64 : last - 260);
   const daily = []; for (let i = mmStart; i <= last; i++) daily.push({ i, ...mmDay(i) });
   const ratio = (k, n) => { const w = daily.slice(Math.max(0, k - n + 1), k + 1); const u = w.reduce((a, x) => a + x.up, 0), dd = w.reduce((a, x) => a + x.dn, 0); return dd ? r1(u / dd) : (u ? 99 : null); };
   daily.forEach((x, k) => mmRows.push({ d: axis[x.i], up: x.up, dn: x.dn, r5: ratio(k, 5), r10: ratio(k, 10), q25u: x.q25u, q25d: x.q25d }));
@@ -1090,7 +1096,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   const box = (v, [g, r]) => (v == null ? 0 : v > g ? 1 : v < r ? -1 : 0);
   const chBox = (x) => (x == null ? 0 : x >= MBI_T.chg ? 1 : x <= -MBI_T.chg ? -1 : 0);
   const mbiRows = [];
-  const mbiStart = Math.max(2, last - 300);
+  const mbiStart = Math.max(2, opts.long ? 252 : last - 300);
   let prev = mbiDay(mbiStart - 1);
   for (let i = mbiStart; i <= last; i++) {
     const m = mbiDay(i);
@@ -1159,15 +1165,67 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   for (const t of themes) enrich(t.top);
 
   // ── scan backtests: what happened 10 sessions after each past signal ──
-  const scanStats = scanBacktest(axis, stocks, volumes, last, 10, 250, { microcap: !!opts.microcap });
+  const scanStats = scanBacktest(axis, stocks, volumes, last, 10, opts.long ? last : 250, { microcap: !!opts.microcap });
   scanStats.fundflow = ffBt;
   if (scanStats.coil) scanStats.coil.approx = "Record tests the price pattern only — without the RS 80+ and volume dry-up filters of today's list.";
   for (const id of ["pb21", "first52"]) if (scanStats[id]) scanStats[id].approx = "Record uses the top 20% by 3-month return as a stand-in for RS 80+.";
   if (scanStats.ep) scanStats.ep.approx = "Record enters on the move day itself; today's list also keeps moves up to 5 sessions old.";
   for (const v of Object.values(scanStats)) if (v) v.survivor = true; // tested on today's index members
 
+  // ── Forward test: each evening's top picks are published with the result; later runs score them.
+  //    Picks = grade A/B names that pass the quality gate, from lists whose own record beats the average
+  //    stock, no NSE warning flags, strongest first (max 10). Fill = first close at/above the entry within
+  //    3 sessions; exit = first close at/below the stop, else the close 10 sessions after the fill.
+  const PICK_SCANS = ["htf", "pb21", "leaders", "tight", "coil", "pivots", "first52"];
+  const seenPick = new Set(), pickRows = [];
+  for (const id of PICK_SCANS) {
+    if (!(scanStats[id]?.excess > 0)) continue;
+    const rows = id === "leaders" ? leaders : scans[id] || [];
+    for (const r of rows) {
+      if (seenPick.has(r.sym) || !r.plan || !["A", "B"].includes(r.grade)) continue;
+      if (id === "pivots" && !((r.rs ?? 0) >= 80 && r.stage2)) continue;
+      const q = qOf[r.sym]; if (!q || (["tight", "coil", "pb21"].includes(id) ? q.liq : q.pass) === false) continue;
+      seenPick.add(r.sym); pickRows.push({ sym: r.sym, entry: r.plan.entry, stop: r.plan.stop, from: id, rs: r.rs ?? null });
+    }
+  }
+  pickRows.sort((a, b) => (b.rs ?? 0) - (a.rs ?? 0));
+  const picks = { d: axis[last], rows: pickRows.slice(0, 10) };
+  let forward = null;
+  if (Array.isArray(opts.priorPicks) && opts.priorPicks.length) {
+    const idx = Object.fromEntries(axis.map((d, i) => [d, i]));
+    const bySym = Object.fromEntries(stocks.map(st => [st.sym, st]));
+    const out = [];
+    for (const p of opts.priorPicks) {
+      const t0 = idx[p?.d]; if (t0 == null || t0 >= last) continue;
+      for (const r of p.rows || []) {
+        const st = bySym[r.sym]; if (!st) continue;
+        const c = st.closes; let tf = null;
+        for (let k = t0 + 1; k <= Math.min(last, t0 + 3); k++) if (c[k] != null && c[k] >= r.entry) { tf = k; break; }
+        if (tf == null) { out.push({ d: p.d, sym: r.sym, from: r.from, status: t0 + 3 <= last ? "no fill" : "waiting" }); continue; }
+        const fill = c[tf], risk = fill - r.stop;
+        let exitK = null, stopped = false;
+        for (let k = tf + 1; k <= Math.min(last, tf + 10); k++) if (c[k] != null && c[k] <= r.stop) { exitK = k; stopped = true; break; }
+        if (exitK == null && tf + 10 <= last) exitK = tf + 10;
+        if (exitK == null) { out.push({ d: p.d, sym: r.sym, from: r.from, status: "open", ret: r1((c[last] / fill - 1) * 100) }); continue; }
+        let us = 0, un = 0; for (const o of stocks) { const a = o.closes[tf], b = o.closes[exitK]; if (a != null && b != null) { us += b / a - 1; un++; } }
+        const ret = c[exitK] / fill - 1;
+        out.push({ d: p.d, sym: r.sym, from: r.from, status: stopped ? "stopped" : "closed", ret: r1(ret * 100),
+          R: risk > 0 ? Math.round(((c[exitK] - fill) / risk) * 100) / 100 : null, vs: un ? r1((ret - us / un) * 100) : null });
+      }
+    }
+    const done = out.filter(x => x.status === "closed" || x.status === "stopped");
+    const avg = (xs) => (xs.length ? r1(xs.reduce((a, b) => a + b, 0) / xs.length) : null);
+    forward = { since: opts.priorPicks.map(p => p.d).sort()[0], picks: out.length, done: done.length,
+      open: out.filter(x => x.status === "open" || x.status === "waiting").length, nofill: out.filter(x => x.status === "no fill").length,
+      hit: done.length ? Math.round((done.filter(x => x.ret > 0).length / done.length) * 100) : null,
+      avg: avg(done.map(x => x.ret)), vs: avg(done.map(x => x.vs).filter(v => v != null)),
+      avgR: done.length ? Math.round((done.reduce((a, x) => a + (x.R ?? 0), 0) / done.length) * 100) / 100 : null,
+      rows: out.sort((a, b) => (b.d > a.d ? 1 : -1)).slice(0, 40) };
+  }
+
   const asOf = axis[last];
   return {
+    picks, forward, srank_of: srankOf,
     bias, trend, swing, momentum,
     bias_turning: biasTurning, bias_days: biasDays, bias_needed: BIAS_DAYS,
     swing_state: swingState, momentum_sign: momentumSign, momentum_dir: momentumDir,
@@ -1251,7 +1309,8 @@ export function nseFlags(bhav, syms) {
   for (const sym of syms) {
     const b = bhav.closes[sym]; if (!b) continue;
     const t4t = b.series === "BE" || b.series === "BZ";
-    const uc = b.high != null && b.close != null && b.prev > 0 && b.close >= b.high * 0.9995 && b.close / b.prev - 1 >= 0.049;
+    const chg = b.prev > 0 && b.close != null ? b.close / b.prev - 1 : 0;
+    const uc = b.high != null && b.close != null && b.close >= b.high * 0.9995 && (chg >= 0.045 || (t4t && chg >= 0.019));
     if (t4t || uc) out[sym] = { t4t: t4t || undefined, uc: uc || undefined, chg: uc ? Math.round((b.close / b.prev - 1) * 1000) / 10 : undefined };
   }
   return out;
@@ -1314,7 +1373,8 @@ async function computeFresh(onProgress) {
   if (droppedDay) onProgress(`${droppedDay} incomplete on Yahoo and not yet on NSE — using the last complete session`, 82);
   const volumes = alignVolumes(axis, allVol);
   if (verification) verification.volumes_filled = fillVolumesFromBhav(axis, volumes, bhavData);
-  const result = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, volumes, await themesPromise, (await eventsPromise)?.results || null);
+  const result = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, volumes, await themesPromise, (await eventsPromise)?.results || null,
+    { priorPicks: _priorPicks });
   if (droppedDay) result.pending_day = droppedDay;
   // Delivery % for the result day (from NSE's bhavcopy): share of traded quantity actually delivered
   if (bhavData?.date === result.as_of) {
@@ -1352,6 +1412,8 @@ export function upcomingResults(cal, sym, days = 7) {
 const MICRO_KEY = "td_mq_micro_v9"; // v9: + trade-for-trade / upper-circuit flags
 let _microInflight = null;
 export async function loadMicrocapScans({ force = false } = {}) {
+  const pub = getLastMarketQuadrant();
+  if (!force && pub?.micro?.as_of && pub.micro.as_of === pub.as_of && pub.micro.scans) return pub.micro;
   if (!force) {
     try {
       const e = JSON.parse(localStorage.getItem(MICRO_KEY) || "null");
@@ -1383,6 +1445,35 @@ export async function loadMicrocapScans({ force = false } = {}) {
   })().finally(() => { _microInflight = null; });
   return _microInflight;
 }
+
+// ─── 5-year track records (run by the nightly job, published with the result) ──
+export async function computeLongBacktest({ onProgress = () => {} } = {}) {
+  const symbols = await fetchNifty500Symbols();
+  const tickers = symbols.map(s => `${s}.NS`);
+  const allData = {}, allVol = {};
+  const chunks = []; for (let i = 0; i < tickers.length; i += 20) chunks.push(tickers.slice(i, i + 20));
+  let done = 0;
+  const run = async (list) => mapLimited(list, 2, async (b) => {
+    const r = await fetchSparkBatch(b, { range: "5y", vol: 1300 }); Object.assign(allData, r.closes); Object.assign(allVol, r.vols);
+    onProgress(`5-year history ${++done}/${chunks.length}`);
+  });
+  await run(chunks);
+  const missing = tickers.filter(t => !allData[t]);
+  if (missing.length) { const m = []; for (let i = 0; i < missing.length; i += 10) m.push(missing.slice(i, i + 10)); await run(m); }
+  const got = Object.keys(allData).length;
+  if (got < tickers.length * 0.85) throw new Error(`5-year history: only ${got}/${tickers.length} stocks`);
+  const { axis, aligned } = alignByDate(allData);
+  trimIncompleteLastDay(axis, aligned);
+  const vols = alignVolumes(axis, allVol);
+  const r = computeFromAligned(axis, aligned, await fetchSectorMap(), Date.now(), null, vols, null, null, { long: true });
+  return { from: axis[0], to: axis[axis.length - 1], sessions: axis.length, stocks: got,
+    scan_stats: r.scan_stats, green_light_bt: r.green_light?.bt || null, green_light_from: r.green_light?.from || null,
+    mbi_bt: r.mbi?.bt || null, dip: r.dip ? { bt: r.dip.bt, other: r.dip.other } : null, mm_bt: r.market_monitor?.bt || null };
+}
+
+// Earlier published picks for the forward test (set by the nightly job before computing)
+let _priorPicks = null;
+export function setPriorPicks(list) { _priorPicks = Array.isArray(list) ? list : null; }
 
 // ─── public loader (deduplicated) ────────────────────────────────────────────
 let inflight = null;

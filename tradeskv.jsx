@@ -728,9 +728,9 @@ function getDaysHeldStatus(setupType, days) {
     "Range Break": { greenMax: 3, amberMax: 5, redMin: 6 },
   };
   const rule = rules[setupType] || rules["Breakout"];
-  if (days >= rule.redMin) return { color: "var(--red)", label: `Day ${days} · Decision needed` };
-  if (days > rule.greenMax) return { color: "var(--amber)", label: `Day ${days} · Watch closely` };
-  return { color: "var(--green)", label: `Day ${days}` };
+  if (days >= rule.redMin) return { color: C.neg, label: `Day ${days} · Decision needed` };
+  if (days > rule.greenMax) return { color: C.warn, label: `Day ${days} · Watch closely` };
+  return { color: C.pos, label: `Day ${days}` };
 }
 
 function DaysHeldBadge({ trade }) {
@@ -1132,6 +1132,8 @@ const GlobalStyle = () => (
     .topbar-idx { min-width: 0; overflow: hidden; }
     @media (max-width: 560px) { .topbar-idx { display: none !important; } }
     .chip { min-height: 36px; }
+    .chip.chip-sm { min-height: 28px; padding: 3px 10px; font-size: 11px; }
+    .chip[aria-pressed="true"] { border-color: var(--violet); color: var(--violet); background: rgba(59,130,246,0.10); }
     .chip.active {
       border-color: var(--violet);
       color: var(--violet);
@@ -1464,10 +1466,11 @@ function OpenTradeCard({ trade, livePrice }) {
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <div style={{ fontFamily: "var(--display)", fontSize: 20, letterSpacing: "0.04em" }}>{trade.symbol}</div>
             {trade.status === "partial" && (
-              <span className="tag" style={{ background: "rgba(220,20,60,0.08)", color: "var(--violet)", border: "1px solid rgba(220,20,60,0.2)", fontSize: 10 }}>PARTIAL</span>
+              <span className="tag" style={{ background: "rgba(59,130,246,0.10)", color: "var(--violet)", border: "1px solid rgba(59,130,246,0.3)", fontSize: 10 }}>PARTIAL</span>
             )}
           </div>
           <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap", alignItems: "center" }}>
+            {trade.paper && <span className="tag" style={{ background: "rgba(59,130,246,0.10)", color: "var(--violet)", border: "1px solid rgba(59,130,246,0.3)" }}>PAPER</span>}
             <span className="tag" style={{ background: "rgba(212,204,182,0.06)", color: "var(--text)", border: "1px solid rgba(212,204,182,0.14)" }}>
               {trade.setupType}
             </span>
@@ -1532,7 +1535,7 @@ function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillS
   const [target, setTarget] = useState("");
   // Start from today's suggested risk (the same number TODAY and IDEAS use)
   const todayRisk = suggestedRisk(getLastMarketQuadrant())?.pct;
-  const [riskPct, setRiskPct] = useState(() => ([0.5, 1, 1.5, 2].includes(todayRisk) ? todayRisk : 1));
+  const [riskPct, setRiskPct] = useState(() => (todayRisk === 0 ? 0 : [0.5, 1, 1.5, 2].includes(todayRisk) ? todayRisk : 1));
   const [customRisk, setCustomRisk] = useState(() => (todayRisk > 0 && ![0.5, 1, 1.5, 2].includes(todayRisk) ? String(todayRisk) : ""));
   const [qty, setQty] = useState("");
   const [qtyMode, setQtyMode] = useState("auto");
@@ -1544,7 +1547,7 @@ function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillS
   const riskBudget = (portfolio * r) / 100;
   const stopDist = valid ? e - s : null;
   const stopPct = valid ? ((stopDist / e) * 100).toFixed(2) : null;
-  const liqCr = getLastMarketQuadrant()?.q_of?.[normalizeSymbol(symbol || "")]?.to ?? null;
+  const liqCr = getLastMarketQuadrant()?.q_of?.[normalizeSymbol(symbol || "")]?.to ?? readMicro()?.q_of?.[normalizeSymbol(symbol || "")]?.to ?? null;
   const capped = valid ? capQty(Math.floor(riskBudget / (stopDist * GAP_BUFFER)), e, portfolio, liqCr) : { qty: 0, cap: null };
   const autoQty = capped.qty;
   const finalQty = qtyMode === "manual" && qty ? parseInt(qty) : autoQty;
@@ -1767,6 +1770,7 @@ function JournalPage({ trades, setTrades, prefill, setPrefill, onOpenStock }) {
     targets: ["", "", ""],
     notes: "",
     conviction: 3,
+    paper: false,
   };
   const [form, setForm] = useState(emptyForm);
   const [symbolInfo, setSymbolInfo] = useState(null);
@@ -1856,6 +1860,7 @@ function JournalPage({ trades, setTrades, prefill, setPrefill, onOpenStock }) {
 
     const trade = {
       id: Date.now(),
+      paper: !!form.paper || undefined, // practice trade: kept out of TODAY, heat and stats
       symbol: form.symbol,
       setupType: form.setupType,
       conviction: form.conviction,
@@ -2006,6 +2011,11 @@ function JournalPage({ trades, setTrades, prefill, setPrefill, onOpenStock }) {
         </div>
       </div>
 
+      {/* Paper trade */}
+      <div className="card" style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 10 }}>
+        <button className="chip" aria-pressed={!!form.paper} onClick={() => setForm(f => ({ ...f, paper: !f.paper }))}>{form.paper ? "✓ Paper trade" : "Paper trade"}</button>
+        <span style={{ fontSize: 11, color: "var(--text3)", lineHeight: 1.4 }}>Practice without money: tracked in the journal and PLAYBOOK (Paper view), kept out of TODAY, open risk and your real stats.</span>
+      </div>
       {/* Conviction */}
       <div className="card" style={{ marginBottom: 12 }}>
         <div className="label" style={{ marginBottom: 8 }}>Conviction <span style={{ fontFamily: "var(--mono)", color: "var(--amber)" }}>{form.conviction}/5</span></div>
@@ -2213,10 +2223,10 @@ function JournalTradeCard({ trade, onUpdateTrade, onDelete, onOpenStock }) {
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
               <div style={{ fontFamily: "var(--display)", fontSize: 22, letterSpacing: "0.04em" }}>{trade.symbol}</div>
-              {onOpenStock && <button className="chip" style={{ fontSize: 10, padding: "2px 8px" }} onClick={() => onOpenStock(normalizeSymbol(trade.symbol))}>Chart ›</button>}
+              {onOpenStock && <button className="chip chip-sm" onClick={() => onOpenStock(normalizeSymbol(trade.symbol))}>Chart ›</button>}
             </div>
             {trade.status === "partial" && (
-              <span className="tag" style={{ background: "rgba(220,20,60,0.08)", color: "var(--violet)", border: "1px solid rgba(220,20,60,0.2)" }}>PARTIAL</span>
+              <span className="tag" style={{ background: "rgba(59,130,246,0.10)", color: "var(--violet)", border: "1px solid rgba(59,130,246,0.3)" }}>PARTIAL</span>
             )}
           </div>
           <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap", alignItems: "center" }}>
@@ -2769,7 +2779,7 @@ const mqHeadStyle = { fontSize: 10, color: "var(--text3)", letterSpacing: "0.14e
 function MqEnvironment({ data }) {
   const env = data?.environment;
   if (!env) return null;
-  const c = MQ_ENV_COLOR[env.name] || "var(--text2)";
+  const c = MQ_ENV_COLOR[env.name] || C.muted;
   return (
     <div style={{ ...mqCardStyle, borderColor: `${c}55`, background: `${c}0D` }}>
       <div style={{ ...mqHeadStyle, marginBottom: 6 }}>ENVIRONMENT</div>
@@ -3074,7 +3084,7 @@ function MqSectorGrid({ sectors, sectorStocks, selected, onSelect, onPickStock }
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
         {sectors.map(s => {
-          const c = MQ_DIM_COLOR[s.status] || "var(--text3)";
+          const c = MQ_DIM_COLOR[s.status] || C.muted;
           const active = s.name === selected;
           return (
             <button key={s.name} onClick={() => onSelect(active ? null : s.name)} aria-pressed={active}
@@ -3171,7 +3181,7 @@ function MarketQuadrantPage({ onPickStock }) {
 
   const h = data.history;
   const prev = h.length >= 2 ? h[h.length - 2] : null;
-  const sigColor = MQ_SIGNAL_COLOR[data.overall] || "var(--text)";
+  const sigColor = MQ_SIGNAL_COLOR[data.overall] || C.muted;
   const sigBg    = MQ_SIGNAL_BG[data.overall]    || "var(--bg2)";
   const changed  = prev?.sig && prev.sig !== data.overall;
 
@@ -3262,7 +3272,7 @@ function MarketQuadrantPage({ onPickStock }) {
 
       <QuadSection id="sizing" title="Sizing" d={data} />
       <MqEnvironment data={data} />
-      <MqGreenLight gl={data.green_light} />
+      <MqGreenLight gl={data.green_light} long={data.long_bt} />
       <MqFollowThrough data={data} />
       <QuadSection id="breadth" title="Breadth" d={data} />
       <MqBreadthChart history={h} />
@@ -3305,7 +3315,7 @@ function MarketQuadrantPage({ onPickStock }) {
         </div>
       </div>
 
-      <MqMbi mbi={data.mbi} dip={data.dip} />
+      <MqMbi mbi={data.mbi} dip={data.dip} long={data.long_bt} />
       <MqMarketMonitor mm={data.market_monitor} />
       <QuadSection id="sectors" title="Sectors & themes" d={data} />
       <MqSectorGrid sectors={data.sectors} sectorStocks={data.sector_stocks} selected={sector} onSelect={setSector} onPickStock={onPickStock} />
@@ -3345,6 +3355,7 @@ function MarketQuadrantPage({ onPickStock }) {
       )}
 
       <QuadSection id="record" title="Track record" d={data} />
+      <MqForward fw={data.forward} picks={data.picks} onPickStock={onPickStock} />
       <MqSignalBacktest bt={data.signal_backtest} />
       <MqWeeklyReport data={data} />
 
@@ -3458,7 +3469,7 @@ function briefRule(d) {
     return `No new entries — ${why}. Protect capital; let stops do their job.`;
   }
   let rule = `Risk ${sr.pct}% per trade. `;
-  if (env === "HARD MONEY") rule += d.environment?.lockout ? "Prefer index ETFs or lower-timeframe entries; don't chase extended stocks." : "Only A+ setups in HOT/WARM sectors; take profits quicker.";
+  if (env === "HARD MONEY") rule += d.environment?.lockout ? "Prefer index ETFs or lower-timeframe entries; don't chase extended stocks." : "Only grade-A setups in HOT/WARM sectors; take profits quicker.";
   else rule += sr.pct >= 1 ? "A/B setups in HOT/WARM sectors; let winners run." : "Best setups only; wait for follow-through.";
   if (d.lows_ok === false) rule += ` ${d.new_lows} stocks at 52-week lows.`;
   return rule;
@@ -3576,7 +3587,7 @@ function MarketBrief({ onOpenQuad, onOpenScan }) {
   }
   const d = data;
   const sigColor = MQ_SIGNAL_COLOR[d.overall];
-  const envColor = MQ_ENV_COLOR[d.environment?.name] || "var(--text2)";
+  const envColor = MQ_ENV_COLOR[d.environment?.name] || C.muted;
   const verified = d.verification && d.verification.date === d.as_of;
   const changes = briefChanges(d);
   const chips = [
@@ -3653,7 +3664,7 @@ const SCAN_DEFS = [
   { id: "pivots", label: "Pivots today", hint: "Up ≥4.5% today on volume above yesterday's and the 50-day average — fresh institutional demand.",
     cols: [["CHG", r => r.chg != null ? `+${r.chg}%` : "—"], ["VOL×", r => r.volx != null ? `${r.volx}×` : "—"], ["DELIV", r => r.deliv != null ? `${Math.round(r.deliv)}%` : "—"]] },
   { id: "htf", label: "High-tight flag", hint: "Up 60%+ from its low about two months ago, then a tight 10-day flag (≤15% range) near the peak. Rare, fast and volatile — size small.",
-    cols: [["RANGE", r => r.off_high != null ? `${r.off_high}%` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"], ["vs 21E", r => r.e21 != null ? `${r.e21 > 0 ? "+" : ""}${r.e21}%` : "—"]] },
+    cols: [["RANGE", r => r.range10 != null ? `${r.range10}%` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"], ["vs 21E", r => r.e21 != null ? `${r.e21 > 0 ? "+" : ""}${r.e21}%` : "—"]] },
   { id: "pb21", label: "21-EMA pullback", hint: "A leader (RS 80+, 50-day above the 200-day) that ran 8%+ above its 21-day EMA in the last 3 weeks and has pulled back to within 2% of it — the classic low-risk add.",
     cols: [["vs 21E", r => r.e21 != null ? `${r.e21 > 0 ? "+" : ""}${r.e21}%` : "—"], ["HIGH", r => r.off_high != null ? `${r.off_high}%` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"]] },
   { id: "first52", label: "First 52w high", hint: "First close at a 52-week high in 20+ sessions, by an RS 80+ stage-2 stock — a fresh breakout to new ground.",
@@ -3786,7 +3797,7 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
       ) : (
       <div className="card">
         <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 10, lineHeight: 1.45 }}>{def.hint}</div>
-        <ScanEdge st={data.scan_stats?.[def.id]} />
+        <ScanEdge st={data.scan_stats?.[def.id]} long={data.long_bt?.scan_stats?.[def.id]} />
         {quality && hiddenQ > 0 && <div style={{ fontSize: 10, color: "var(--text3)", margin: "-4px 0 8px" }}>{hiddenQ} hidden by the quality gate ({quiet ? "turnover under the minimum" : "thin turnover or slow mover"}).</div>}
         {rows.length === 0 ? (
           <div style={{ fontSize: 12, color: "var(--text3)", padding: "16px 0", textAlign: "center" }}>Nothing qualifies today.</div>
@@ -3807,7 +3818,7 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
                       {r.not_ipo && <span style={{ color: C.warn, marginRight: 4 }} title="Demerger / relisting — 'from listing' starts at its first traded day">demerger ·</span>}
                       {r.sector}{st && st !== "—" && <span style={{ color: MQ_DIM_COLOR[st], marginLeft: 4 }}>· {st}</span>}
                       {r.micro && <span style={{ marginLeft: 4, color: "var(--text3)", border: "1px solid var(--border)", borderRadius: 6, padding: "0 4px", fontSize: 10 }}>micro</span>}
-                      <NseFlagBadge f={data.flags_of?.[r.sym] ?? microData?.flags_of?.[r.sym]} />
+                      <NseFlagBadge f={data.flags_of?.[r.sym] ?? microData?.flags_of?.[r.sym]} sym={r.sym} />
                       {qOfRow(r)?.to != null && <span style={{ marginLeft: 4, fontFamily: "var(--mono)" }} title="20-day average turnover · 60-day average daily move">· ₹{qOfRow(r).to >= 100 ? Math.round(qOfRow(r).to) : qOfRow(r).to}cr · {qOfRow(r).move}%/d</span>}
                     </div>
                   </div>
@@ -3846,12 +3857,13 @@ function RsBadge({ rs, grade }) {
 }
 
 /** One line telling how a scan did historically (10 sessions after each signal). */
-function ScanEdge({ st }) {
+function ScanEdge({ st, long }) {
   if (!st) return null;
-  const sub = (x) => (x ? <>{x.hit}% higher · <span style={{ color: x.excess >= 0.5 ? C.pos : x.excess <= -0.5 ? C.neg : "var(--text2)", fontWeight: 700 }}>{x.excess > 0 ? "+" : ""}{x.excess} vs average</span> ({x.signals.toLocaleString("en-IN")})</> : "—");
-  const extra = (st.recent || st.gated) && (
+  const sub = (x) => (x ? <>{x.hit}% higher · <span style={{ color: x.excess >= 0.5 ? C.pos : x.excess <= -0.5 ? C.neg : "var(--text2)", fontWeight: 700 }}>{x.excess > 0 ? "+" : ""}{x.excess}% vs average</span> ({x.signals.toLocaleString("en-IN")})</> : "—");
+  const extra = (st.recent || st.gated || long) && (
     <div style={{ fontSize: 10.5, color: "var(--text3)", margin: "-6px 0 10px", lineHeight: 1.5 }}>
       {st.recent && <div>Last 3 months: {sub(st.recent)}{st.recent.excess >= 0.5 ? " — working now" : st.recent.excess <= -0.5 ? " — not working lately" : ""}</div>}
+      {long && <div>5 years ({long.signals.toLocaleString("en-IN")} signals): {sub(long)}{Math.sign(long.excess) !== Math.sign(st.excess) && Math.abs(long.excess - st.excess) >= 0.5 ? " — the past year was unusual" : ""}</div>}
       {st.gated && <div>Quality gate passes only: {sub(st.gated)}{st.gated.excess - st.excess >= 0.3 ? " — the gate helped" : st.gated.excess - st.excess <= -0.3 ? " — the gate hurt" : ""}</div>}
     </div>
   );
@@ -3867,7 +3879,7 @@ function ScanEdgeMain({ st }) {
   return (
     <div style={{ fontSize: 10.5, color: "var(--text3)", margin: "-4px 0 10px", lineHeight: 1.45 }}>
       Past year ({st.signals.toLocaleString("en-IN")} signals): <b style={{ color: "var(--text2)" }}>{st.hit}%</b> higher {st.horizon} sessions later ·
-      avg {st.avg > 0 ? "+" : ""}{st.avg}% · <span style={{ color: tone, fontWeight: 700 }}>{st.excess > 0 ? "+" : ""}{st.excess} vs average stock — {verdict}</span>
+      avg {st.avg > 0 ? "+" : ""}{st.avg}% · <span style={{ color: tone, fontWeight: 700 }}>{st.excess > 0 ? "+" : ""}{st.excess}% vs average stock — {verdict}</span>
     </div>
   );
 }
@@ -4043,6 +4055,42 @@ function StockChart({ d, from, series = STOCK_SERIES, marks = [], candles = fals
   );
 }
 
+/** How the stock reacted to its last results (NSE board-meeting dates): next-session move and 5 sessions on. */
+function ResultsReaction({ d }) {
+  const [dates, setDates] = useState(null);
+  useEffect(() => {
+    let alive = true; setDates(null);
+    fetch(`/api/nse?type=pastresults&symbol=${encodeURIComponent(d.sym)}`).then(r => (r.ok ? r.json() : null)).catch(() => null).then(j => alive && setDates(j?.dates || []));
+    return () => { alive = false; };
+  }, [d.sym]);
+  if (!dates?.length) return null;
+  const rows = dates.map(day => {
+    let k = d.dates.findIndex(x => x > day); // results usually land after the close → react next session
+    if (k < 1 || d.closes[k] == null || d.closes[k - 1] == null) return null;
+    const base = d.closes[k - 1], next = d.closes[k] / base - 1, five = d.closes[k + 5] != null ? d.closes[k + 5] / base - 1 : null;
+    return { day, next: next * 100, five: five != null ? five * 100 : null };
+  }).filter(Boolean).slice(-6).reverse();
+  if (!rows.length) return null;
+  const avgAbs = rows.reduce((a, r) => a + Math.abs(r.next), 0) / rows.length;
+  const pc = (v) => (v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(1)}%`);
+  return (
+    <div style={{ marginTop: 10, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+      <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.08em", marginBottom: 4 }}>RESULTS REACTIONS · typical move ±{avgAbs.toFixed(1)}%</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", columnGap: 12, fontSize: 11, fontFamily: "var(--mono)" }}>
+        <span style={{ fontSize: 9.5, color: "var(--text3)" }}>RESULTS</span><span style={{ fontSize: 9.5, color: "var(--text3)", textAlign: "right" }}>NEXT DAY</span><span style={{ fontSize: 9.5, color: "var(--text3)", textAlign: "right" }}>+5 DAYS</span>
+        {rows.map(r => (
+          <Fragment key={r.day}>
+            <span style={{ color: "var(--text2)" }}>{mqFmtDate(r.day)}</span>
+            <span style={{ textAlign: "right", color: r.next >= 0 ? C.pos : C.neg }}>{pc(r.next)}</span>
+            <span style={{ textAlign: "right", color: r.five == null ? "var(--text3)" : r.five >= 0 ? C.pos : C.neg }}>{pc(r.five)}</span>
+          </Fragment>
+        ))}
+      </div>
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 4 }}>If the typical move is bigger than your stop distance, holding through results risks a gap past it.</div>
+    </div>
+  );
+}
+
 /** Stocksgeeks-style table: true ATR / ADR, turnover and volume vs average. */
 function StockStats({ d, q }) {
   const n = d.closes.length - 1, rs = rangeStats(d);
@@ -4060,7 +4108,7 @@ function StockStats({ d, q }) {
   ];
   return (
     <div style={{ marginTop: 10, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 6 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "8px 6px" }}>
         {cells.map(([k, v, c]) => (
           <div key={k} style={{ minWidth: 0 }}>
             <div style={{ fontSize: 9.5, color: "var(--text3)", letterSpacing: "0.08em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{k}</div>
@@ -4162,13 +4210,14 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [
           <span style={{ fontSize: 11, color: d.intraday ? C.warn : "var(--text3)" }}>{d.intraday ? `${mqFmtDate(d.dates[last])} · intraday (not a close)` : `${mqFmtDate(d.dates[last])} close${d.verified?.date === d.dates[last] ? " · ✓ NSE" : " · unverified"}`}</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 10, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg3)" }}>
-          <span style={{ fontSize: 15, fontWeight: 800, color: GRADE_COLOR[g.grade] }}>{g.grade}</span>
+          <span title="Setup grade (A best)" style={{ fontSize: 13, fontWeight: 800, color: GRADE_COLOR[g.grade] }}>Grade {g.grade}</span>
           {rsRank != null && <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: rsRank >= 80 ? C.pos : "var(--text2)" }}>RS {rsRank}</span>}
           {secInfo && <span style={{ fontSize: 12, color: MQ_DIM_COLOR[secInfo.status] }}>{secInfo.status}</span>}
-          <NseFlagBadge f={mq?.flags_of?.[symbol]} />
-          {plan && <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text2)" }}>₹{plan.entry} / stop ₹{plan.stop} ({plan.riskPct}%)</span>}
+          {mq?.srank_of?.[symbol] && <span title={`Strength rank inside ${sector}`} style={{ fontSize: 12, color: mq.srank_of[symbol][0] <= 3 ? C.pos : "var(--text2)" }}>#{mq.srank_of[symbol][0]} of {mq.srank_of[symbol][1]} in sector</span>}
+          <NseFlagBadge f={mq?.flags_of?.[symbol]} sym={symbol} />
           <span style={{ flex: 1 }} />
           {plan && <button className="btn-primary" style={{ padding: "8px 14px", fontSize: 12, borderRadius: 10 }} onClick={() => onPlan?.({ symbol, entry: plan.entry, stop: plan.stop })}>Plan trade ›</button>}
+          {plan && <div style={{ width: "100%", fontFamily: "var(--mono)", fontSize: 12, color: "var(--text2)" }}>Entry ₹{plan.entry} · stop ₹{plan.stop} (−{plan.riskPct}%)</div>}
         </div>
         <div style={{ marginTop: 10 }}><WatchButton symbol={symbol} watchlist={watchlist} setWatchlist={setWatchlist} /></div>
         <ResultsWarning symbol={symbol} style={{ marginTop: 8 }} />
@@ -4210,6 +4259,7 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [
           </div>
         )}
         <StockStats d={d} q={mq?.q_of?.[symbol]} />
+        <ResultsReaction d={d} />
         {myTrades.length > 0 && (
           <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 8, borderTop: "1px solid var(--border)", paddingTop: 6 }}>
             <div style={{ color: "var(--text3)", marginBottom: 3 }}>Your trades in {symbol} <span style={{ color: C.pos }}>▲ buy</span> <span style={{ color: C.neg }}>▼ sell</span></div>
@@ -4280,7 +4330,7 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [
         <div className="card" style={{ marginBottom: 12 }}>
           <div className="label" style={{ marginBottom: 8 }}>Suggested plan</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, fontFamily: "var(--mono)" }}>
-            {[["ENTRY", `₹${plan.entry}`, "var(--text)"], ["STOP", `₹${plan.stop}`, C.neg], ["RISK", `${plan.riskPct}%`, plan.riskPct > 6 ? C.warn : "var(--text)"]].map(([l, v, col]) => (
+            {[["ENTRY", `₹${plan.entry}`, "var(--text)"], ["STOP", `₹${plan.stop}`, C.neg], ["TO STOP", `−${plan.riskPct}%`, plan.riskPct > 6 ? C.warn : "var(--text)"]].map(([l, v, col]) => (
               <div key={l} style={{ background: "var(--bg3)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 8px" }}>
                 <div style={{ fontSize: 9, color: "var(--text3)" }}>{l}</div>
                 <div style={{ fontSize: 13, fontWeight: 700, color: col }}>{v}</div>
@@ -4575,7 +4625,7 @@ function SizingAdvice({ portfolio, trades, riskPct, onApply }) {
           Suggested: <b style={{ color: "var(--text)" }}>{s.pct}%</b> <span style={{ color: "var(--text3)" }}>({s.why})</span>
         </div>
         {s.pct > 0 && Math.abs(riskPct - s.pct) > 1e-9 && (
-          <button className="chip" style={{ fontSize: 10 }} onClick={() => onApply(s.pct)}>Use {s.pct}%</button>
+          <button className="chip chip-sm" onClick={() => onApply(s.pct)}>Use {s.pct}%</button>
         )}
       </div>
       <div style={{ fontSize: 11, color: over ? C.warn : "var(--text3)", marginTop: 4, fontFamily: "var(--mono)" }}>
@@ -4635,8 +4685,8 @@ function positionHealth(t, trend, mq, livePrice) {
   let trim = false;
   if (trend?.ext != null && trend.ext >= 3 && level < 2) { trim = true; reasons.push({ l: 0.5, why: `${trend.ext.toFixed(1)} ATR above its 10-day average — extended; consider selling ⅓ into strength` }); }
   const entry = t.avgEntry || t.entry, r0 = entry && t.stop ? entry - t.stop : null;
-  if (level < 2 && r0 > 0 && stop && stop < entry && trend?.close != null && trend.close - entry >= 1.5 * r0)
-    reasons.push({ l: 0.45, why: `Up ${((trend.close - entry) / r0).toFixed(1)}R — move the stop to breakeven (₹${entry}); the trade can't become a loss` });
+  if (level < 2 && r0 > 0 && stop && stop < entry && trend?.close != null && trend.close - entry >= 1.5 * r0 && trend.close - entry < 2 * r0)
+    reasons.push({ l: 0.45, why: `Up ${((trend.close - entry) / r0).toFixed(1)}R — move the stop to breakeven (₹${entry}); then only a gap can turn it into a loss` });
   if (level < 2 && trend?.low10 != null && stop && trend.close > entry && r0 > 0 && trend.close - entry >= 2 * r0) {
     const trail = +(trend.low10 * 0.995).toFixed(2);
     if (trail > stop) reasons.push({ l: 0.4, why: `Up ${((trend.close - entry) / r0).toFixed(1)}R — trail the stop to ₹${trail} (under the 10-day low)` });
@@ -5509,18 +5559,20 @@ function buildIdeas(d, micro, watchlist, blockBuys = null) {
   if (micro?.scans) take(micro.scans, true);
   for (const w of watchlist || []) add({ sym: w.sym }, "watch", false);
   // Delivery-backed moves: most of today's traded quantity was taken as delivery (NSE)
+  for (const x of map.values()) if (x.tags.has("pivot") && !((x.rs ?? 0) >= 80 && x.stage2 !== false)) x.tags.delete("pivot"); // pivots only paid in RS 80+ stage-2 names
   for (const x of map.values()) if ((x.tags.has("pivot") || x.tags.has("coil")) && (d.deliv_of?.[x.sym] ?? 0) >= 50) x.tags.add("deliv");
   for (const sym of blockBuys || []) if (map.has(sym)) map.get(sym).tags.add("block");
   const G = { A: 30, B: 15, C: 0 };
   // Each list's weight follows its own record vs the average stock: +6 base, ±4 per point of excess (−6…+12)
   const SCAN_OF = { pivot: "pivots", tight: "tight", ep: "ep", epr: "ep", coil: "coil", leader: "leaders", flow: "fundflow", htf: "htf", pb21: "pb21", first52: "first52" };
-  const weight = (tag) => { const ex = d.scan_stats?.[SCAN_OF[tag]]?.excess; return ex == null ? 6 : Math.max(-6, Math.min(12, 6 + ex * 4)); };
+  const statsFor = (x) => ((x.micro ? micro?.scan_stats : null) || d.scan_stats);
+  const weight = (tag, x) => { const ex = statsFor(x)?.[SCAN_OF[tag]]?.excess; return ex == null ? 6 : Math.max(-6, Math.min(12, 6 + ex * 4)); };
   return [...map.values()].map(x => {
     const st = status[x.sector];
-    if (x.tags.has("pivot") && !((x.rs ?? 0) >= 80 && x.stage2 !== false)) x.tags.delete("pivot"); // pivots only paid in RS 80+ stage-2 names
+    if (![...x.tags].some(t => t !== "deliv" && t !== "block")) return null;
     const scanTags = [...x.tags].filter(t => SCAN_OF[t]);
-    const watchOnly = (scanTags.length > 0 && scanTags.every(t => (d.scan_stats?.[SCAN_OF[t]]?.excess ?? 0) <= -0.5)) || !!x.flags?.t4t;
-    const score = (G[x.grade] ?? 0) + (x.rs ?? 0) / 5 + [...x.tags].reduce((a, t) => a + (SCAN_OF[t] ? weight(t) : 6), 0) + (st === "HOT" ? 6 : st === "WARM" ? 3 : 0) + (x.tags.has("watch") ? 8 : 0) - (watchOnly ? 20 : 0);
+    const watchOnly = (scanTags.length > 0 && scanTags.every(t => (statsFor(x)?.[SCAN_OF[t]]?.excess ?? 0) <= -0.5)) || !!x.flags?.t4t || !!survOf(x.sym)?.gsm;
+    const score = (G[x.grade] ?? 0) + (x.rs ?? 0) / 5 + [...x.tags].reduce((a, t) => a + (SCAN_OF[t] ? weight(t, x) : 6), 0) + (st === "HOT" ? 6 : st === "WARM" ? 3 : 0) + (x.tags.has("watch") ? 8 : 0) - (watchOnly ? 20 : 0);
     if (!x.tags.size) return null;
     x.watchOnly = watchOnly;
     const quietOnly = [...x.tags].every(t => ["tight", "coil", "pb21", "watch", "deliv", "block"].includes(t));
@@ -5536,7 +5588,7 @@ function capQty(qty, entry, portfolio, turnoverCr) {
   let cap = null;
   const byCap = Math.floor((portfolio * MAX_POSITION_PCT / 100) / entry);
   if (qty > byCap) { qty = byCap; cap = `capped at ${MAX_POSITION_PCT}% of capital`; }
-  if (turnoverCr > 0) { const byLiq = Math.floor((turnoverCr * 1e7 * MAX_TURNOVER_PCT / 100) / entry); if (qty > byLiq) { qty = byLiq; cap = `capped at ${MAX_TURNOVER_PCT}% of daily turnover`; } }
+  if (turnoverCr != null && turnoverCr >= 0) { turnoverCr = Math.max(turnoverCr, 0.05); const byLiq = Math.floor((turnoverCr * 1e7 * MAX_TURNOVER_PCT / 100) / entry); if (qty > byLiq) { qty = byLiq; cap = `capped at ${MAX_TURNOVER_PCT}% of daily turnover`; } }
   return { qty, cap };
 }
 function sizeFor(plan, portfolio, riskPct, turnoverCr = null) {
@@ -5556,10 +5608,10 @@ function IdeaRow({ x, portfolio, riskPct, onOpen, onPlan, compact }) {
         <button onClick={() => onOpen?.(x.sym)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", fontFamily: "var(--display)", fontWeight: 700, fontSize: 14, textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{x.sym}</button>
         <RsBadge rs={x.rs} grade={x.grade} />
         {x.micro && <span style={{ fontSize: 9, color: "var(--text3)", border: "1px solid var(--border)", borderRadius: 6, padding: "0 4px" }}>micro</span>}
-        <NseFlagBadge f={x.flags} />
+        <NseFlagBadge f={x.flags} sym={x.sym} />
         {res && <span title={`Results ${mqFmtDate(res.date)} — a gap can jump the stop`} style={{ fontSize: 9, fontWeight: 700, color: C.warn, border: `1px solid ${C.warn}66`, borderRadius: 6, padding: "0 4px" }}>📅 {res.inDays === 0 ? "results today" : `results ${res.inDays}d`}</span>}
         <span style={{ flex: 1 }} />
-        {x.plan && <button className="chip" style={{ fontSize: 10, padding: "3px 10px" }} onClick={() => onPlan?.({ symbol: x.sym, entry: x.plan.entry, stop: x.plan.stop })}>Plan</button>}
+        {x.plan && <button className="chip chip-sm" onClick={() => onPlan?.({ symbol: x.sym, entry: x.plan.entry, stop: x.plan.stop })}>Plan</button>}
       </div>
       <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 3 }}>
         {x.sector}{x.sectorStatus && x.sectorStatus !== "—" && <span style={{ color: MQ_DIM_COLOR[x.sectorStatus] }}> · {x.sectorStatus}</span>}
@@ -5567,7 +5619,7 @@ function IdeaRow({ x, portfolio, riskPct, onOpen, onPlan, compact }) {
       </div>
       {x.plan && !compact && (
         <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 4, fontFamily: "var(--mono)" }}>
-          Entry ₹{x.plan.entry} · Stop ₹{x.plan.stop} ({x.plan.riskPct}%)
+          Entry ₹{x.plan.entry} · Stop ₹{x.plan.stop} (−{x.plan.riskPct}%)
           {x.watchOnly ? <span style={{ color: C.warn }} title="Only on lists whose record lost to the average stock, or trade-for-trade"> · watch only ({x.flags?.t4t ? "trade-for-trade" : "weak-record list"})</span>
             : size ? <span style={{ color: "var(--text)" }}> · {size.qty} sh ≈ {formatINR(size.value)}{size.cap && <span style={{ color: C.warn }}> ({size.cap})</span>}</span> : riskPct === 0 ? <span style={{ color: C.warn }}> · no new entries today</span> : null}
         </div>
@@ -5680,7 +5732,7 @@ function PlanSheet({ open, onClose, children }) {
 // Setup library: rules (also the pre-trade checklist) and which scan finds live examples
 const PLAYBOOK_SETUPS = {
   "Breakout": { scan: "pivots", rules: ["RS 80+ and above a rising 50-day SMA", "Base of 3+ weeks within 15% of the high", "Breaks out on volume well above average", "Market allows new longs (not CASH / No money)", "Stop under the breakout-day low, max 8%"] },
-  "Pullback": { scan: "pb21", rules: ["Leader in an uptrend (above 50 & 200-day SMA)", "Pulls back to the 10/20-day SMA on lighter volume", "Turns up with a higher close", "Stop under the pullback low"] },
+  "Pullback": { scan: "pb21", rules: ["Leader: RS 80+ and the 50-day above the 200-day", "Ran 8%+ above its 21-day EMA in the last 3 weeks", "Pulls back to within 2% of the 21-day EMA, ideally on lighter volume", "Buy as it turns up; stop under the pullback low"] },
   "U&R": { scan: "reclaim50", rules: ["Undercuts a prior low, then closes back above it", "Volume expands on the reclaim", "Sector HOT or WARM", "Stop under the undercut low"] },
   "Range Break": { scan: "tight", rules: ["Tight range (≤ 8%) for 2+ weeks near highs", "Closes out of the range on rising volume", "Stop inside the range"] },
   "Momentum": { scan: "pivots", rules: ["4%+ burst on rising volume", "Already a momentum stock (RS 80+)", "Plan to sell into strength in 3–5 days", "Stop under the burst-day low"] },
@@ -5735,8 +5787,12 @@ function CalcWarnings({ symbol, trades, portfolio, cap }) {
   const same = sector ? open.filter(t => d.sector_of?.[normalizeSymbol(t.symbol)] === sector && normalizeSymbol(t.symbol) !== sym) : [];
   const sameVal = same.reduce((a, t) => a + (t.avgEntry || 0) * (t.remainingQty || t.totalQty || 0), 0);
   const lines = [];
-  const f = d?.flags_of?.[sym];
+  const f = d?.flags_of?.[sym] ?? readMicro()?.flags_of?.[sym];
   if (f?.t4t) lines.push([C.neg, "Trade-for-trade (BE/BZ) stock: no intraday exit, wide spreads, often under NSE surveillance."]);
+  const sv = survOf(sym);
+  if (sv?.gsm) lines.push([C.neg, `On NSE's GSM surveillance list (${sv.gsm}) — restricted trading; avoid.`]);
+  if (sv?.asm) lines.push([C.warn, `On NSE's ASM list (${sv.asm}) — higher margins and it can move to trade-for-trade.`]);
+  if (sv?.band) lines.push([C.warn, `Narrow ${sv.band}% price band — it can lock at the circuit with your stop unfilled; size smaller.`]);
   if (f?.uc) lines.push([C.warn, `Closed at the day's high, +${f.chg}% — likely an upper circuit; you may not get filled at the plan price.`]);
   if (same.length >= 2 || (portfolio && sameVal / portfolio >= 0.3)) lines.push([C.warn, `Already ${same.length} open in ${sector} (${portfolio ? Math.round((sameVal / portfolio) * 100) : "—"}% of capital) — another one concentrates your risk in one sector.`]);
   if (cap) lines.push([C.warn, `Quantity ${cap}.`]);
@@ -5760,13 +5816,32 @@ function useResultsCal() {
   return cal;
 }
 
-/** NSE warnings: trade-for-trade series and likely upper-circuit closes. */
-function NseFlagBadge({ f }) {
-  if (!f) return null;
+// NSE surveillance lists, fetched once per session
+let _survP = null, _surv = null;
+function useSurv() {
+  const [v, setV] = useState(_surv);
+  useEffect(() => { let alive = true; (_survP ||= fetch("/api/nse?type=surv").then(r => (r.ok ? r.json() : null)).catch(() => null)).then(x => { _surv = x; if (alive) setV(x); }); return () => { alive = false; }; }, []);
+  return v;
+}
+function survOf(sym) {
+  if (!_surv || !sym) return null;
+  const o = { ban: _surv.ban?.includes(sym) || undefined, asm: _surv.asm?.[sym], gsm: _surv.gsm?.[sym], band: _surv.band?.[sym] };
+  return o.ban || o.asm || o.gsm || o.band ? o : null;
+}
+/** NSE warnings: trade-for-trade series, likely upper-circuit closes, surveillance lists, narrow bands. */
+function NseFlagBadge({ f, sym }) {
+  useSurv();
+  const sv = survOf(sym);
+  if (!f && !sv) return null;
+  f = f || {};
   const st = (c) => ({ fontSize: 10, fontWeight: 700, color: c, border: `1px solid ${c}66`, borderRadius: 6, padding: "0 4px", marginLeft: 4, whiteSpace: "nowrap" });
   return <>
     {f.t4t && <span style={st(C.neg)} title="Trade-for-trade (BE/BZ): every trade must be delivered, no intraday exit; often on NSE surveillance lists — wide spreads">T2T</span>}
     {f.uc && <span style={st(C.warn)} title={`Closed at the day's high, +${f.chg}% — likely an upper circuit. There may be no sellers at your price, and it can lock down just as fast.`}>circuit ↑</span>}
+    {sv?.gsm && <span style={st(C.neg)} title={`NSE Graded Surveillance (GSM ${sv.gsm}) — trading restrictions and extra margins`}>GSM</span>}
+    {sv?.asm && <span style={st(C.warn)} title={`NSE Additional Surveillance (ASM ${sv.asm}) — higher margins, can move to trade-for-trade`}>ASM</span>}
+    {sv?.ban && <span style={st(C.warn)} title="In the F&O ban period — no new derivative positions; often volatile">F&O ban</span>}
+    {sv?.band && <span style={st(C.muted)} title={`Price band ${sv.band}% — it can lock at the circuit; size smaller`}>{sv.band}% band</span>}
   </>;
 }
 
@@ -5789,7 +5864,7 @@ function BtLine({ items }) {
   ));
 }
 
-function MqMbi({ mbi, dip, universe = "Nifty 500" }) {
+function MqMbi({ mbi, dip, long, universe = "Nifty 500" }) {
   if (!mbi?.rows?.length) return null;
   const rows = mbi.rows, last = rows[rows.length - 1], T = mbi.thresholds;
   const strip = rows.slice(-10);
@@ -5816,7 +5891,7 @@ function MqMbi({ mbi, dip, universe = "Nifty 500" }) {
       <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8, lineHeight: 1.45 }}>
         Stocksgeeks' Market Breadth Indicator rules, computed on the {universe}. Seven boxes turn green or red; green − red ≥ 3 is a green day, ≤ −3 a red day.
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 4, marginBottom: 10 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 4, marginBottom: 10 }}>
         {cells.map(([k, v, bx, tip], i) => (
           <div key={i} title={tip} style={{ border: `1.5px solid ${bc(bx)}`, background: bx ? `${bc(bx)}18` : "transparent", borderRadius: 6, padding: "4px 2px", textAlign: "center", minWidth: 0 }}>
             <div style={{ fontSize: 9.5, color: "var(--text3)", letterSpacing: "0.06em", whiteSpace: "nowrap" }}>{k}</div>
@@ -5836,6 +5911,7 @@ function MqMbi({ mbi, dip, universe = "Nifty 500" }) {
       <div style={{ fontSize: 10, color: "var(--text3)", lineHeight: 1.5 }}>
         Since {mqFmtDate(b.from)}, average stock over the next {b.horizon || 10} sessions after a — <BtLine items={[["green day", b.green], ["neutral", b.neutral], ["red day", b.red]]} />.
         {contrarian ? " On this data green days came after rallies and did worse than red days — read it as a thermometer, not a buy signal." : ""}
+        {long?.mbi_bt && <> 5 years: <BtLine items={[["green", long.mbi_bt.green], ["neutral", long.mbi_bt.neutral], ["red", long.mbi_bt.red]]} />.</>}
       </div>
       {dip?.bt && (
         <div style={{ fontSize: 11, marginTop: 8, padding: "6px 9px", borderRadius: 8, border: `1px solid ${dip.today ? C.pos : "var(--border)"}`, background: dip.today ? `${C.pos}12` : "transparent", color: "var(--text2)", lineHeight: 1.45 }}>
@@ -5855,7 +5931,7 @@ function MqMbi({ mbi, dip, universe = "Nifty 500" }) {
   );
 }
 
-function MqGreenLight({ gl }) {
+function MqGreenLight({ gl, long }) {
   if (!gl || gl.em == null) return null;
   const col = GL_COLOR[gl.band];
   const pct = Math.min(100, (gl.em / 40) * 100);
@@ -5891,6 +5967,9 @@ function MqGreenLight({ gl }) {
       <div style={{ fontSize: 10, color: "var(--text3)", lineHeight: 1.5 }}>
         Since {mqFmtDate(gl.from)}, average stock over the next 10 sessions — <BtLine items={[["25+", b.FULL], ["15–25", b.NORMAL], ["9–15", b.HALF], ["below 9", b.SMALL]]} />.
       </div>
+      {long?.green_light_bt && <div style={{ fontSize: 10, color: "var(--text3)", lineHeight: 1.5, marginTop: 4 }}>
+        5 years (since {mqFmtDate(long.green_light_from)}): <BtLine items={[["25+", long.green_light_bt.FULL], ["15–25", long.green_light_bt.NORMAL], ["9–15", long.green_light_bt.HALF], ["below 9", long.green_light_bt.SMALL]]} />.
+      </div>}
       <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>
         Our own formula, lined up against the public EM series on <a href={SG_LINK} target="_blank" rel="noreferrer" style={{ color: "var(--text2)" }}>thestocksgeeks.com</a> (r ≈ 0.83); Umang's EM itself is his and not reproduced here.
       </div>
@@ -5916,12 +5995,11 @@ function GScale({ min = 0, max = 100, zones, value, unit = "", label }) {
 }
 function GFlow({ steps }) {
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "stretch", gap: 4, margin: "8px 0 12px" }}>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(96px, 1fr))", gap: 6, margin: "8px 0 12px" }}>
       {steps.map((st, i) => (
         <Fragment key={i}>
-          {i > 0 && <div style={{ alignSelf: "center", color: "var(--text3)", fontSize: 14 }} aria-hidden="true">{st.op || "→"}</div>}
-          <div style={{ flex: "1 1 70px", minWidth: 70, border: `1.5px solid ${st.c || "var(--border2)"}`, background: st.c ? `${st.c}14` : "var(--bg3)", borderRadius: 10, padding: "6px 7px", textAlign: "center" }}>
-            <div style={{ fontSize: 10.5, fontWeight: 800, color: st.c || "var(--text)", letterSpacing: "0.04em" }}>{st.t}</div>
+          <div style={{ minWidth: 0, border: `1.5px solid ${st.c || "var(--border2)"}`, background: st.c ? `${st.c}14` : "var(--bg3)", borderRadius: 10, padding: "6px 7px", textAlign: "center" }}>
+            <div style={{ fontSize: 10.5, fontWeight: 800, color: st.c || "var(--text)", letterSpacing: "0.04em", overflowWrap: "anywhere" }}>{i > 0 && <span style={{ color: "var(--text3)", marginRight: 3 }} aria-hidden="true">{st.op || "→"}</span>}{st.t}</div>
             {st.s && <div style={{ fontSize: 10, color: "var(--text2)", marginTop: 2, lineHeight: 1.35 }}>{st.s}</div>}
           </div>
         </Fragment>
@@ -5951,10 +6029,10 @@ function GQuad() {
   return (
     <div style={{ margin: "8px 0 12px" }}>
       <div style={{ display: "grid", gridTemplateColumns: "18px 1fr 1fr", gap: 6, alignItems: "center" }}>
-        <div style={{ fontSize: 9, color: "var(--text3)", writingMode: "vertical-rl", transform: "rotate(180deg)", textAlign: "center" }}>rising</div>
+        <div style={{ fontSize: 10, color: "var(--text3)", writingMode: "vertical-rl", transform: "rotate(180deg)", textAlign: "center" }}>breadth ↑</div>
         {cell("IMPROVING", "weak but getting better — early", C.lime, "→")}
         {cell("LEADING", "strong and still rising — buy here", C.pos, "↓")}
-        <div style={{ fontSize: 9, color: "var(--text3)", writingMode: "vertical-rl", transform: "rotate(180deg)", textAlign: "center" }}>falling</div>
+        <div style={{ fontSize: 10, color: "var(--text3)", writingMode: "vertical-rl", transform: "rotate(180deg)", textAlign: "center" }}>breadth ↓</div>
         {cell("LAGGING", "weak and getting weaker — avoid", C.neg, "↑")}
         {cell("WEAKENING", "strong but fading — tighten", C.warn, "←")}
       </div>
@@ -5965,7 +6043,7 @@ function GQuad() {
     </div>
   );
 }
-function GRecord({ stats }) {
+function GRecord({ stats, long }) {
   const rows = Object.entries(stats || {}).filter(([, v]) => v && v.excess != null);
   if (!rows.length) return null;
   const NAME = { pivots: "Pivots", ep: "Earnings EP", tight: "Tight", reclaim50: "Reclaim 50", leaders: "Leaders", coil: "Coiling", fundflow: "Fund flow", htf: "High-tight", pb21: "21-EMA pb", first52: "First 52w hi" };
@@ -5979,6 +6057,7 @@ function GRecord({ stats }) {
           <div style={{ display: "flex", justifyContent: "flex-end" }}>{v.excess < 0 && <div style={{ width: `${(Math.abs(v.excess) / mx) * 100}%`, height: 10, background: C.neg, borderRadius: "5px 0 0 5px" }} />}</div>
           <div style={{ borderLeft: "1px solid var(--text3)" }}>{v.excess > 0 && <div style={{ width: `${(v.excess / mx) * 100}%`, height: 10, background: C.pos, borderRadius: "0 5px 5px 0" }} />}</div>
           <span style={{ fontFamily: "var(--mono)", color: v.excess >= 0.5 ? C.pos : v.excess <= -0.5 ? C.neg : "var(--text3)", textAlign: "right" }}>{v.excess > 0 ? "+" : ""}{v.excess}</span>
+          {long?.[k] && <span style={{ gridColumn: "2 / 5", fontSize: 9.5, color: "var(--text3)", marginTop: -2 }}>5 years: {long[k].excess > 0 ? "+" : ""}{long[k].excess} ({long[k].signals.toLocaleString("en-IN")} signals)</span>}
         </div>
       ))}
     </div>
@@ -5987,10 +6066,10 @@ function GRecord({ stats }) {
 
 const GUIDES = {
   app: () => ({
-    title: "How TRADESK works — 5 steps every day",
+    title: "How TRADESK works — 5 steps every day", short: "How TRADESK works (5 steps)",
     body: <>
-      <GFlow steps={[{ t: "1 · MARKET", s: "Is the tape safe? Signal + environment", c: C.lime }, { t: "2 · SIZE", s: "Risk % per trade for today", c: C.warn }, { t: "3 · SETUPS", s: "SCAN / IDEAS: graded, ranked", c: C.pos }, { t: "4 · PLAN", s: "Entry, stop, quantity", c: "var(--violet)" }, { t: "5 · MANAGE", s: "Hold · Trim · Tighten · Exit", c: C.neg }]} />
-      <GPoints items={[["🧭", "The market decides how much you risk — never the stock alone."], ["🎯", "Only take A/B setups that pass the quality gate, in HOT/WARM sectors."], ["🛑", "Every trade has a stop before entry. Size = risk ÷ (entry − stop)."], ["🔁", "Positions are re-checked every day: below the 10/20/50-day line or a cold sector → act."]]} />
+      <GFlow steps={[{ t: "1 · MARKET", s: "Is the tape safe? Signal + environment", c: C.lime }, { t: "2 · SIZE", s: "Risk % per trade for today", c: C.warn }, { t: "3 · SETUPS", s: "SCAN / IDEAS: graded, ranked", c: C.pos }, { t: "4 · PLAN", s: "Entry, stop, quantity", c: THEME === "light" ? "#1D4ED8" : "#3B82F6" }, { t: "5 · MANAGE", s: "Hold · Trim · Tighten · Exit", c: C.neg }]} />
+      <GPoints items={[["🧭", "The market decides how much you risk — never the stock alone."], ["🎯", "Only take A/B setups that pass the quality gate, in HOT/WARM sectors."], ["🛑", "Every trade has a stop before entry. Size = risk ÷ (stop distance × 1.25), with capital and liquidity caps."], ["🔁", "Positions are re-checked every day: below the 10/20/50-day line or a cold sector → act."]]} />
     </>,
   }),
   signal: (d) => ({
@@ -5998,7 +6077,7 @@ const GUIDES = {
     body: <>
       <GFlow steps={[{ t: "BIAS", s: "long term (200-day)" }, { t: "TREND", s: "medium (50-day)", op: "+" }, { t: "SWING", s: "short (10 vs 20-day)", op: "+" }, { t: "MOMENTUM", s: "is breadth accelerating?", op: "+" }]} />
       <GFlow steps={[{ t: "3–4 positive", s: "INVEST — trade normally", c: MQ_SIGNAL_COLOR.INVEST }, { t: "2 positive", s: "SELECTIVE — best setups only", c: MQ_SIGNAL_COLOR.SELECTIVE, op: "·" }, { t: "0–1 positive", s: "CASH — protect capital", c: MQ_SIGNAL_COLOR.CASH, op: "·" }]} />
-      <GPoints items={[["📊", `Today: ${d.overall}. Bias ${d.bias}, Trend ${d.trend}, Swing ${d.swing_state}, Momentum ${d.momentum_sign === "POSITIVE" ? "positive" : "negative"}.`], ["✓", "Computed from all Nifty 500 stocks and checked against NSE's official closes every evening."], ["⏳", "Bias only flips after 20 sessions on the other side of 50% — it ignores short shake-outs."]]} />
+      <GPoints items={[["📊", `Today: ${d.overall}. Bias ${d.bias}, Trend ${d.trend}, Swing ${d.swing_state}, Momentum ${d.momentum_dir === "IMPROVING" ? "rising (counts)" : "falling"}.`], ["✓", "Computed from all Nifty 500 stocks and checked against NSE's official closes every evening."], ["⏳", "Bias only flips after 20 sessions on the other side of 50% — it ignores short shake-outs."]]} />
     </>,
   }),
   dims: (d) => ({
@@ -6007,7 +6086,7 @@ const GUIDES = {
       <GScale label="Bias · above the 200-day" value={d.pct_above_200} unit="%" zones={[[0, 30, C.neg, "weak"], [30, 50, C.warn, "mixed"], [50, 75, C.lime, "healthy"], [75, 100, C.pos, "strong"]]} />
       <GScale label="Trend · above the 50-day" value={d.pct_above_50} unit="%" zones={[[0, 20, C.neg, "washed out"], [20, 50, C.warn, "weak"], [50, 80, C.lime, "healthy"], [80, 100, C.pos, "hot"]]} />
       <GScale label="Swing · above the 10-day" value={d.pct_above_10} unit="%" zones={[[0, 20, C.neg, "oversold"], [20, 50, C.warn, "down-swing"], [50, 80, C.lime, "up-swing"], [80, 100, C.pos, "stretched"]]} />
-      <GPoints items={[["💡", "The black marker is today. Moving right = more stocks in uptrends."], ["↗", "Momentum looks at whether the 50-day breadth is rising faster than its recent average."]]} />
+      <GPoints items={[["💡", "The marker line is today. Moving right = more stocks in uptrends."], ["↗", "Momentum looks at whether the 50-day breadth is rising faster than its recent average."]]} />
     </>,
   }),
   sizing: (d) => {
@@ -6020,8 +6099,8 @@ const GUIDES = {
           { t: "GREEN LIGHT", s: g?.em != null ? `${g.em}: 15+ full · 9–15 half · below 9 stop` : "15+ full · 9–15 half · below 9 stop", c: GL_COLOR[g?.band], op: "×" },
           { t: "TODAY", s: s ? `${s.pct}% risk per trade` : "—", c: s?.pct > 0 ? C.pos : C.neg, op: "=" },
         ]} />
-        {g?.em != null && <GScale label="Green light (EM-equivalent)" min={0} max={40} value={g.em} zones={[[0, 9, C.neg, "stop"], [9, 15, C.warn, "half"], [15, 25, C.lime, "full"], [25, 40, C.pos, "strong"]]} />}
-        <GPoints items={[["🧮", "Quantity = (portfolio × risk %) ÷ (entry − stop). The calculator and IDEAS use this same number."], ["🔥", `Total open risk (heat) is capped at ${s?.heatCap ?? "—"}% today.`], ["⛔", "Signal CASH, No money, or green light below 9 → no new entries."]]} />
+        {g?.em != null && <GScale label="Green light (EM-equivalent)" min={0} max={40} value={g.em} zones={[[0, 9, C.neg, "stop"], [9, 15, C.warn, "half"], [15, 40, C.pos, "full size"]]} />}
+        <GPoints items={[["🧮", "Quantity = (portfolio × risk %) ÷ ((entry − stop) × 1.25 gap buffer), capped at 25% of capital and 2% of the stock's daily turnover. The calculator and IDEAS use the same rule."], ["🔥", `Total open risk (heat) is capped at ${s?.heatCap ?? "—"}% today.`], ["⛔", "Signal CASH, No money, or green light below 9 → no new entries."], ["½", "Many stocks at 52-week lows halves it again."]]} />
       </>,
     };
   },
@@ -6030,10 +6109,9 @@ const GUIDES = {
     return {
       title: "Breadth — how many stocks are taking part",
       body: <>
-        <GScale label="Stocks above the 50-day" value={d.pct_above_50} unit="%" zones={[[0, 20, C.pos, "washed out → bounces"], [20, 50, C.warn, "weak"], [50, 80, C.lime, "healthy"], [80, 100, C.neg, "overheated"]]} />
         <div style={{ fontSize: 11, color: "var(--text2)", margin: "4px 0" }}>MBI day colour = green boxes − red boxes</div>
         <GFlow steps={[{ t: "≥ +3", s: "GREEN day", c: C.pos }, { t: "−2 … +2", s: "NEUTRAL", c: C.muted, op: "·" }, { t: "≤ −3", s: "RED day", c: C.neg, op: "·" }]} />
-        <GPoints items={[["🌡", `Today ${m ? `${m.color.toLowerCase()} (${m.score > 0 ? "+" : ""}${m.score})` : "—"}. Breadth is a thermometer: on this data red days were followed by better returns than green days.`], ["📈", "Market Monitor: stocks up ≥4% vs down ≥4%. Watch the 10-day ratio for whether momentum is paying."], ["🆕", "Net new highs > 0 for 3 sessions is one of the conditions for the Trend to turn UP."]]} />
+        <GPoints items={[["🌡", `Today ${m ? `${m.color.toLowerCase()} (${m.score > 0 ? "+" : ""}${m.score})` : "—"}. Breadth is a thermometer${d.mbi?.bt?.red && d.mbi?.bt?.green ? `: after red days the average stock did ${d.mbi.bt.red.fwd > 0 ? "+" : ""}${d.mbi.bt.red.fwd}% over 10 sessions, after green days ${d.mbi.bt.green.fwd > 0 ? "+" : ""}${d.mbi.bt.green.fwd}%` : ""}.`], ["📈", "Market Monitor: stocks up ≥4% vs down ≥4%. Watch the 10-day ratio for whether momentum is paying."], ["🆕", "Net new highs > 0 for 3 sessions is one of the conditions for the Trend to turn UP."]]} />
       </>,
     };
   },
@@ -6051,12 +6129,12 @@ const GUIDES = {
   record: (d) => ({
     title: "Track record — does it actually work?",
     body: <>
-      <GRecord stats={d.scan_stats} />
-      <GPoints items={[["✓", "\"vs average stock\" is what matters: +0.5 or more = a real edge, near 0 = no edge, negative = it lost."], ["🔎", "Records use today's index members, so they're a little optimistic. Treat small differences as noise."], ["🧪", "Every gauge in TRADESK shows its own record — trust the ones that earned it."]]} />
+      <GRecord stats={d.scan_stats} long={d.long_bt?.scan_stats} />
+      <GPoints items={[["✓", "\"vs average stock\" = percentage points better or worse over the next 10 sessions. +0.5 or more is worth attention, near 0 is no edge, negative means it lost. One year is a small sample — the 5-year line, when shown, is the better guide."], ["🔎", "Records use today's index members, so they're a little optimistic. Treat small differences as noise."], ["🧪", "Every gauge in TRADESK shows its own record — trust the ones that earned it."]]} />
     </>,
   }),
   scan: (d) => ({
-    title: "How to use SCAN",
+    title: "How to use SCAN", short: "How to use SCAN",
     body: <>
       <GFlow steps={[{ t: "PICK A LIST", s: "each has its past-year record" }, { t: "QUALITY ON", s: "₹10 cr+ turnover, 1.8%+ daily move", c: C.pos }, { t: "RS + GRADE", s: "RS 80+, grade A/B" }, { t: "OPEN STOCK", s: "chart, plan, results date" }]} />
       <GRecord stats={d.scan_stats} />
@@ -6064,10 +6142,10 @@ const GUIDES = {
     </>,
   }),
   ideas: () => ({
-    title: "How IDEAS ranks stocks",
+    title: "How IDEAS ranks stocks", short: "How IDEAS ranks stocks",
     body: <>
-      <GFlow steps={[{ t: "GRADE", s: "A +30 · B +15" }, { t: "STRENGTH", s: "RS ÷ 5", op: "+" }, { t: "LISTS", s: "+6 per scan it's in", op: "+" }, { t: "SECTOR", s: "HOT +6 · WARM +3", op: "+" }, { t: "WATCH", s: "+8 if on your list", op: "+" }]} />
-      <GPoints items={[["🧹", "Quality on hides thin or slow stocks (your watchlist always shows)."], ["📅", "A results badge means the company reports soon — a gap can jump your stop."], ["📐", "Quantities use today's risk % and each stock's suggested entry/stop."]]} />
+      <GFlow steps={[{ t: "GRADE", s: "A +30 · B +15" }, { t: "STRENGTH", s: "RS ÷ 5", op: "+" }, { t: "LISTS", s: "6 ± its record, per list", op: "+" }, { t: "SECTOR", s: "HOT +6 · WARM +3", op: "+" }, { t: "WATCH", s: "+8 if on your list", op: "+" }]} />
+      <GPoints items={[["⚖", "Each list counts 6 points plus 4 per point it beat the average stock by (−6…+12). Stocks only on losing lists are watch only."], ["🧹", "Quality on hides thin or slow stocks (₹10 cr / ₹3 cr microcaps; your watchlist always shows)."], ["📅", "A results badge means the company reports soon — a gap can jump your stop."], ["📐", "Quantities use today's risk % and each stock's suggested entry/stop."]]} />
     </>,
   }),
 };
@@ -6082,7 +6160,7 @@ function Guide({ id, d, compact }) {
   return (
     <div style={{ marginBottom: compact ? 8 : 12 }}>
       <button onClick={toggle} aria-expanded={open} style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", minHeight: 36, background: open ? "var(--bg3)" : "transparent", border: "1px dashed var(--border2)", borderRadius: open ? "10px 10px 0 0" : 10, padding: "6px 12px", color: "var(--text2)", fontSize: 12, cursor: "pointer", textAlign: "left" }}>
-        <span aria-hidden="true">ⓘ</span><span style={{ flex: 1 }}>{open ? g.title : `How to read: ${g.title.split(" — ")[0]}`}</span><span aria-hidden="true">{open ? "▴" : "▾"}</span>
+        <span style={{ flex: 1 }}>{open ? g.title : `ⓘ ${g.short || g.title.split(" — ")[0]}`}</span><span aria-hidden="true">{open ? "▴" : "▾"}</span>
       </button>
       {open && <div style={{ border: "1px dashed var(--border2)", borderTop: "none", borderRadius: "0 0 10px 10px", padding: "4px 12px 12px", background: "var(--bg3)" }}>{g.body}</div>}
     </div>
@@ -6097,13 +6175,50 @@ function QuadSection({ id, title, d }) {
     </div>
   );
 }
-const QUAD_JUMPS = [["signal", "Signal"], ["dims", "Readings"], ["sizing", "Sizing"], ["breadth", "Breadth"], ["sectors", "Sectors"], ["flows", "Institutions"], ["record", "Record"]];
+const QUAD_JUMPS = [["signal", "Signal"], ["dims", "Readings"], ["sizing", "Sizing"], ["breadth", "Breadth"], ["sectors", "Sectors"], ["flows", "Flows"], ["record", "Record"]];
 function QuadJumpBar() {
   return (
-    <div style={{ display: "flex", gap: 6, overflowX: "auto", scrollbarWidth: "none", margin: "0 0 10px", paddingBottom: 2 }}>
+    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "0 0 10px" }}>
       {QUAD_JUMPS.map(([id, l]) => (
         <button key={id} className="chip" style={{ whiteSpace: "nowrap" }} onClick={() => document.getElementById(`q-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" })}>{l}</button>
       ))}
+    </div>
+  );
+}
+
+function MqForward({ fw, picks, onPickStock }) {
+  if (!fw && !picks?.rows?.length) return null;
+  const col = (v) => (v == null ? "var(--text3)" : v > 0 ? C.pos : v < 0 ? C.neg : "var(--text2)");
+  const ST = { closed: "closed", stopped: "stopped", open: "open", waiting: "waiting", "no fill": "no fill" };
+  return (
+    <div style={mqCardStyle}>
+      <div style={{ ...mqHeadStyle, marginBottom: 4 }}>FORWARD TEST · LIVE RECORD</div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8, lineHeight: 1.45 }}>
+        Every evening the app saves its top picks (grade A/B, quality gate, lists with a positive record) with the entry and stop it showed you. Later evenings score them: filled if a close reaches the entry within 3 sessions, out at the first close under the stop or after 10 sessions. No hindsight — this is what following the app would have done.
+      </div>
+      {fw?.done > 0 ? (
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 8, fontSize: 12 }}>
+          <span>Scored <b>{fw.done}</b></span>
+          <span>Win rate <b>{fw.hit}%</b></span>
+          <span>Avg <b style={{ color: col(fw.avg) }}>{fw.avg > 0 ? "+" : ""}{fw.avg}%</b></span>
+          <span>vs average stock <b style={{ color: col(fw.vs) }}>{fw.vs > 0 ? "+" : ""}{fw.vs}%</b></span>
+          <span>Avg <b style={{ color: col(fw.avgR) }}>{fw.avgR > 0 ? "+" : ""}{fw.avgR}R</b></span>
+        </div>
+      ) : <div style={{ fontSize: 12, color: "var(--text2)", marginBottom: 8 }}>{fw ? `${fw.picks} picks so far — the first ones are scored 10–13 sessions after they were made.` : "Starts with tonight's picks; the first results arrive in about two weeks."}</div>}
+      {fw?.done > 0 && fw.done < 30 && <div style={{ fontSize: 10, color: C.warn, marginBottom: 6 }}>Fewer than 30 scored picks — too early to judge.</div>}
+      {fw?.rows?.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto auto", columnGap: 10, fontSize: 11, fontFamily: "var(--mono)" }}>
+          {fw.rows.slice(0, 12).map((x, i) => (
+            <Fragment key={i}>
+              <span style={{ color: "var(--text3)", borderTop: "1px solid var(--border)", padding: "3px 0" }}>{mqFmtDate(x.d)}</span>
+              <button onClick={() => onPickStock?.(x.sym)} style={{ textAlign: "left", background: "none", border: "none", borderTop: "1px solid var(--border)", padding: "3px 0", color: "var(--text)", cursor: "pointer", font: "inherit" }}>{x.sym}</button>
+              <span style={{ color: x.status === "stopped" ? C.neg : "var(--text3)", borderTop: "1px solid var(--border)", padding: "3px 0" }}>{ST[x.status] || x.status}</span>
+              <span style={{ color: col(x.ret), textAlign: "right", borderTop: "1px solid var(--border)", padding: "3px 0" }}>{x.ret != null ? `${x.ret > 0 ? "+" : ""}${x.ret}%` : "—"}</span>
+            </Fragment>
+          ))}
+        </div>
+      )}
+      {picks?.rows?.length > 0 && <div style={{ fontSize: 10.5, color: "var(--text3)", marginTop: 8 }}>Tonight's picks: {picks.rows.map(x => x.sym).join(", ")}</div>}
     </div>
   );
 }
@@ -6365,6 +6480,9 @@ function PlaybookReview({ trades, setTrades, onOpenStock }) {
 }
 
 function PlaybookPage({ trades, setTrades, portfolio, sub, setSub, onOpenStock, onOpenJournal }) {
+  const [paperView, setPaperView] = useState(false);
+  const hasPaper = trades.some(t => t.paper);
+  const view = trades.filter(t => (paperView ? t.paper : !t.paper));
   return (
     <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
@@ -6377,9 +6495,15 @@ function PlaybookPage({ trades, setTrades, portfolio, sub, setSub, onOpenStock, 
           <button key={id} className="chip" aria-pressed={sub === id} onClick={() => setSub(id)} style={sub === id ? { borderColor: "var(--text)", color: "var(--text)", flex: 1 } : { flex: 1 }}>{l}</button>
         ))}
       </div>
+      {hasPaper && sub !== "review" && (
+        <div style={{ display: "flex", gap: 6, marginBottom: 10, fontSize: 11, color: "var(--text3)", alignItems: "center" }}>
+          Showing:
+          {[[false, "Real trades"], [true, "Paper trades"]].map(([v, l]) => <button key={l} className="chip chip-sm" aria-pressed={paperView === v} onClick={() => setPaperView(v)}>{l}</button>)}
+        </div>
+      )}
       {sub === "review" ? <PlaybookReview trades={trades} setTrades={setTrades} onOpenStock={onOpenStock} />
-        : sub === "stats" ? <div style={{ margin: "0 -16px" }}><AnalyticsPage trades={trades} portfolio={portfolio} /></div>
-        : <PlaybookSetups trades={trades} onOpenStock={onOpenStock} />}
+        : sub === "stats" ? <div style={{ margin: "0 -16px" }}><AnalyticsPage trades={view} portfolio={portfolio} /></div>
+        : <PlaybookSetups trades={view} onOpenStock={onOpenStock} />}
     </div>
   );
 }
@@ -6513,6 +6637,7 @@ export default function App() {
     setPage("journal");
   };
 
+  const realTrades = trades.filter(t => !t.paper); // paper trades stay out of TODAY, heat, sizing and stats
   return (
     <div style={{ maxWidth: 480, margin: "0 auto", minHeight: "100vh", background: "var(--bg)", position: "relative" }}>
       <GlobalStyle />
@@ -6520,7 +6645,7 @@ export default function App() {
       <NiftyStrip data={indicesTicker} />
 
       {page === "today" && (
-        <TodayPage regime={regime} setRegime={handleRegimeChange} regimeSince={regimeSince} portfolio={portfolio} setPortfolio={setPortfolio} trades={trades} setPage={setPage}
+        <TodayPage regime={regime} setRegime={handleRegimeChange} regimeSince={regimeSince} portfolio={portfolio} setPortfolio={setPortfolio} trades={realTrades} setPage={setPage}
           watchlist={watchlist} onOpenStock={openStock} onPlan={pickStock} />
       )}
       {page === "ideas" && (
@@ -6528,7 +6653,7 @@ export default function App() {
       )}
       <PlanSheet open={planOpen} onClose={() => setPlanOpen(false)}>
         <SectionBoundary name="Trade calculator">
-          <CalcPage portfolio={portfolio} trades={trades} onSendToJournal={handleSendToJournal} onOpenQuadrant={() => { setPlanOpen(false); setPage("quadrant"); }}
+          <CalcPage portfolio={portfolio} trades={realTrades} onSendToJournal={handleSendToJournal} onOpenQuadrant={() => { setPlanOpen(false); setPage("quadrant"); }}
             prefillSymbol={calcSymbol} onPrefillUsed={() => setCalcSymbol(null)} />
         </SectionBoundary>
       </PlanSheet>

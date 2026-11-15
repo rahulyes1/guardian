@@ -65,7 +65,7 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
 
   const { symbols } = req.query;
-  const volTail = Math.max(0, Math.min(260, parseInt(req.query.vol, 10) || 0)); // ?vol=N → last N volumes
+  const volTail = Math.max(0, Math.min(1300, parseInt(req.query.vol, 10) || 0)); // ?vol=N → last N volumes (5y ≈ 1240)
   const ohlcTail = Math.max(0, Math.min(260, parseInt(req.query.ohlc, 10) || 0)); // ?ohlc=N → last N [open, high, low]
   const range = ALLOWED_RANGES.has(req.query.range) ? req.query.range : "2y";
   const interval = ALLOWED_INTERVALS.has(req.query.interval) ? req.query.interval : "1d";

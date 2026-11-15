@@ -81,3 +81,17 @@ test("green light doesn't depend on how many stocks downloaded; MBI infinities s
     if (row.inf?.r45) assert.equal(row.c45, null);
   }
 });
+
+test("forward test: a pick that fills and closes 10 sessions later is scored against the average stock", () => {
+  const { axis, aligned, volumes } = universe();
+  const t0 = axis.length - 15, c = aligned["S2.NS"];
+  const prior = [{ d: axis[t0], rows: [{ sym: "S2", entry: c[t0 + 1] * 0.99, stop: Math.min(...c.slice(t0, t0 + 13)) * 0.9, from: "leaders" }, { sym: "S3", entry: 1e9, stop: 1, from: "tight" }] }];
+  const r = computeFromAligned(axis, aligned, {}, Date.now(), null, volumes, null, null, { priorPicks: prior });
+  assert.equal(r.forward.picks, 2);
+  assert.equal(r.forward.done, 1);
+  assert.equal(r.forward.nofill, 1);
+  const s2 = r.forward.rows.find(x => x.sym === "S2");
+  assert.equal(s2.status, "closed");
+  assert.ok(Number.isFinite(s2.ret) && Number.isFinite(s2.vs));
+  assert.ok(Array.isArray(r.picks.rows) && r.picks.d === axis[axis.length - 1]);
+});
