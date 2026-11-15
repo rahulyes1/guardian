@@ -55,7 +55,7 @@ test("green light maps follow-through to an EM-scale band and a size multiplier"
   if (g && g.em != null) {
     const band = g.em >= 25 ? "FULL" : g.em >= 15 ? "NORMAL" : g.em >= 9 ? "HALF" : "SMALL";
     assert.equal(g.band, band);
-    assert.equal(g.mult, { FULL: 1, NORMAL: 1, HALF: 0.5, SMALL: 0 }[band]);
+    assert.equal(g.mult, { FULL: 1, NORMAL: 1, HALF: 0.5, SMALL: 0.5 }[band]);
   }
   assert.ok(Array.isArray(r.scans.fundflow));
 });

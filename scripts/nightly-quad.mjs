@@ -8,7 +8,7 @@
 //   DRY_RUN=1 node scripts/nightly-quad.mjs      # compute + print, don't publish
 import fs from "node:fs";
 import { createClient } from "@supabase/supabase-js";
-import { setApiBase, loadMarketQuadrant, isVerified, setPriorPicks, computeLongBacktest, loadMicrocapScans } from "../marketQuadrant.js";
+import { setApiBase, loadMarketQuadrant, isVerified, setPriorPicks, setPickStats, computeLongBacktest, loadMicrocapScans } from "../marketQuadrant.js";
 
 const APP = (process.env.APP_URL || "https://guardian-swart-theta.vercel.app").replace(/\/$/, "");
 const SB_URL = process.env.SUPABASE_URL, SB_KEY = process.env.SUPABASE_PUBLISHABLE_KEY;
@@ -37,9 +37,17 @@ if (sb) {
   setPriorPicks(list);
   log(`Forward test: ${list.length} earlier evenings of picks loaded`);
 }
+// 5-year records first: they decide which lists tonight's forward-test picks come from
+let longBt = null;
+try {
+  longBt = await computeLongBacktest();
+  setPickStats(longBt.scan_stats);
+  log(`5-year records: ${longBt.from} → ${longBt.to}, ${longBt.stocks} stocks`);
+} catch (e) { log(`⚠️ 5-year records skipped: ${e.message}`); }
 let r;
 try {
   r = await loadMarketQuadrant({ force: true });
+  if (longBt) r.long_bt = longBt;
 } catch (e) {
   log(`❌ Calculation failed: ${e.message}`);
   finish(1);
@@ -55,10 +63,6 @@ if (!r.final || !isVerified(r)) {
 // Extras published with the result (each optional — a failure doesn't block publishing)
 try { r.micro = await loadMicrocapScans({ force: true }); log(`Microcap 250: ${r.micro.total} stocks computed`); }
 catch (e) { log(`⚠️ Microcap scans skipped: ${e.message}`); }
-try {
-  r.long_bt = await computeLongBacktest();
-  log(`5-year records: ${r.long_bt.from} → ${r.long_bt.to}, ${r.long_bt.stocks} stocks`);
-} catch (e) { log(`⚠️ 5-year records skipped: ${e.message}`); }
 if (r.forward) log(`Forward test: ${r.forward.done} scored, avg ${r.forward.avg ?? "—"}%, vs average stock ${r.forward.vs ?? "—"}`);
 if (DRY) { log("Dry run — not published."); finish(0); }
 if (!SB_URL || !SB_KEY) {

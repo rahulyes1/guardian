@@ -3357,6 +3357,9 @@ function MarketQuadrantPage({ onPickStock }) {
       <QuadSection id="record" title="Track record" d={data} />
       <MqForward fw={data.forward} picks={data.picks} onPickStock={onPickStock} />
       <MqSignalBacktest bt={data.signal_backtest} />
+      {data.long_bt?.signal_bt && <MqSignalBacktest bt={data.long_bt.signal_bt} title="DOES THE SIGNAL WORK? · 5 YEARS" />}
+      <MqSignalBuckets long={data.long_bt} />
+      <MqExitRules rows={data.long_bt?.exit_bt} from={data.long_bt?.from} />
       <MqWeeklyReport data={data} />
 
       {/* ── Footer: refresh + timestamp ── */}
@@ -3465,7 +3468,7 @@ function MarketSignalStats({ closed }) {
 function briefRule(d) {
   const env = d.environment?.name, sr = suggestedRisk(d);
   if (!sr || sr.pct === 0) {
-    const why = d.green_light?.band === "SMALL" ? "breakouts are failing (green light below 9)" : d.overall === "CASH" ? "the signal is CASH" : "no-money environment";
+    const why = d.overall === "CASH" ? "the signal is CASH" : "no-money environment";
     return `No new entries — ${why}. Protect capital; let stops do their job.`;
   }
   let rule = `Risk ${sr.pct}% per trade. `;
@@ -3517,7 +3520,7 @@ function Skeleton({ lines = 4 }) {
 }
 
 const TOUR = [
-  ["TODAY", "Your market brief — signal, today's risk per trade and what changed — then your positions with HOLD / TRIM / TIGHTEN / EXIT and today's best setups. Tap ⓘ for how it all fits together."],
+  ["TODAY", "Your market brief — signal, today's risk per trade and what changed — then your positions with HOLD / TIGHTEN / EXIT and today's best setups. Tap ⓘ for how it all fits together."],
   ["SCAN", "Ready-made lists from the Nifty 500 (and Microcap 250), each with its own track record. The quality gate hides thin or slow stocks."],
   ["IDEAS", "Everything worth a look in one ranked list, already sized for today's risk, with results dates flagged."],
   ["Plan sheet", "Tap Plan on any idea (or + Plan a trade): entry, stop and quantity from today's risk, capped by your open risk."],
@@ -3784,11 +3787,15 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
           style={isWatch ? { borderColor: C.warn, color: C.warn, whiteSpace: "nowrap" } : { whiteSpace: "nowrap" }}>
           ★ Watchlist <span style={{ fontFamily: "var(--mono)", opacity: 0.7 }}>{watchlist?.length || 0}</span>
         </button>
-        {SCAN_DEFS.map(x => (
+        {[...SCAN_DEFS].sort((a, b) => {
+          const ex = (id) => (data.long_bt?.scan_stats || data.scan_stats)?.[id]?.excess ?? -9;
+          return ex(b.id) - ex(a.id);
+        }).map(x => (
           <button key={x.id} onClick={() => pick(x.id)} className="chip" aria-pressed={!isWatch && x.id === def.id}
             style={!isWatch && x.id === def.id ? { borderColor: "var(--text)", color: "var(--text)", whiteSpace: "nowrap" } : { whiteSpace: "nowrap" }}>
             {x.label} <span style={{ fontFamily: "var(--mono)", opacity: 0.7 }}>{totals[x.id] ?? 0}</span>
             {data.scan_stats?.[x.id]?.recent?.excess >= 0.5 && <span title="Beat the average stock over the last 3 months" style={{ color: C.pos, marginLeft: 3 }}>✓</span>}
+            {(data.long_bt?.scan_stats?.[x.id]?.excess ?? 1) < 0.2 && <span title="No real edge over 5 years — use it to watch, not to buy" style={{ color: "var(--text3)", marginLeft: 3, fontSize: 10 }}>watch</span>}
           </button>
         ))}
       </div>
@@ -4666,8 +4673,7 @@ function positionHealth(t, trend, mq, livePrice) {
   if (price != null && stop && price <= stop) bump(2, `At/below stop ₹${stop}`);
   const verb = trend?.intraday ? "Trading below" : "Closed below", tag = trend?.intraday ? " (intraday — wait for the close)" : "";
   if (trend?.s50 != null && trend.close < trend.s50) bump(trend.intraday ? 1 : 2, `${verb} its 50-day SMA${tag}`);
-  else if (trend?.s20 != null && trend.close < trend.s20) bump(1, `${verb} its 20-day SMA${tag}`);
-  else if (trend?.s10 != null && trend.close < trend.s10) bump(1, `${verb} its 10-day SMA${tag}`);
+  else if (trend?.s20 != null && trend.close < trend.s20) reasons.push({ l: 0.3, why: `${verb} its 20-day SMA — normal noise; the tested exit is a close under the 50-day${tag}` });
   const sector = mq?.sector_of?.[normalizeSymbol(t.symbol)];
   const sec = sector ? (mq.sectors || []).find(s => s.name === sector) : null;
   if (sec && ["COOL", "COLD"].includes(sec.status)) bump(1, `Sector ${sector} is ${sec.status}`);
@@ -4680,18 +4686,17 @@ function positionHealth(t, trend, mq, livePrice) {
   const st = getDaysHeldStatus(t.setupType, days);
   const r1 = (t.avgEntry || t.entry) && t.stop ? (t.avgEntry || t.entry) - t.stop : null;
   const working = r1 > 0 && trend?.close != null && trend.close >= (t.avgEntry || t.entry) + r1; // up 1R or more
-  if (/Decision needed/.test(st.label) && !working) bump(1, `Day ${days}: past the time limit for a ${t.setupType} and not up 1R`);
+  if (/Decision needed/.test(st.label) && !working) reasons.push({ l: 0.35, why: `Day ${days} and not up 1R yet — slow trades are fine as long as it holds the 50-day` });
   // Selling into strength: far above the 10-day average in ATRs → trim; trail the stop under the 10-day low
   let trim = false;
-  if (trend?.ext != null && trend.ext >= 3 && level < 2) { trim = true; reasons.push({ l: 0.5, why: `${trend.ext.toFixed(1)} ATR above its 10-day average — extended; consider selling ⅓ into strength` }); }
+  if (trend?.ext != null && trend.ext >= 3 && level < 2) { trim = true; reasons.push({ l: 0.5, why: `${trend.ext.toFixed(1)} ATR above its 10-day — extended. Over 5 years trimming here earned a little less than holding with a 50-day trail; trim only if the position is too big for you` }); }
   const entry = t.avgEntry || t.entry, r0 = entry && t.stop ? entry - t.stop : null;
-  if (level < 2 && r0 > 0 && stop && stop < entry && trend?.close != null && trend.close - entry >= 1.5 * r0 && trend.close - entry < 2 * r0)
-    reasons.push({ l: 0.45, why: `Up ${((trend.close - entry) / r0).toFixed(1)}R — move the stop to breakeven (₹${entry}); then only a gap can turn it into a loss` });
-  if (level < 2 && trend?.low10 != null && stop && trend.close > entry && r0 > 0 && trend.close - entry >= 2 * r0) {
-    const trail = +(trend.low10 * 0.995).toFixed(2);
-    if (trail > stop) reasons.push({ l: 0.4, why: `Up ${((trend.close - entry) / r0).toFixed(1)}R — trail the stop to ₹${trail} (under the 10-day low)` });
+  // Once it's working, the tested trail is a close under the 50-day (tight 10-day / breakeven trails did worst)
+  if (level < 2 && trend?.s50 != null && stop && trend.close > entry && r0 > 0 && trend.close - entry >= 2 * r0) {
+    const trail = +(trend.s50 * 0.995).toFixed(2);
+    if (trail > stop) reasons.push({ l: 0.4, why: `Up ${((trend.close - entry) / r0).toFixed(1)}R — trail the stop to ₹${trail}, just under the 50-day (best exit over 5 years)` });
   }
-  const label = level === 0 && trim ? "TRIM" : ["HOLD", "TIGHTEN STOP", "EXIT"][level];
+  const label = level === 0 && trim ? "EXTENDED" : ["HOLD", "TIGHTEN STOP", "EXIT"][level];
   return { level, trim, label, color: level === 0 && trim ? C.lime : [C.pos, C.warn, C.neg][level], reasons: reasons.sort((a, b) => b.l - a.l).map(r => r.why) };
 }
 
@@ -4793,7 +4798,61 @@ function DisciplineStats({ closed, portfolio }) {
 
 // ─── PHASE 2: signal backtest · themes · index ETFs ──────────────────────────
 
-function MqSignalBacktest({ bt }) {
+/** What followed each signal / environment over 5 years (average Nifty 500 stock, next 10 sessions). */
+function MqSignalBuckets({ long }) {
+  if (!long?.by_signal) return null;
+  const row = (k, v, c) => v && (
+    <div key={k} style={{ display: "grid", gridTemplateColumns: "100px 1fr 64px", alignItems: "center", gap: 8, fontSize: 11.5, margin: "3px 0" }}>
+      <span style={{ color: c, fontWeight: 700 }}>{k}</span>
+      <div style={{ height: 8, borderRadius: 4, background: "var(--bg3)", position: "relative" }}><div style={{ width: `${Math.min(100, Math.max(3, v.up))}%`, height: "100%", borderRadius: 4, background: c, opacity: 0.7 }} /></div>
+      <span style={{ fontFamily: "var(--mono)", textAlign: "right", color: v.fwd >= 0 ? C.pos : C.neg }}>{v.fwd > 0 ? "+" : ""}{v.fwd}%</span>
+    </div>
+  );
+  const S = long.by_signal, E = long.by_env || {};
+  const best = Object.entries(S).sort((a, b) => b[1].fwd - a[1].fwd)[0]?.[0];
+  return (
+    <div style={mqCardStyle}>
+      <div style={{ ...mqHeadStyle, marginBottom: 4 }}>WHAT FOLLOWED EACH READING · 5 YEARS</div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8 }}>Average Nifty 500 stock over the next 10 sessions; the bar is how often it was higher. {mqFmtDate(long.from)} {long.from?.slice(0, 4)} – {mqFmtDate(long.to)} {long.to?.slice(0, 4)}.</div>
+      {["INVEST", "SELECTIVE", "CASH"].map(k => row(k, S[k], MQ_SIGNAL_COLOR[k]))}
+      <div style={{ height: 6 }} />
+      {["EASY MONEY", "HARD MONEY", "NO MONEY"].map(k => row(k, E[k], MQ_ENV_COLOR[k] || C.muted))}
+      <div style={{ fontSize: 10.5, color: "var(--text3)", marginTop: 6, lineHeight: 1.45 }}>
+        {best === "INVEST" ? "INVEST days led to the best follow-through — the signal sorts the market the right way over 5 years."
+          : `${best} days were followed by the best returns, not INVEST — the signal mostly lowers risk (smaller drops) rather than picking the best times to buy.`}
+      </div>
+    </div>
+  );
+}
+
+/** Exit rules compared on the same entries over 5 years. */
+function MqExitRules({ rows, from }) {
+  if (!rows?.length) return null;
+  const mx = Math.max(...rows.map(r => Math.abs(r.avgR)), 0.3);
+  return (
+    <div style={mqCardStyle}>
+      <div style={{ ...mqHeadStyle, marginBottom: 4 }}>WHICH EXIT WORKS? · 5 YEARS</div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8, lineHeight: 1.45 }}>
+        The same {rows[0].n.toLocaleString("en-IN")} entries (high-tight flags, first 52-week highs, 21-EMA pullbacks since {mqFmtDate(from)} {from?.slice(0, 4)}, bought at the close with the app's stop), each managed by a different exit rule. Best average R first.
+      </div>
+      {rows.map((r, i) => (
+        <div key={r.id} style={{ padding: "5px 0", borderTop: i ? "1px solid var(--border)" : "none" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11.5 }}>
+            <span style={{ color: i === 0 ? C.pos : "var(--text2)", fontWeight: i === 0 ? 700 : 400 }}>{i === 0 ? "★ " : ""}{r.label}</span>
+            <span style={{ fontFamily: "var(--mono)", color: r.avgR >= 0 ? C.pos : C.neg, whiteSpace: "nowrap" }}>{r.avgR > 0 ? "+" : ""}{r.avgR}R</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 3 }}>
+            <div style={{ flex: 1, height: 6, borderRadius: 3, background: "var(--bg3)" }}><div style={{ width: `${(Math.abs(r.avgR) / mx) * 100}%`, height: "100%", borderRadius: 3, background: r.avgR >= 0 ? C.pos : C.neg, opacity: 0.75 }} /></div>
+            <span style={{ fontSize: 10, color: "var(--text3)", whiteSpace: "nowrap", fontFamily: "var(--mono)" }}>{r.avg > 0 ? "+" : ""}{r.avg}% · {r.win}% win · {r.days}d</span>
+          </div>
+        </div>
+      ))}
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>Closing prices only; real fills on stops are worse (the app's sizing allows 25% for that). Today's index members only.</div>
+    </div>
+  );
+}
+
+function MqSignalBacktest({ bt, title = "DOES THE SIGNAL WORK?" }) {
   const [hover, setHover] = useState(null);
   if (!bt) return null;
   const pts = bt.curve;
@@ -4815,7 +4874,7 @@ function MqSignalBacktest({ bt }) {
   const hp = hover != null ? pts[hover] : null;
   return (
     <div style={mqCardStyle}>
-      <div style={{ ...mqHeadStyle, marginBottom: 4 }}>DOES THE SIGNAL WORK?</div>
+      <div style={{ ...mqHeadStyle, marginBottom: 4 }}>{title}</div>
       <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8 }}>
         Nifty 500 held 100% on INVEST, 50% on SELECTIVE, 0% on CASH · {mqFmtDate(bt.from)} {bt.from.slice(0, 4)} – {mqFmtDate(bt.to)} {bt.to.slice(0, 4)} ({bt.sessions} sessions)
       </div>
@@ -5697,7 +5756,7 @@ function BestSetups({ watchlist, portfolio, onOpenStock, onPlan, onSeeAll }) {
         <div className="label">Today's best setups</div>
         <button className="chip" style={{ fontSize: 10 }} onClick={onSeeAll}>All ideas ›</button>
       </div>
-      {data.green_light?.band === "SMALL" ? <StandDownNote d={data} style={{ margin: "6px 0" }} />
+      {data.green_light?.mult === 0 ? <StandDownNote d={data} style={{ margin: "6px 0" }} />
         : s?.pct === 0 && <div style={{ fontSize: 11, color: C.warn, margin: "4px 0" }}>Market rules say no new entries today ({s.why}) — watch only.</div>}
       {top.map(x => <IdeaRow key={x.sym} x={x} portfolio={portfolio} riskPct={s?.pct ?? 0} onOpen={onOpenStock} onPlan={onPlan} />)}
     </div>
@@ -5766,12 +5825,12 @@ function PreTradeChecklist({ setup, ticked, onToggle }) {
 // ── Stocksgeeks-derived pieces: MBI breadth, green light, quality gate ──
 const SG_LINK = "https://thestocksgeeks.com/";
 const MBI_COLOR = { GREEN: C.pos, RED: C.neg, NEUTRAL: C.muted };
-const GL_COLOR = { FULL: C.pos, NORMAL: C.lime, HALF: C.warn, SMALL: C.neg };
-const GL_TEXT = { FULL: "Full size", NORMAL: "Full size", HALF: "Half size", SMALL: "Stand down · watch only" };
+const GL_COLOR = { FULL: C.pos, NORMAL: C.pos, HALF: C.warn, SMALL: C.warn };
+const GL_TEXT = { FULL: "Full size", NORMAL: "Full size", HALF: "Half size", SMALL: "Half size" };
 /** Shown wherever a new trade can be planned when the green light says stand down. */
 function StandDownNote({ d, style }) {
   const g = d?.green_light;
-  if (g?.band !== "SMALL") return null;
+  if (g?.mult !== 0) return null; // the green light no longer stands the app down (5-year data); kept for safety
   return (
     <div style={{ fontSize: 11, color: C.neg, border: `1px solid ${C.neg}55`, background: `${C.neg}10`, borderRadius: 8, padding: "6px 9px", lineHeight: 1.45, ...style }}>
       ⛔ Stand down: green light {g.em} is below 9 — recent breakouts are failing. Since {mqFmtDate(g.from)} readings below 9 were followed by {g.bt?.SMALL ? `${g.bt.SMALL.fwd > 0 ? "+" : ""}${g.bt.SMALL.fwd}% for the average stock over 10 sessions (${g.bt.SMALL.up}% higher)` : "weak returns"}. Watch, don't buy.
@@ -5946,7 +6005,7 @@ function MqGreenLight({ gl, long }) {
         <span style={{ fontSize: 12, fontWeight: 800, color: col }}>{GL_TEXT[gl.band]}{gl.mult ? ` · ${gl.mult}×` : ""}</span>
       </div>
       <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8, lineHeight: 1.45 }}>
-        Are breakouts paying? Our follow-through reading put on Stocksgeeks' EM scale: below 9 the app stands down (no new entries), 9–15 is half size, 15+ is full size. On the data only the "below 9" split was clear, so 25+ isn't treated as extra.
+        Are breakouts paying? Our follow-through reading put on Stocksgeeks' EM scale: 15+ is full size, below 15 is half size. Over 5 years, 15+ days were followed by about +1.2% for the average stock (70% up) and lower readings by about +0.5% (54% up) — 25+ wasn't better than 15–25, and below 9 wasn't worse than 9–15.
       </div>
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 6 }}>
         <span style={{ fontFamily: "var(--display)", fontSize: 30, color: col, lineHeight: 1 }}>{gl.em}</span>
@@ -6069,8 +6128,8 @@ const GUIDES = {
   app: () => ({
     title: "How TRADESK works — 5 steps every day", short: "How TRADESK works (5 steps)",
     body: <>
-      <GFlow steps={[{ t: "1 · MARKET", s: "Is the tape safe? Signal + environment", c: C.lime }, { t: "2 · SIZE", s: "Risk % per trade for today", c: C.warn }, { t: "3 · SETUPS", s: "SCAN / IDEAS: graded, ranked", c: C.pos }, { t: "4 · PLAN", s: "Entry, stop, quantity", c: THEME === "light" ? "#1D4ED8" : "#3B82F6" }, { t: "5 · MANAGE", s: "Hold · Trim · Tighten · Exit", c: C.neg }]} />
-      <GPoints items={[["🧭", "The market decides how much you risk — never the stock alone."], ["🎯", "Only take A/B setups that pass the quality gate, in HOT/WARM sectors."], ["🛑", "Every trade has a stop before entry. Size = risk ÷ (stop distance × 1.25), with capital and liquidity caps."], ["🔁", "Positions are re-checked every day: below the 10/20/50-day line or a cold sector → act."]]} />
+      <GFlow steps={[{ t: "1 · MARKET", s: "Is the tape safe? Signal + environment", c: C.lime }, { t: "2 · SIZE", s: "Risk % per trade for today", c: C.warn }, { t: "3 · SETUPS", s: "SCAN / IDEAS: graded, ranked", c: C.pos }, { t: "4 · PLAN", s: "Entry, stop, quantity", c: THEME === "light" ? "#1D4ED8" : "#3B82F6" }, { t: "5 · MANAGE", s: "Hold · Trail the 50-day · Exit", c: C.neg }]} />
+      <GPoints items={[["🧭", "The market decides how much you risk — never the stock alone."], ["🎯", "Only take A/B setups that pass the quality gate, in HOT/WARM sectors."], ["🛑", "Every trade has a stop before entry. Size = risk ÷ (stop distance × 1.25), with capital and liquidity caps."], ["🔁", "Positions are re-checked every day. The tested exit is a close under the 50-day (best of 8 exit rules over 5 years); a cold sector or the stop also count."]]} />
     </>,
   }),
   signal: (d) => ({
@@ -6097,11 +6156,11 @@ const GUIDES = {
       body: <>
         <GFlow steps={[
           { t: "ENVIRONMENT", s: `${env || "—"}: Easy 1% · Hard 0.5% · No money 0%`, c: MQ_ENV_COLOR[env] },
-          { t: "GREEN LIGHT", s: g?.em != null ? `${g.em}: 15+ full · 9–15 half · below 9 stop` : "15+ full · 9–15 half · below 9 stop", c: GL_COLOR[g?.band], op: "×" },
+          { t: "GREEN LIGHT", s: g?.em != null ? `${g.em}: 15+ full · below 15 half` : "15+ full · below 15 half", c: GL_COLOR[g?.band], op: "×" },
           { t: "TODAY", s: s ? `${s.pct}% risk per trade` : "—", c: s?.pct > 0 ? C.pos : C.neg, op: "=" },
         ]} />
-        {g?.em != null && <GScale label="Green light (EM-equivalent)" min={0} max={40} value={g.em} zones={[[0, 9, C.neg, "stop"], [9, 15, C.warn, "half"], [15, 40, C.pos, "full size"]]} />}
-        <GPoints items={[["🧮", "Quantity = (portfolio × risk %) ÷ ((entry − stop) × 1.25 gap buffer), capped at 25% of capital and 2% of the stock's daily turnover. The calculator and IDEAS use the same rule."], ["🔥", `Total open risk (heat) is capped at ${s?.heatCap ?? "—"}% today.`], ["⛔", "Signal CASH, No money, or green light below 9 → no new entries."], ["½", "Many stocks at 52-week lows halves it again."]]} />
+        {g?.em != null && <GScale label="Green light (EM-equivalent)" min={0} max={40} value={g.em} zones={[[0, 15, C.warn, "half size"], [15, 40, C.pos, "full size"]]} />}
+        <GPoints items={[["🧮", "Quantity = (portfolio × risk %) ÷ ((entry − stop) × 1.25 gap buffer), capped at 25% of capital and 2% of the stock's daily turnover. The calculator and IDEAS use the same rule."], ["🔥", `Total open risk (heat) is capped at ${s?.heatCap ?? "—"}% today.`], ["⛔", "Signal CASH or No money → no new entries."], ["½", "Many stocks at 52-week lows halves it again."]]} />
       </>,
     };
   },

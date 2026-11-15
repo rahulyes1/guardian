@@ -18,7 +18,7 @@ export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 let API_BASE = "";
 export function setApiBase(url) { API_BASE = String(url || "").replace(/\/+$/, ""); }
 
-const LOCAL_KEY       = "td_mq_v19";  // v16: accuracy fixes (universe-scaled green light, MBI infinities, listings)
+const LOCAL_KEY       = "td_mq_v20";  // v16: accuracy fixes (universe-scaled green light, MBI infinities, listings)
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
@@ -421,6 +421,67 @@ export function computeFollowThrough(axis, aligned, volumes, lookback = 10, keep
 
 // Recent demergers / relistings: their first traded day is not an IPO (keep this list current)
 const NOT_IPO = new Set(["TMCV", "PIRAMALFIN", "VAML", "VISL", "VOGL", "VEDPOWER"]);
+
+// ─── exit rules, tested on the same entries ──────────────────────────────────
+/**
+ * Entries: every high-tight flag, first-52-week-high and 21-EMA-pullback signal (RS stand-in = top 20% by
+ * 3-month return that day), one per stock per 10 sessions, bought at that close with the app's planned stop.
+ * Each exit rule runs on every entry, closes only, max 60 sessions. R = (exit − entry) ÷ (entry − stop).
+ */
+export function exitBacktest(stocks, last, from = 260) {
+  const RULES = {
+    stop10: "Stop, or sell after 10 sessions",
+    stop20: "Stop, or sell after 20 sessions",
+    sma10: "Trail: sell on a close under the 10-day",
+    sma20: "Trail: sell on a close under the 20-day",
+    sma50: "Trail: sell on a close under the 50-day",
+    time6: "Day 6 not up 1R → sell; else trail the 20-day",
+    be10: "Breakeven at +1.5R, then trail the 10-day",
+    trim20: "Sell ⅓ when 3 ATR above the 10-day; rest trails the 20-day",
+  };
+  const acc = Object.fromEntries(Object.keys(RULES).map(k => [k, { n: 0, R: 0, ret: 0, win: 0, days: 0 }]));
+  const lastEntry = new Map();
+  for (let t = Math.max(from, 64); t <= last - 61; t++) {
+    const r63 = []; for (const st of stocks) { const a = st.closes[t], b = st.closes[t - 63]; if (a != null && b != null) r63.push(a / b - 1); }
+    r63.sort((a, b) => a - b); const rsCut = r63.length ? r63[Math.floor(r63.length * 0.8)] : Infinity;
+    for (const st of stocks) {
+      const c = st.closes, x = c[t]; if (x == null) continue;
+      if (t - (lastEntry.get(st) ?? -99) < 10) continue;
+      const b = c[t - 63];
+      if (!setupHits(st, t, b != null && x / b - 1 >= rsCut).length) continue;
+      const plan = tradePlan(c, t); if (!plan || !(x > plan.stop)) continue;
+      lastEntry.set(st, t);
+      const entry = x, stop0 = Math.min(plan.stop, x * 0.995), risk = entry - stop0;
+      let mv = 0, mn = 0; for (let k = t - 59; k <= t; k++) if (c[k] != null && c[k - 1] != null) { mv += Math.abs(c[k] / c[k - 1] - 1); mn++; }
+      const atr = mn ? (mv / mn) * 1.47 * entry : null;
+      const run = (rule) => {
+        let stop = stop0, sold = 0, got = 0; // got = proceeds per 1 unit
+        for (let k = t + 1; k <= t + 60; k++) {
+          const p = c[k]; if (p == null) continue;
+          const d = k - t;
+          if (p <= stop) return [got + (1 - sold) * p, d];
+          if (rule === "stop10" && d >= 10) return [got + (1 - sold) * p, d];
+          if (rule === "stop20" && d >= 20) return [got + (1 - sold) * p, d];
+          if (rule === "sma10" && d >= 2 && st.s10[k] != null && p < st.s10[k]) return [got + (1 - sold) * p, d];
+          if ((rule === "sma20" || rule === "trim20") && d >= 2 && st.s20[k] != null && p < st.s20[k]) return [got + (1 - sold) * p, d];
+          if (rule === "sma50" && st.s50[k] != null && p < st.s50[k]) return [got + (1 - sold) * p, d];
+          if (rule === "time6") { if (d === 6 && p < entry + risk) return [p, d]; if (d > 6 && st.s20[k] != null && p < st.s20[k]) return [p, d]; }
+          if (rule === "be10") { if (p >= entry + 1.5 * risk) stop = Math.max(stop, entry); if (d >= 2 && st.s10[k] != null && p < st.s10[k]) return [p, d]; }
+          if (rule === "trim20" && !sold && atr && st.s10[k] != null && p - st.s10[k] >= 3 * atr) { sold = 1 / 3; got += p / 3; }
+        }
+        const end = c[t + 60] ?? c[last];
+        return [got + (1 - sold) * end, 60];
+      };
+      for (const k of Object.keys(RULES)) {
+        const [out, days] = run(k); const a = acc[k];
+        a.n++; a.R += (out - entry) / risk; a.ret += out / entry - 1; a.days += days; if (out > entry) a.win++;
+      }
+    }
+  }
+  return Object.entries(RULES).map(([k, label]) => { const a = acc[k]; return a.n ? { id: k, label, n: a.n,
+    avgR: Math.round((a.R / a.n) * 100) / 100, avg: Math.round((a.ret / a.n) * 1000) / 10, win: Math.round((a.win / a.n) * 100), days: Math.round(a.days / a.n) } : null; })
+    .filter(Boolean).sort((x, y) => y.avgR - x.avgR);
+}
 
 // ─── series math ─────────────────────────────────────────────────────────────
 export function emaSeries(arr, period) {
@@ -1128,8 +1189,9 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   const evScale = ftAll?.universe ? 500 / ftAll.universe : 1;
   const emEq = (h) => (h.rate == null ? null : r1(Math.max(0, -15.12 + 0.30 * h.rate + 0.1268 * h.events * evScale)));
   const glBand = (v) => (v == null ? null : v >= 25 ? "FULL" : v >= 15 ? "NORMAL" : v >= 9 ? "HALF" : "SMALL");
-  // Only "below 9" separated on the data (25+ and 15–25 both did fine), so 15+ is full size
-  const GL_MULT = { FULL: 1, NORMAL: 1, HALF: 0.5, SMALL: 0 }; // below 9 = stand down (watch only)
+  // 5 years (2021–26): 15+ → avg stock +1.1…1.4% over 10 sessions, ~70% up; below 15 → +0.5…0.6%, 54% up,
+  // with no extra damage below 9. So: 15+ full size, below 15 half size, no stand-down.
+  const GL_MULT = { FULL: 1, NORMAL: 1, HALF: 0.5, SMALL: 0.5 };
   let greenLight = null;
   if (ftAll?.history?.length) {
     const idxOf = Object.fromEntries(axis.map((d, i) => [d, i]));
@@ -1179,7 +1241,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   const PICK_SCANS = ["htf", "pb21", "leaders", "tight", "coil", "pivots", "first52"];
   const seenPick = new Set(), pickRows = [];
   for (const id of PICK_SCANS) {
-    if (!(scanStats[id]?.excess > 0)) continue;
+    if (!((opts.pickStats || scanStats)[id]?.excess > 0)) continue;
     const rows = id === "leaders" ? leaders : scans[id] || [];
     for (const r of rows) {
       if (seenPick.has(r.sym) || !r.plan || !["A", "B"].includes(r.grade)) continue;
@@ -1225,6 +1287,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
 
   const asOf = axis[last];
   return {
+    exit_bt: opts.long ? exitBacktest(stocks, last) : undefined,
     picks, forward, srank_of: srankOf,
     bias, trend, swing, momentum,
     bias_turning: biasTurning, bias_days: biasDays, bias_needed: BIAS_DAYS,
@@ -1374,7 +1437,7 @@ async function computeFresh(onProgress) {
   const volumes = alignVolumes(axis, allVol);
   if (verification) verification.volumes_filled = fillVolumesFromBhav(axis, volumes, bhavData);
   const result = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, volumes, await themesPromise, (await eventsPromise)?.results || null,
-    { priorPicks: _priorPicks });
+    { priorPicks: _priorPicks, pickStats: _pickStats });
   if (droppedDay) result.pending_day = droppedDay;
   // Delivery % for the result day (from NSE's bhavcopy): share of traded quantity actually delivered
   if (bhavData?.date === result.as_of) {
@@ -1466,14 +1529,25 @@ export async function computeLongBacktest({ onProgress = () => {} } = {}) {
   trimIncompleteLastDay(axis, aligned);
   const vols = alignVolumes(axis, allVol);
   const r = computeFromAligned(axis, aligned, await fetchSectorMap(), Date.now(), null, vols, null, null, { long: true });
+  const idx = await fetchSparkBatch(["^CRSLDX"], { range: "5y", vol: 0 }).then(x => x.closes["^CRSLDX"] || null).catch(() => null);
+  const sbt = idx ? backtestSignal(r.history, idx) : null;
+  if (sbt?.curve?.length > 260) sbt.curve = sbt.curve.filter((_, i, a) => i % 5 === 0 || i === a.length - 1);
+  // average stock over the next 10 sessions after each signal / environment reading
+  const pos = Object.fromEntries(axis.map((d, i) => [d, i])), tick = Object.values(aligned);
+  const fwd = (i) => { let sm = 0, n = 0; for (const c of tick) { const a = c[i], b = c[i + 10]; if (a != null && b != null) { sm += b / a - 1; n++; } } return n ? sm / n : null; };
+  const buckets = (key) => { const g = {}; for (const h of r.history) { const i = pos[h.d]; if (i == null || i + 10 >= axis.length || !h[key]) continue; const f = fwd(i); if (f != null) (g[h[key]] ||= []).push(f); }
+    return Object.fromEntries(Object.entries(g).map(([k, xs]) => [k, { days: xs.length, fwd: r1((xs.reduce((a, b) => a + b, 0) / xs.length) * 100), up: Math.round((xs.filter(v => v > 0).length / xs.length) * 100) }])); };
   return { from: axis[0], to: axis[axis.length - 1], sessions: axis.length, stocks: got,
+    signal_bt: sbt, by_signal: buckets("sig"), by_env: buckets("e"), exit_bt: r.exit_bt || null,
     scan_stats: r.scan_stats, green_light_bt: r.green_light?.bt || null, green_light_from: r.green_light?.from || null,
     mbi_bt: r.mbi?.bt || null, dip: r.dip ? { bt: r.dip.bt, other: r.dip.other } : null, mm_bt: r.market_monitor?.bt || null };
 }
 
 // Earlier published picks for the forward test (set by the nightly job before computing)
-let _priorPicks = null;
+let _priorPicks = null, _pickStats = null;
 export function setPriorPicks(list) { _priorPicks = Array.isArray(list) ? list : null; }
+/** 5-year scan records used to choose the forward-test picks (falls back to the 1-year records). */
+export function setPickStats(stats) { _pickStats = stats && typeof stats === "object" ? stats : null; }
 
 // ─── public loader (deduplicated) ────────────────────────────────────────────
 let inflight = null;
