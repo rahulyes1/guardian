@@ -57,9 +57,10 @@ function formatINR(val) {
   if (!val && val !== 0) return "—";
   const n = Number(val);
   if (isNaN(n)) return "—";
-  if (Math.abs(n) >= 10000000) return `₹${(n / 10000000).toFixed(2)}Cr`;
-  if (Math.abs(n) >= 100000) return `₹${(n / 100000).toFixed(2)}L`;
-  return `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+  const sg = n < 0 ? "−" : "", a = Math.abs(n);
+  if (a >= 10000000) return `${sg}₹${(a / 10000000).toFixed(2)}Cr`;
+  if (a >= 100000) return `${sg}₹${(a / 100000).toFixed(2)}L`;
+  return `${sg}₹${a.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 }
 
 function pct(a, b) {
@@ -1128,6 +1129,9 @@ const GlobalStyle = () => (
       cursor: pointer;
       transition: all 0.15s;
     }
+    .topbar-idx { min-width: 0; overflow: hidden; }
+    @media (max-width: 560px) { .topbar-idx { display: none !important; } }
+    .chip { min-height: 36px; }
     .chip.active {
       border-color: var(--violet);
       color: var(--violet);
@@ -1254,8 +1258,8 @@ function TopBar({ regime, portfolio, page, indicesData }) {
         </div>
       </div>
 
-      {/* Center: Nifty live prices */}
-      <div style={{
+      {/* Center: Nifty live prices (hidden on phones — the strip below shows them) */}
+      <div className="topbar-idx" style={{
         display: "flex", alignItems: "center", gap: 10,
         fontFamily: "var(--mono)", fontSize: 10,
         flex: 1, justifyContent: "center",
@@ -1268,7 +1272,7 @@ function TopBar({ regime, portfolio, page, indicesData }) {
               <span style={{ color: "var(--text)", fontWeight: 600 }}>{fmtIdxPrice(nsei.price)}</span>
               <span style={{ color: pctColor(nsei.changePct), fontSize: 9 }}>{fmtIdxPct(nsei.changePct)}</span>
               <IdxMark v={nsei} size={8} />
-              {!open && <span style={{ color: "var(--text3)", fontSize: 8, opacity: 0.7 }}>EOD</span>}
+              {!open && <span style={{ color: "var(--text3)", fontSize: 9.5, opacity: 0.7 }}>EOD</span>}
             </>
           ) : (
             <span style={{ color: "var(--text3)" }}>—</span>
@@ -1283,7 +1287,7 @@ function TopBar({ regime, portfolio, page, indicesData }) {
               <span style={{ color: "var(--text)", fontWeight: 600 }}>{fmtIdxPrice(cnx500.price)}</span>
               <span style={{ color: pctColor(cnx500.changePct), fontSize: 9 }}>{fmtIdxPct(cnx500.changePct)}</span>
               <IdxMark v={cnx500} size={8} />
-              {!open && <span style={{ color: "var(--text3)", fontSize: 8, opacity: 0.7 }}>EOD</span>}
+              {!open && <span style={{ color: "var(--text3)", fontSize: 9.5, opacity: 0.7 }}>EOD</span>}
             </>
           ) : (
             <span style={{ color: "var(--text3)" }}>—</span>
@@ -1541,7 +1545,7 @@ function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillS
   const stopDist = valid ? e - s : null;
   const stopPct = valid ? ((stopDist / e) * 100).toFixed(2) : null;
   const liqCr = getLastMarketQuadrant()?.q_of?.[normalizeSymbol(symbol || "")]?.to ?? null;
-  const capped = valid ? capQty(Math.floor(riskBudget / stopDist), e, portfolio, liqCr) : { qty: 0, cap: null };
+  const capped = valid ? capQty(Math.floor(riskBudget / (stopDist * GAP_BUFFER)), e, portfolio, liqCr) : { qty: 0, cap: null };
   const autoQty = capped.qty;
   const finalQty = qtyMode === "manual" && qty ? parseInt(qty) : autoQty;
   const posValue = valid ? e * finalQty : 0;
@@ -1616,6 +1620,7 @@ function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillS
         <PriceBadge info={symbolInfo} loading={fetchingSym} />
         <ResultsWarning symbol={symbol && symbol.length >= 2 ? symbol : null} style={{ marginTop: 8 }} />
         <CalcStandDown />
+        <CalcWarnings symbol={symbol} trades={trades} portfolio={portfolio} cap={capped.cap} />
       </div>
 
       {/* Risk % Selector */}
@@ -3052,7 +3057,7 @@ function MqSectorGrid({ sectors, sectorStocks, selected, onSelect, onPickStock }
                         style={{ width: 6, height: 6, borderRadius: 3, flexShrink: 0, background: st.a50 ? C.pos : "var(--border2)" }} />
                       <button onClick={() => onPickStock?.(st.sym)} title={`Open ${st.sym}`}
                         style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", font: "inherit", fontFamily: "var(--display)", fontWeight: 700, letterSpacing: "0.02em", overflow: "hidden", textOverflow: "ellipsis", textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{st.sym}</button>
-                      {st.a200 && <span style={{ fontSize: 8, color: "var(--text3)" }} title="Above 200-SMA">200↑</span>}
+                      {st.a200 && <span style={{ fontSize: 9.5, color: "var(--text3)" }} title="Above 200-SMA">200↑</span>}
                     </div>
                     {pctCell(st.ret1m)}
                     {pctCell(st.ret3m)}
@@ -3596,7 +3601,7 @@ function MarketBrief({ onOpenQuad, onOpenScan }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6, marginTop: 12 }}>
         {chips.map(([k, v]) => (
           <div key={k} style={{ background: "var(--bg3)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 6px", minWidth: 0 }}>
-            <div style={{ fontSize: 8, color: "var(--text3)", letterSpacing: "0.12em" }}>{k}</div>
+            <div style={{ fontSize: 9.5, color: "var(--text3)", letterSpacing: "0.12em" }}>{k}</div>
             <div style={{ fontSize: 11, fontWeight: 700, marginTop: 2, color: k === "MOMENTUM" ? (v === "POS ↗" ? C.pos : v === "NEG ↘" ? C.neg : C.warn) : (MQ_DIM_COLOR[v.split(" ")[0]] || "var(--text)"), whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{v}</div>
           </div>
         ))}
@@ -3801,7 +3806,8 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
                       {r.results && <span style={{ color: C.warn, marginRight: 4 }} title="Results were due around this move">★</span>}
                       {r.not_ipo && <span style={{ color: C.warn, marginRight: 4 }} title="Demerger / relisting — 'from listing' starts at its first traded day">demerger ·</span>}
                       {r.sector}{st && st !== "—" && <span style={{ color: MQ_DIM_COLOR[st], marginLeft: 4 }}>· {st}</span>}
-                      {r.micro && <span style={{ marginLeft: 4, color: "var(--text3)", border: "1px solid var(--border)", borderRadius: 6, padding: "0 4px", fontSize: 9 }}>micro</span>}
+                      {r.micro && <span style={{ marginLeft: 4, color: "var(--text3)", border: "1px solid var(--border)", borderRadius: 6, padding: "0 4px", fontSize: 10 }}>micro</span>}
+                      <NseFlagBadge f={data.flags_of?.[r.sym] ?? microData?.flags_of?.[r.sym]} />
                       {qOfRow(r)?.to != null && <span style={{ marginLeft: 4, fontFamily: "var(--mono)" }} title="20-day average turnover · 60-day average daily move">· ₹{qOfRow(r).to >= 100 ? Math.round(qOfRow(r).to) : qOfRow(r).to}cr · {qOfRow(r).move}%/d</span>}
                     </div>
                   </div>
@@ -3833,8 +3839,8 @@ function RsBadge({ rs, grade }) {
   const rc = rs == null ? "var(--text3)" : rs >= 90 ? C.pos : rs >= 70 ? C.lime : rs >= 40 ? C.muted : C.neg;
   return (
     <span style={{ display: "inline-flex", gap: 4, marginLeft: 6, verticalAlign: "middle" }}>
-      {rs != null && <span title="Strength rank vs the Nifty 500 (1–99)" style={{ fontFamily: "var(--mono)", fontSize: 9, fontWeight: 700, color: rc, border: `1px solid ${rc}55`, borderRadius: 6, padding: "0 4px" }}>RS {rs}</span>}
-      {grade && <span title="Setup grade (A best)" style={{ fontSize: 9, fontWeight: 800, color: GRADE_COLOR[grade], border: `1px solid ${GRADE_COLOR[grade]}55`, borderRadius: 6, padding: "0 4px" }}>{grade}</span>}
+      {rs != null && <span title="Strength rank vs the Nifty 500 (1–99)" style={{ fontFamily: "var(--mono)", fontSize: 10.5, fontWeight: 700, color: rc, border: `1px solid ${rc}55`, borderRadius: 6, padding: "0 4px" }}>RS {rs}</span>}
+      {grade && <span title="Setup grade (A best)" style={{ fontSize: 10.5, fontWeight: 800, color: GRADE_COLOR[grade], border: `1px solid ${GRADE_COLOR[grade]}55`, borderRadius: 6, padding: "0 4px" }}>{grade}</span>}
     </span>
   );
 }
@@ -3886,7 +3892,7 @@ async function fetchStockDetail(sym) {
   const url = `/api/spark?symbols=${encodeURIComponent(`${tk},${IDX_TICKER}`)}&range=2y&interval=1d&vol=260&ohlc=260`;
   const [sparkRes, bhavRes] = await Promise.all([
     fetch(url).then(r => (r.ok ? r.json() : null)).catch(() => null),
-    fetch("/api/nse?type=bhav&v=3").then(r => (r.ok ? r.json() : null)).catch(() => null),
+    fetch("/api/nse?type=bhav&v=4").then(r => (r.ok ? r.json() : null)).catch(() => null),
   ]);
   const items = Object.fromEntries((sparkRes?.spark?.result || []).map(it => [it.symbol, it]));
   const s = items[tk], ix = items[IDX_TICKER];
@@ -4057,7 +4063,7 @@ function StockStats({ d, q }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 6 }}>
         {cells.map(([k, v, c]) => (
           <div key={k} style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 8, color: "var(--text3)", letterSpacing: "0.08em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{k}</div>
+            <div style={{ fontSize: 9.5, color: "var(--text3)", letterSpacing: "0.08em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{k}</div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 12, fontWeight: 700, color: c, whiteSpace: "nowrap" }}>{v}</div>
           </div>
         ))}
@@ -4154,6 +4160,15 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [
           <span style={{ fontFamily: "var(--mono)", fontSize: 24, fontWeight: 700 }}>₹{c.toFixed(2)}</span>
           <span style={{ fontFamily: "var(--mono)", fontSize: 13, color: col(chg) }}>{pct(chg)}</span>
           <span style={{ fontSize: 11, color: d.intraday ? C.warn : "var(--text3)" }}>{d.intraday ? `${mqFmtDate(d.dates[last])} · intraday (not a close)` : `${mqFmtDate(d.dates[last])} close${d.verified?.date === d.dates[last] ? " · ✓ NSE" : " · unverified"}`}</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 10, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg3)" }}>
+          <span style={{ fontSize: 15, fontWeight: 800, color: GRADE_COLOR[g.grade] }}>{g.grade}</span>
+          {rsRank != null && <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: rsRank >= 80 ? C.pos : "var(--text2)" }}>RS {rsRank}</span>}
+          {secInfo && <span style={{ fontSize: 12, color: MQ_DIM_COLOR[secInfo.status] }}>{secInfo.status}</span>}
+          <NseFlagBadge f={mq?.flags_of?.[symbol]} />
+          {plan && <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text2)" }}>₹{plan.entry} / stop ₹{plan.stop} ({plan.riskPct}%)</span>}
+          <span style={{ flex: 1 }} />
+          {plan && <button className="btn-primary" style={{ padding: "8px 14px", fontSize: 12, borderRadius: 10 }} onClick={() => onPlan?.({ symbol, entry: plan.entry, stop: plan.stop })}>Plan trade ›</button>}
         </div>
         <div style={{ marginTop: 10 }}><WatchButton symbol={symbol} watchlist={watchlist} setWatchlist={setWatchlist} /></div>
         <ResultsWarning symbol={symbol} style={{ marginTop: 8 }} />
@@ -4278,7 +4293,7 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [
         </div>
       )}
       <button className="btn-primary" style={{ width: "100%" }} onClick={() => onPlan(plan ? { symbol, entry: plan.entry, stop: plan.stop } : symbol)}>
-        Plan this trade in CALC ›
+        Plan trade ›
       </button>
       <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 10 }}>Information only — not a recommendation.</div>
     </div>
@@ -4620,6 +4635,8 @@ function positionHealth(t, trend, mq, livePrice) {
   let trim = false;
   if (trend?.ext != null && trend.ext >= 3 && level < 2) { trim = true; reasons.push({ l: 0.5, why: `${trend.ext.toFixed(1)} ATR above its 10-day average — extended; consider selling ⅓ into strength` }); }
   const entry = t.avgEntry || t.entry, r0 = entry && t.stop ? entry - t.stop : null;
+  if (level < 2 && r0 > 0 && stop && stop < entry && trend?.close != null && trend.close - entry >= 1.5 * r0)
+    reasons.push({ l: 0.45, why: `Up ${((trend.close - entry) / r0).toFixed(1)}R — move the stop to breakeven (₹${entry}); the trade can't become a loss` });
   if (level < 2 && trend?.low10 != null && stop && trend.close > entry && r0 > 0 && trend.close - entry >= 2 * r0) {
     const trail = +(trend.low10 * 0.995).toFixed(2);
     if (trail > stop) reasons.push({ l: 0.4, why: `Up ${((trend.close - entry) / r0).toFixed(1)}R — trail the stop to ₹${trail} (under the 10-day low)` });
@@ -5409,7 +5426,7 @@ function MqRotationMap({ data, onSelect }) {
         <line x1={X(50)} x2={X(50)} y1={pad} y2={H - pad} stroke="var(--border)" />
         <line x1={pad} x2={W - pad} y1={Y(0)} y2={Y(0)} stroke="var(--border)" />
         {[["LEADING", X(97), pad + 10, "end"], ["WEAKENING", X(97), H - pad - 4, "end"], ["IMPROVING", X(3), pad + 10, "start"], ["LAGGING", X(3), H - pad - 4, "start"]].map(([l, x, y, a]) => (
-          <text key={l} x={x} y={y} fontSize="8" fontWeight="700" letterSpacing="1" fill={QUAD_COLOR[l]} opacity="0.7" textAnchor={a}>{l}</text>
+          <text key={l} x={x} y={y} fontSize="9" fontWeight="700" letterSpacing="1" fill={QUAD_COLOR[l]} opacity="0.7" textAnchor={a}>{l}</text>
         ))}
         {pts.map(p => (
           <g key={p.name} onClick={() => onSelect?.(p.name)} style={{ cursor: "pointer" }}>
@@ -5417,15 +5434,15 @@ function MqRotationMap({ data, onSelect }) {
             {(() => { const t = p.trail[p.trail.length - 1]; return (
               <>
                 <circle cx={X(t.x)} cy={Y(t.y)} r="4.5" fill={QUAD_COLOR[p.q] || "var(--text3)"} stroke="var(--bg2)" strokeWidth="1.5" />
-                {labelPos[p.name] != null && <text x={X(t.x) + 6} y={labelPos[p.name]} fontSize="8" fill="var(--text2)">{short(p.name)}</text>}
+                {labelPos[p.name] != null && <text x={X(t.x) + 6} y={labelPos[p.name]} fontSize="9" fill="var(--text2)">{short(p.name)}</text>}
                 <circle cx={X(t.x)} cy={Y(t.y)} r="12" fill="transparent"><title>{`${p.name}: ${t.x.toFixed(0)}% above 50-SMA, ${t.y >= 0 ? "+" : ""}${t.y.toFixed(0)} pts in 4 weeks`}</title></circle>
               </>
             ); })()}
           </g>
         ))}
-        <text x={X(0)} y={H - 6} fontSize="8" fill="var(--text3)">0%</text>
-        <text x={X(50)} y={H - 6} fontSize="8" fill="var(--text3)" textAnchor="middle">50%</text>
-        <text x={X(100)} y={H - 6} fontSize="8" fill="var(--text3)" textAnchor="end">100%</text>
+        <text x={X(0)} y={H - 6} fontSize="9" fill="var(--text3)">0%</text>
+        <text x={X(50)} y={H - 6} fontSize="9" fill="var(--text3)" textAnchor="middle">50%</text>
+        <text x={X(100)} y={H - 6} fontSize="9" fill="var(--text3)" textAnchor="end">100%</text>
       </svg>
     </div>
   );
@@ -5470,6 +5487,7 @@ function buildIdeas(d, micro, watchlist, blockBuys = null) {
       sym: r.sym, sector: r.sector || src?.sector_of?.[r.sym] || d.sector_of?.[r.sym] || "Other",
       rs: r.rs ?? src?.rs_of?.[r.sym] ?? null, grade: r.grade ?? src?.grade_of?.[r.sym] ?? null,
       plan: r.plan ?? src?.plan_of?.[r.sym] ?? null, q: r.q ?? src?.q_of?.[r.sym] ?? d.q_of?.[r.sym] ?? null, tags: new Set(), micro: !!isMicro,
+      flags: src?.flags_of?.[r.sym] ?? d.flags_of?.[r.sym] ?? null,
     };
     if (r.stage2 === false) x.stage2 = false;
     x.tags.add(tag); map.set(r.sym, x);
@@ -5501,7 +5519,7 @@ function buildIdeas(d, micro, watchlist, blockBuys = null) {
     const st = status[x.sector];
     if (x.tags.has("pivot") && !((x.rs ?? 0) >= 80 && x.stage2 !== false)) x.tags.delete("pivot"); // pivots only paid in RS 80+ stage-2 names
     const scanTags = [...x.tags].filter(t => SCAN_OF[t]);
-    const watchOnly = scanTags.length > 0 && scanTags.every(t => (d.scan_stats?.[SCAN_OF[t]]?.excess ?? 0) <= -0.5);
+    const watchOnly = (scanTags.length > 0 && scanTags.every(t => (d.scan_stats?.[SCAN_OF[t]]?.excess ?? 0) <= -0.5)) || !!x.flags?.t4t;
     const score = (G[x.grade] ?? 0) + (x.rs ?? 0) / 5 + [...x.tags].reduce((a, t) => a + (SCAN_OF[t] ? weight(t) : 6), 0) + (st === "HOT" ? 6 : st === "WARM" ? 3 : 0) + (x.tags.has("watch") ? 8 : 0) - (watchOnly ? 20 : 0);
     if (!x.tags.size) return null;
     x.watchOnly = watchOnly;
@@ -5511,6 +5529,8 @@ function buildIdeas(d, micro, watchlist, blockBuys = null) {
 }
 
 const MAX_POSITION_PCT = 25, MAX_TURNOVER_PCT = 2;
+// Stops fill worse than planned (gaps, slippage): the review measured an average stop-out of −1.32R
+const GAP_BUFFER = 1.25;
 /** Quantity from risk, then capped at 25% of capital and 2% of the stock's 20-day average turnover (₹ cr). */
 function capQty(qty, entry, portfolio, turnoverCr) {
   let cap = null;
@@ -5521,7 +5541,7 @@ function capQty(qty, entry, portfolio, turnoverCr) {
 }
 function sizeFor(plan, portfolio, riskPct, turnoverCr = null) {
   if (!plan || !portfolio || !(riskPct > 0) || !(plan.entry > plan.stop)) return null;
-  const raw = Math.floor((portfolio * riskPct / 100) / (plan.entry - plan.stop));
+  const raw = Math.floor((portfolio * riskPct / 100) / ((plan.entry - plan.stop) * GAP_BUFFER));
   const { qty, cap } = capQty(raw, plan.entry, portfolio, turnoverCr);
   return qty > 0 ? { qty, value: qty * plan.entry, cap } : null;
 }
@@ -5536,6 +5556,7 @@ function IdeaRow({ x, portfolio, riskPct, onOpen, onPlan, compact }) {
         <button onClick={() => onOpen?.(x.sym)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", fontFamily: "var(--display)", fontWeight: 700, fontSize: 14, textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{x.sym}</button>
         <RsBadge rs={x.rs} grade={x.grade} />
         {x.micro && <span style={{ fontSize: 9, color: "var(--text3)", border: "1px solid var(--border)", borderRadius: 6, padding: "0 4px" }}>micro</span>}
+        <NseFlagBadge f={x.flags} />
         {res && <span title={`Results ${mqFmtDate(res.date)} — a gap can jump the stop`} style={{ fontSize: 9, fontWeight: 700, color: C.warn, border: `1px solid ${C.warn}66`, borderRadius: 6, padding: "0 4px" }}>📅 {res.inDays === 0 ? "results today" : `results ${res.inDays}d`}</span>}
         <span style={{ flex: 1 }} />
         {x.plan && <button className="chip" style={{ fontSize: 10, padding: "3px 10px" }} onClick={() => onPlan?.({ symbol: x.sym, entry: x.plan.entry, stop: x.plan.stop })}>Plan</button>}
@@ -5547,7 +5568,7 @@ function IdeaRow({ x, portfolio, riskPct, onOpen, onPlan, compact }) {
       {x.plan && !compact && (
         <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 4, fontFamily: "var(--mono)" }}>
           Entry ₹{x.plan.entry} · Stop ₹{x.plan.stop} ({x.plan.riskPct}%)
-          {x.watchOnly ? <span style={{ color: C.warn }} title="Only on lists whose record lost to the average stock"> · watch only (weak-record list)</span>
+          {x.watchOnly ? <span style={{ color: C.warn }} title="Only on lists whose record lost to the average stock, or trade-for-trade"> · watch only ({x.flags?.t4t ? "trade-for-trade" : "weak-record list"})</span>
             : size ? <span style={{ color: "var(--text)" }}> · {size.qty} sh ≈ {formatINR(size.value)}{size.cap && <span style={{ color: C.warn }}> ({size.cap})</span>}</span> : riskPct === 0 ? <span style={{ color: C.warn }}> · no new entries today</span> : null}
         </div>
       )}
@@ -5659,7 +5680,7 @@ function PlanSheet({ open, onClose, children }) {
 // Setup library: rules (also the pre-trade checklist) and which scan finds live examples
 const PLAYBOOK_SETUPS = {
   "Breakout": { scan: "pivots", rules: ["RS 80+ and above a rising 50-day SMA", "Base of 3+ weeks within 15% of the high", "Breaks out on volume well above average", "Market allows new longs (not CASH / No money)", "Stop under the breakout-day low, max 8%"] },
-  "Pullback": { scan: "reclaim50", rules: ["Leader in an uptrend (above 50 & 200-day SMA)", "Pulls back to the 10/20-day SMA on lighter volume", "Turns up with a higher close", "Stop under the pullback low"] },
+  "Pullback": { scan: "pb21", rules: ["Leader in an uptrend (above 50 & 200-day SMA)", "Pulls back to the 10/20-day SMA on lighter volume", "Turns up with a higher close", "Stop under the pullback low"] },
   "U&R": { scan: "reclaim50", rules: ["Undercuts a prior low, then closes back above it", "Volume expands on the reclaim", "Sector HOT or WARM", "Stop under the undercut low"] },
   "Range Break": { scan: "tight", rules: ["Tight range (≤ 8%) for 2+ weeks near highs", "Closes out of the range on rising volume", "Stop inside the range"] },
   "Momentum": { scan: "pivots", rules: ["4%+ burst on rising volume", "Already a momentum stock (RS 80+)", "Plan to sell into strength in 3–5 days", "Stop under the burst-day low"] },
@@ -5704,6 +5725,28 @@ function StandDownNote({ d, style }) {
     </div>
   );
 }
+/** Calculator warnings: sizing caps, gap buffer, sector concentration, NSE flags. */
+function CalcWarnings({ symbol, trades, portfolio, cap }) {
+  const d = getLastMarketQuadrant();
+  const sym = normalizeSymbol(symbol || "");
+  if (!sym || sym.length < 2) return null;
+  const sector = d?.sector_of?.[sym];
+  const open = (trades || []).filter(t => t.status === "open" || t.status === "partial").map(normalizeTrade);
+  const same = sector ? open.filter(t => d.sector_of?.[normalizeSymbol(t.symbol)] === sector && normalizeSymbol(t.symbol) !== sym) : [];
+  const sameVal = same.reduce((a, t) => a + (t.avgEntry || 0) * (t.remainingQty || t.totalQty || 0), 0);
+  const lines = [];
+  const f = d?.flags_of?.[sym];
+  if (f?.t4t) lines.push([C.neg, "Trade-for-trade (BE/BZ) stock: no intraday exit, wide spreads, often under NSE surveillance."]);
+  if (f?.uc) lines.push([C.warn, `Closed at the day's high, +${f.chg}% — likely an upper circuit; you may not get filled at the plan price.`]);
+  if (same.length >= 2 || (portfolio && sameVal / portfolio >= 0.3)) lines.push([C.warn, `Already ${same.length} open in ${sector} (${portfolio ? Math.round((sameVal / portfolio) * 100) : "—"}% of capital) — another one concentrates your risk in one sector.`]);
+  if (cap) lines.push([C.warn, `Quantity ${cap}.`]);
+  lines.push(["var(--text3)", "Quantity assumes the stop fills 25% worse than planned (gaps / slippage)."]);
+  return (
+    <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
+      {lines.map(([c, t], i) => <div key={i} style={{ fontSize: 11, color: c, lineHeight: 1.4 }}>{c === "var(--text3)" ? "ℹ" : "⚠"} {t}</div>)}
+    </div>
+  );
+}
 function CalcStandDown() {
   const [d, setD] = useState(() => getLastMarketQuadrant());
   useEffect(() => { let alive = true; loadMarketQuadrant({ allowCompute: false }).then(x => alive && x && setD(x)).catch(() => {}); return () => { alive = false; }; }, []);
@@ -5715,6 +5758,16 @@ function useResultsCal() {
   const [cal, setCal] = useState(null);
   useEffect(() => { let alive = true; (_calP ||= fetchResultsCalendar()).then(c => alive && setCal(c)); return () => { alive = false; }; }, []);
   return cal;
+}
+
+/** NSE warnings: trade-for-trade series and likely upper-circuit closes. */
+function NseFlagBadge({ f }) {
+  if (!f) return null;
+  const st = (c) => ({ fontSize: 10, fontWeight: 700, color: c, border: `1px solid ${c}66`, borderRadius: 6, padding: "0 4px", marginLeft: 4, whiteSpace: "nowrap" });
+  return <>
+    {f.t4t && <span style={st(C.neg)} title="Trade-for-trade (BE/BZ): every trade must be delivered, no intraday exit; often on NSE surveillance lists — wide spreads">T2T</span>}
+    {f.uc && <span style={st(C.warn)} title={`Closed at the day's high, +${f.chg}% — likely an upper circuit. There may be no sellers at your price, and it can lock down just as fast.`}>circuit ↑</span>}
+  </>;
 }
 
 /** Quality gate for a scan row: tight / coiling setups are quiet by design, so only liquidity applies to them. */
@@ -5766,7 +5819,7 @@ function MqMbi({ mbi, dip, universe = "Nifty 500" }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 4, marginBottom: 10 }}>
         {cells.map(([k, v, bx, tip], i) => (
           <div key={i} title={tip} style={{ border: `1.5px solid ${bc(bx)}`, background: bx ? `${bc(bx)}18` : "transparent", borderRadius: 6, padding: "4px 2px", textAlign: "center", minWidth: 0 }}>
-            <div style={{ fontSize: 8, color: "var(--text3)", letterSpacing: "0.06em", whiteSpace: "nowrap" }}>{k}</div>
+            <div style={{ fontSize: 9.5, color: "var(--text3)", letterSpacing: "0.06em", whiteSpace: "nowrap" }}>{k}</div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 11, fontWeight: 700, color: bx ? bc(bx) : "var(--text2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{v}</div>
           </div>
         ))}
@@ -5776,7 +5829,7 @@ function MqMbi({ mbi, dip, universe = "Nifty 500" }) {
         {strip.map(r => (
           <div key={r.d} title={`${mqFmtDate(r.d)} · ${r.color} (${sg(r.score) || 0})`} style={{ flex: 1, minWidth: 0, textAlign: "center" }}>
             <div style={{ height: 18, borderRadius: 4, background: MBI_COLOR[r.color], opacity: r.color === "NEUTRAL" ? 0.35 : 0.9 }} />
-            <div style={{ fontSize: 8, color: "var(--text3)", marginTop: 2, fontFamily: "var(--mono)", whiteSpace: "nowrap", overflow: "hidden" }}>{r.d.slice(8)}</div>
+            <div style={{ fontSize: 9.5, color: "var(--text3)", marginTop: 2, fontFamily: "var(--mono)", whiteSpace: "nowrap", overflow: "hidden" }}>{r.d.slice(8)}</div>
           </div>
         ))}
       </div>
@@ -5826,7 +5879,7 @@ function MqGreenLight({ gl }) {
         {[9, 15, 25].map(t => <div key={t} style={{ position: "absolute", left: `${(t / 40) * 100}%`, top: -2, bottom: -2, width: 1, background: "var(--text3)" }} />)}
         <div style={{ width: `${pct}%`, height: "100%", borderRadius: 4, background: col }} />
       </div>
-      <div style={{ position: "relative", height: 12, fontSize: 8, color: "var(--text3)", fontFamily: "var(--mono)", marginBottom: 8 }}>
+      <div style={{ position: "relative", height: 12, fontSize: 9.5, color: "var(--text3)", fontFamily: "var(--mono)", marginBottom: 8 }}>
         {[9, 15, 25].map(t => <span key={t} style={{ position: "absolute", left: `calc(${(t / 40) * 100}% - 6px)` }}>{t}</span>)}
       </div>
       {hist.length > 1 && (
@@ -6172,22 +6225,27 @@ function setupRecord(closed, mq, setup) {
 
 function PlaybookSetups({ trades, onOpenStock }) {
   const { data: mq } = useMarketQuadrant();
+  const [openSet, setOpenSet] = useState(null);
   const closed = trades.filter(t => t.status === "closed");
+  const order = Object.entries(PLAYBOOK_SETUPS).sort((a, b) => (mq?.scans?.[b[1].scan]?.length || 0) - (mq?.scans?.[a[1].scan]?.length || 0));
   return (
     <div>
-      {Object.entries(PLAYBOOK_SETUPS).map(([name, def]) => {
+      {order.map(([name, def]) => {
+        const isOpen = openSet === name;
         const live = mq?.scans?.[def.scan] || [];
         const rec = setupRecord(closed, mq, name);
         const edge = mq?.scan_stats?.[def.scan];
         return (
           <div key={name} className="card" style={{ marginBottom: 12 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-              <div style={{ fontFamily: "var(--display)", fontSize: 18 }}>{name}</div>
-              <span style={{ fontSize: 11, color: "var(--text3)" }}>{live.length ? `${live.length} today` : "none today"}</span>
-            </div>
-            <ul style={{ margin: "6px 0 8px 16px", padding: 0, fontSize: 12, color: "var(--text2)", lineHeight: 1.6 }}>
-              {def.rules.map(r => <li key={r}>{r}</li>)}
-            </ul>
+            <button onClick={() => setOpenSet(isOpen ? null : name)} aria-expanded={isOpen} style={{ display: "flex", width: "100%", justifyContent: "space-between", alignItems: "baseline", background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", minHeight: 36 }}>
+              <span style={{ fontFamily: "var(--display)", fontSize: 18 }}>{name}</span>
+              <span style={{ fontSize: 11, color: live.length ? C.pos : "var(--text3)" }}>{live.length ? `${live.length} today` : "none today"}{edge ? <span style={{ color: edge.excess >= 0.5 ? C.pos : edge.excess <= -0.5 ? C.neg : "var(--text3)" }}> · {edge.excess > 0 ? "+" : ""}{edge.excess}</span> : null} {isOpen ? "▴" : "▾"}</span>
+            </button>
+            {isOpen && (
+              <ul style={{ margin: "6px 0 8px 16px", padding: 0, fontSize: 12, color: "var(--text2)", lineHeight: 1.6 }}>
+                {def.rules.map(r => <li key={r}>{r}</li>)}
+              </ul>
+            )}
             {live.length > 0 && (
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
                 {live.slice(0, 6).map(x => (

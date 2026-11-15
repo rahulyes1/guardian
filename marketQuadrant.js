@@ -18,7 +18,7 @@ export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 let API_BASE = "";
 export function setApiBase(url) { API_BASE = String(url || "").replace(/\/+$/, ""); }
 
-const LOCAL_KEY       = "td_mq_v17";  // v16: accuracy fixes (universe-scaled green light, MBI infinities, listings)
+const LOCAL_KEY       = "td_mq_v18";  // v16: accuracy fixes (universe-scaled green light, MBI infinities, listings)
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
@@ -1240,17 +1240,34 @@ export function applyNseCloses(axis, aligned, bhav) {
   return v ? { ...v, appended, source: "NSE bhavcopy" } : null;
 }
 
+/**
+ * NSE warning flags for the result day: t4t = trade-for-trade series (BE/BZ: no intraday square-off,
+ * often on surveillance lists); uc = closed at the day's high on a 4.9%+ gain (likely an upper circuit —
+ * may not be buyable at the plan price). Only stocks in `syms`.
+ */
+export function nseFlags(bhav, syms) {
+  if (!bhav?.closes) return {};
+  const out = {};
+  for (const sym of syms) {
+    const b = bhav.closes[sym]; if (!b) continue;
+    const t4t = b.series === "BE" || b.series === "BZ";
+    const uc = b.high != null && b.close != null && b.prev > 0 && b.close >= b.high * 0.9995 && b.close / b.prev - 1 >= 0.049;
+    if (t4t || uc) out[sym] = { t4t: t4t || undefined, uc: uc || undefined, chg: uc ? Math.round((b.close / b.prev - 1) * 1000) / 10 : undefined };
+  }
+  return out;
+}
+
 async function fetchBhav() {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 12000);
-    const r = await fetch(API_BASE + "/api/nse?type=bhav&v=3", { signal: ctrl.signal }) /* v=2: response includes volume */;
+    const r = await fetch(API_BASE + "/api/nse?type=bhav&v=4", { signal: ctrl.signal }) /* v=4: + series, high */;
     clearTimeout(t);
     if (!r.ok) return null;
     const j = await r.json();
     if (!j?.date || !j.closes) return null;
     const closes = {};
-    for (const [s, v] of Object.entries(j.closes)) closes[s] = { prev: v[0], close: v[1], vol: v[2] ?? null, deliv: v[3] ?? null };
+    for (const [s, v] of Object.entries(j.closes)) closes[s] = { prev: v[0], close: v[1], vol: v[2] ?? null, deliv: v[3] ?? null, series: v[4] || "EQ", high: v[5] ?? null };
     return { date: j.date, closes };
   } catch (_) { return null; }
 }
@@ -1304,6 +1321,7 @@ async function computeFresh(onProgress) {
     result.deliv_of = {};
     for (const t of Object.keys(aligned)) { const sym = t.replace(/\.NS$/, ""); const dv = bhavData.closes[sym]?.deliv; if (dv != null) result.deliv_of[sym] = dv; }
   }
+  if (bhavData?.date === result.as_of) result.flags_of = nseFlags(bhavData, Object.keys(aligned).map(t => t.replace(/\.NS$/, "")));
   const idx = await indexPromise;
   result.signal_backtest = idx ? backtestSignal(result.history, idx) : null;
   return result;
@@ -1331,7 +1349,7 @@ export function upcomingResults(cal, sym, days = 7) {
 }
 
 // ─── wider universe: NSE Microcap 250 (loaded on demand, scans only) ─────────
-const MICRO_KEY = "td_mq_micro_v8"; // v8: + HTF, 21-EMA pullback, first 52w high
+const MICRO_KEY = "td_mq_micro_v9"; // v9: + trade-for-trade / upper-circuit flags
 let _microInflight = null;
 export async function loadMicrocapScans({ force = false } = {}) {
   if (!force) {
@@ -1358,7 +1376,8 @@ export async function loadMicrocapScans({ force = false } = {}) {
     if (verification) verification.volumes_filled = fillVolumesFromBhav(axis, vols, bhav);
     const r = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, vols, null, cal?.results || null,
       { rsBreaks: getLastMarketQuadrant()?.rs_breaks || null, microcap: true });
-    const data = { as_of: r.as_of, final: r.final, verification, total: r.total, scans: r.scans, leaders: r.leaders, sector_of: r.sector_of, rs_of: r.rs_of, grade_of: r.grade_of, plan_of: r.plan_of, q_of: r.q_of, scan_stats: r.scan_stats };
+    const data = { as_of: r.as_of, final: r.final, verification, total: r.total, scans: r.scans, leaders: r.leaders, sector_of: r.sector_of, rs_of: r.rs_of, grade_of: r.grade_of, plan_of: r.plan_of, q_of: r.q_of, scan_stats: r.scan_stats,
+      flags_of: bhav?.date === r.as_of ? nseFlags(bhav, Object.keys(aligned).map(t => t.replace(/\.NS$/, ""))) : {} };
     try { localStorage.setItem(MICRO_KEY, JSON.stringify({ data, savedAt: Date.now() })); } catch (_) {}
     return data;
   })().finally(() => { _microInflight = null; });

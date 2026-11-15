@@ -80,7 +80,7 @@ test("parses NSE's bhavcopy and keeps only equity series", () => {
   ].join("\n");
   const p = parseBhavFullCsv(csv);
   assert.equal(p.date, "2026-11-12");
-  assert.deepEqual(p.closes.RELIANCE, { prev: 1335.4, close: 1339.7, vol: 13807921, deliv: 53.29 });
+  assert.deepEqual(p.closes.RELIANCE, { prev: 1335.4, close: 1339.7, vol: 13807921, deliv: 53.29, series: "EQ", high: 1342.5, low: 1330.9 });
   assert.ok(p.closes["21STCENMGM"]);
   assert.equal(p.closes.SGBJUN28, undefined);
 });
@@ -240,4 +240,15 @@ test("missing volumes on the bhavcopy day are filled from NSE's traded quantity"
   assert.equal(n, 1);
   assert.deepEqual(vols["A.NS"], [100, 999]);
   assert.deepEqual(vols["B.NS"], [200, 250]); // existing Yahoo volume kept
+});
+
+test("NSE flags: BE/BZ series is trade-for-trade; a close at the high on +5% is a likely upper circuit", async () => {
+  const { nseFlags } = await import("../marketQuadrant.js");
+  const bhav = { date: "2026-11-13", closes: {
+    A: { prev: 100, close: 105, high: 105, series: "EQ" }, B: { prev: 100, close: 101, high: 103, series: "BE" },
+    C: { prev: 100, close: 104, high: 106, series: "EQ" } } };
+  const f = nseFlags(bhav, ["A", "B", "C", "D"]);
+  assert.equal(f.A.uc, true); assert.equal(f.A.chg, 5);
+  assert.equal(f.B.t4t, true);
+  assert.equal(f.C, undefined);
 });

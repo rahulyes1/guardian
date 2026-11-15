@@ -1,6 +1,6 @@
 // Vercel Node.js serverless function — official NSE data (source of truth)
 //   /api/nse?type=indices  latest ind_close_all file  → { date, indices: { "Nifty 50": {...}, "Nifty 500": {...} } }
-//   /api/nse?type=bhav     latest sec_bhavdata_full   → { date, closes: { SYMBOL: [prev, close, volume, delivery%] } }
+//   /api/nse?type=bhav     latest sec_bhavdata_full   → { date, closes: { SYMBOL: [prev, close, volume, delivery%, series ("" = EQ), high] } }
 //   /api/nse?type=live     NSE allIndices feed        → { date, time, indices: { "NIFTY 50": {...}, ... } }
 //   /api/nse?type=flows    FII/DII cash market activity (latest day)  → { date, fii: {buy,sell,net}, dii: {...} }  (₹ crore)
 //   /api/nse?type=deals    bulk + block deals (latest day)            → { date, deals: [{ sym, client, side, qty, price, kind }] }
@@ -77,7 +77,7 @@ export default async function handler(req, res) {
         (d) => `https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_${d}.csv`, parseBhavFullCsv, started);
       if (!parsed) return fail(502, "NSE bhavcopy unavailable", { tried });
       const closes = {};
-      for (const [s, v] of Object.entries(parsed.closes)) closes[s] = [v.prev, v.close, v.vol, v.deliv];
+      for (const [s, v] of Object.entries(parsed.closes)) closes[s] = [v.prev, v.close, v.vol, v.deliv, v.series === "EQ" ? "" : v.series, v.high];
       res.setHeader("Cache-Control", `public, max-age=300, s-maxage=${cacheFor(parsed.date)}`);
       return res.json({ source: "nse-sec_bhavdata_full", date: parsed.date, closes });
     }
