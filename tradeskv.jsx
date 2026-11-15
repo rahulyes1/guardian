@@ -1610,6 +1610,7 @@ function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillS
         </div>
         <PriceBadge info={symbolInfo} loading={fetchingSym} />
         <ResultsWarning symbol={symbol && symbol.length >= 2 ? symbol : null} style={{ marginTop: 8 }} />
+        <CalcStandDown />
       </div>
 
       {/* Risk % Selector */}
@@ -3211,7 +3212,7 @@ function MarketQuadrantPage({ onPickStock }) {
       <MqFollowThrough data={data} />
       <MqMarketMonitor mm={data.market_monitor} />
       <MqGreenLight gl={data.green_light} />
-      <MqMbi mbi={data.mbi} />
+      <MqMbi mbi={data.mbi} dip={data.dip} />
 
       <MqVerificationBadge data={data} />
 
@@ -3613,6 +3614,7 @@ function MarketBrief({ onOpenQuad, onOpenScan }) {
             {m && <>MBI <b style={{ color: MBI_COLOR[m.color] }}>{m.color.toLowerCase()} day</b></>}
             {m && g?.band ? " · " : ""}
             {g?.band && <>Green light <b style={{ color: GL_COLOR[g.band] }}>{g.em} → {GL_TEXT[g.band].toLowerCase()}</b></>}
+            {d.dip?.today && <> · <b style={{ color: C.pos }}>pullback window</b></>}
           </div>
         );
       })()}
@@ -3748,6 +3750,7 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
           <button key={x.id} onClick={() => pick(x.id)} className="chip" aria-pressed={!isWatch && x.id === def.id}
             style={!isWatch && x.id === def.id ? { borderColor: "var(--text)", color: "var(--text)", whiteSpace: "nowrap" } : { whiteSpace: "nowrap" }}>
             {x.label} <span style={{ fontFamily: "var(--mono)", opacity: 0.7 }}>{totals[x.id] ?? 0}</span>
+            {data.scan_stats?.[x.id]?.recent?.excess >= 0.5 && <span title="Beat the average stock over the last 3 months" style={{ color: C.pos, marginLeft: 3 }}>✓</span>}
           </button>
         ))}
       </div>
@@ -3816,6 +3819,16 @@ function RsBadge({ rs, grade }) {
 /** One line telling how a scan did historically (10 sessions after each signal). */
 function ScanEdge({ st }) {
   if (!st) return null;
+  const sub = (x) => (x ? <>{x.hit}% higher · <span style={{ color: x.excess >= 0.5 ? C.pos : x.excess <= -0.5 ? C.neg : "var(--text2)", fontWeight: 700 }}>{x.excess > 0 ? "+" : ""}{x.excess} vs average</span> ({x.signals.toLocaleString("en-IN")})</> : "—");
+  const extra = (st.recent || st.gated) && (
+    <div style={{ fontSize: 10.5, color: "var(--text3)", margin: "-6px 0 10px", lineHeight: 1.5 }}>
+      {st.recent && <div>Last 3 months: {sub(st.recent)}{st.recent.excess >= 0.5 ? " — working now" : st.recent.excess <= -0.5 ? " — not working lately" : ""}</div>}
+      {st.gated && <div>Quality gate passes only: {sub(st.gated)}{st.gated.excess - st.excess >= 0.3 ? " — the gate helped" : st.gated.excess - st.excess <= -0.3 ? " — the gate hurt" : ""}</div>}
+    </div>
+  );
+  return <><ScanEdgeMain st={st} />{extra}</>;
+}
+function ScanEdgeMain({ st }) {
   const tone = st.excess >= 0.5 ? C.pos : st.excess <= -0.5 ? C.neg : "var(--text3)";
   const verdict = st.excess >= 0.5 ? "beat the average stock" : st.excess <= -0.5 ? "lagged the average stock" : "no clear edge";
   return (
@@ -3836,7 +3849,7 @@ const IDX_TICKER = "^CRSLDX"; // Nifty 500
 
 async function fetchStockDetail(sym) {
   const tk = `${sym}.NS`;
-  const url = `/api/spark?symbols=${encodeURIComponent(`${tk},${IDX_TICKER}`)}&range=2y&interval=1d&vol=260`;
+  const url = `/api/spark?symbols=${encodeURIComponent(`${tk},${IDX_TICKER}`)}&range=2y&interval=1d&vol=260&ohlc=260`;
   const [sparkRes, bhavRes] = await Promise.all([
     fetch(url).then(r => (r.ok ? r.json() : null)).catch(() => null),
     fetch("/api/nse?type=bhav&v=3").then(r => (r.ok ? r.json() : null)).catch(() => null),
@@ -3846,21 +3859,22 @@ async function fetchStockDetail(sym) {
   if (!s) throw new Error(`No price history for ${sym}`);
   const toDays = (it) => {
     const r = it.response[0], ts = r.timestamp, cl = r.indicators.quote[0].close;
-    const off = ts.length - (it.volTail || []).length;
+    const off = ts.length - (it.volTail || []).length, offO = ts.length - (it.ohlcTail || []).length;
     const rows = {};
-    ts.forEach((t, i) => { if (cl[i] != null) rows[istDayKey(t)] = { c: cl[i], v: i >= off ? it.volTail[i - off] : null }; });
+    ts.forEach((t, i) => { if (cl[i] != null) rows[istDayKey(t)] = { c: cl[i], v: i >= off ? it.volTail[i - off] : null, o: i >= offO ? it.ohlcTail[i - offO] : null }; });
     return rows;
   };
   const sd = toDays(s), id = ix ? toDays(ix) : {};
   const dates = Object.keys(sd).sort();
   const closes = dates.map(d => sd[d].c), vols = dates.map(d => sd[d].v);
+  const opens = dates.map(d => sd[d].o?.[0] ?? null), highs = dates.map(d => sd[d].o?.[1] ?? null), lows = dates.map(d => sd[d].o?.[2] ?? null);
 
   // Verify / correct the latest closes against NSE's official bhavcopy
   let verified = null;
   const b = bhavRes?.closes?.[sym];
   if (b && bhavRes.date) {
     let i = dates.indexOf(bhavRes.date);
-    if (i < 0 && bhavRes.date > dates[dates.length - 1]) { dates.push(bhavRes.date); closes.push(b[1]); vols.push(null); i = dates.length - 1; }
+    if (i < 0 && bhavRes.date > dates[dates.length - 1]) { dates.push(bhavRes.date); closes.push(b[1]); vols.push(null); opens.push(null); highs.push(null); lows.push(null); i = dates.length - 1; }
     if (i >= 0) {
       const fix = (k, official) => { if (k >= 0 && official != null && Math.abs(closes[k] / official - 1) > 0.001) { closes[k] = official; return true; } return false; };
       const c1 = fix(i, b[1]), c2 = fix(i - 1, b[0]);
@@ -3870,17 +3884,45 @@ async function fetchStockDetail(sym) {
   const idx = dates.map(d => id[d]?.c ?? null);
   const delivery = b && b[3] != null && bhavRes?.date ? { pct: b[3], date: bhavRes.date } : null;
   return {
-    sym, dates, closes, vols, idx, verified, delivery,
+    sym, dates, closes, vols, idx, verified, delivery, opens, highs, lows,
     s10: smaSeries(closes, 10, 8), s50: smaSeries(closes, 50, 40), s200: smaSeries(closes, 200, 150),
   };
 }
 
-function StockChart({ d, from, series = STOCK_SERIES, marks = [] }) {
+/** True-range stats from open/high/low/close (null when the bars aren't there). */
+function rangeStats(d, i = d.closes.length - 1) {
+  if (!d.highs) return null;
+  const tr = [], adr = [];
+  for (let k = Math.max(1, i - 19); k <= i; k++) {
+    const h = d.highs[k], l = d.lows[k], pc = d.closes[k - 1];
+    if (h == null || l == null || pc == null || l <= 0) continue;
+    tr.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)) / pc); adr.push(h / l - 1);
+  }
+  if (tr.length < 10) return null;
+  const atr14 = tr.slice(-14).reduce((a, b) => a + b, 0) / Math.min(14, tr.length);
+  return { atr: atr14 * 100, adr: (adr.reduce((a, b) => a + b, 0) / adr.length) * 100 };
+}
+/** Inside bars and the lowest-volume bar of the last 20 sessions (Stocksgeeks' LVC idea). */
+function candleMarks(d) {
+  const n = d.closes.length, out = { inside: new Set(), lvc: null };
+  if (!d.highs) return out;
+  for (let i = Math.max(1, n - 60); i < n; i++) {
+    const h = d.highs[i], l = d.lows[i], ph = d.highs[i - 1], pl = d.lows[i - 1];
+    if (h != null && l != null && ph != null && pl != null && h <= ph && l >= pl) out.inside.add(i);
+  }
+  let best = null; for (let i = Math.max(0, n - 20); i < n; i++) if (d.vols[i] != null && (best == null || d.vols[i] < d.vols[best])) best = i;
+  out.lvc = best;
+  return out;
+}
+
+function StockChart({ d, from, series = STOCK_SERIES, marks = [], candles = false }) {
   const [hover, setHover] = useState(null);
   const n = d.dates.length, start = Math.max(0, n - from);
   const idx = Array.from({ length: n - start }, (_, k) => start + k);
   const W = 340, H = 150, VH = 34, padL = 4, padR = 40, padT = 6;
-  const vals = idx.flatMap(i => [d.closes[i], d.s10[i], d.s50[i], d.s200[i]]).filter(v => v != null);
+  const showCandles = candles && !!d.highs;
+  const cm = showCandles ? candleMarks(d) : { inside: new Set(), lvc: null };
+  const vals = idx.flatMap(i => [d.closes[i], d.s10[i], d.s50[i], d.s200[i], ...(showCandles ? [d.highs[i], d.lows[i]] : [])]).filter(v => v != null);
   const lo = Math.min(...vals), hi = Math.max(...vals), span = hi - lo || 1;
   const x = (k) => padL + (k / Math.max(1, idx.length - 1)) * (W - padL - padR);
   const y = (v) => padT + (1 - (v - lo) / span) * (H - padT - 4);
@@ -3908,7 +3950,22 @@ function StockChart({ d, from, series = STOCK_SERIES, marks = [] }) {
           </g>
         ))}
         {series.map(s => <path key={s.key} d={path(d[s.key])} fill="none" stroke={s.color} strokeWidth="1.4" />)}
-        <path d={path(d.closes)} fill="none" stroke="var(--text)" strokeWidth="1.8" strokeLinejoin="round" />
+        {!showCandles && <path d={path(d.closes)} fill="none" stroke="var(--text)" strokeWidth="1.8" strokeLinejoin="round" />}
+        {showCandles && idx.map((i, k) => {
+          const o = d.opens[i], h = d.highs[i], l = d.lows[i], c = d.closes[i];
+          if (c == null) return null;
+          if (o == null || h == null || l == null) return <circle key={i} cx={x(k)} cy={y(c)} r="1" fill="var(--text2)" />;
+          const hh = Math.max(h, o, c), ll = Math.min(l, o, c), up = c >= o, bw = Math.max(1, (W - padL - padR) / idx.length * 0.65);
+          const col = up ? C.pos : C.neg;
+          return (
+            <g key={i}>
+              <line x1={x(k)} x2={x(k)} y1={y(hh)} y2={y(ll)} stroke={col} strokeWidth="1" />
+              <rect x={x(k) - bw / 2} width={bw} y={y(Math.max(o, c))} height={Math.max(0.8, Math.abs(y(o) - y(c)))} fill={up ? "var(--bg2)" : col} stroke={col} strokeWidth="1" />
+              {cm.inside.has(i) && <circle cx={x(k)} cy={y(hh) - 4} r="1.8" fill={C.warn}><title>{`Inside bar ${mqFmtDate(d.dates[i])}`}</title></circle>}
+              {cm.lvc === i && <text x={x(k)} y={y(ll) + 10} fontSize="7" textAnchor="middle" fill={C.lime} fontFamily="var(--mono)">LV<title>{`Lowest volume of the last 20 sessions (${mqFmtDate(d.dates[i])}) — a quiet bar to buy above`}</title></text>}
+            </g>
+          );
+        })}
         {idx.map((i, k) => d.vols[i] ? (
           <rect key={i} x={x(k) - 0.6} width="1.2" y={H + 6 + VH - (d.vols[i] / maxV) * VH} height={(d.vols[i] / maxV) * VH}
             fill={d.closes[i] >= (d.closes[i - 1] ?? d.closes[i]) ? C.pos : C.neg} opacity="0.55" />
@@ -3933,11 +3990,46 @@ function StockChart({ d, from, series = STOCK_SERIES, marks = [] }) {
         <div style={{ position: "absolute", top: 0, left: `${(x(hover) / W) * 100}%`, transform: x(hover) / W > 0.55 ? "translateX(calc(-100% - 8px))" : "translateX(8px)",
           background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 8px", fontSize: 11, fontFamily: "var(--mono)", pointerEvents: "none", whiteSpace: "nowrap", zIndex: 2 }}>
           <div style={{ color: "var(--text3)" }}>{mqFmtDate(d.dates[hi_])}</div>
-          <div>₹{d.closes[hi_].toFixed(2)}</div>
+          {showCandles && d.highs[hi_] != null
+            ? <div>O {d.opens[hi_]} H {d.highs[hi_]} L {d.lows[hi_]} C {d.closes[hi_].toFixed(2)}</div>
+            : <div>₹{d.closes[hi_].toFixed(2)}</div>}
           {series.map(s => d[s.key][hi_] != null && <div key={s.key} style={{ color: "var(--text2)" }}><span style={{ display: "inline-block", width: 8, height: 2, background: s.color, marginRight: 5, verticalAlign: "middle" }} />{s.label} {d[s.key][hi_].toFixed(1)}</div>)}
           {d.vols[hi_] != null && <div style={{ color: "var(--text3)" }}>Vol {(d.vols[hi_] / 1e5).toFixed(1)}L</div>}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Stocksgeeks-style table: true ATR / ADR, turnover and volume vs average. */
+function StockStats({ d, q }) {
+  const n = d.closes.length - 1, rs = rangeStats(d);
+  const avg = (arr, a, b) => { const xs = []; for (let k = a; k <= b; k++) if (k >= 0 && arr[k] != null) xs.push(arr[k]); return xs.length ? xs.reduce((x, y) => x + y, 0) / xs.length : null; };
+  const to = []; for (let k = 0; k <= n; k++) to.push(d.vols[k] != null && d.closes[k] != null ? (d.vols[k] * d.closes[k]) / 1e7 : null);
+  const to20 = avg(to, n - 19, n), to50 = avg(to, n - 49, n), v50 = avg(d.vols, n - 50, n - 1);
+  const vx = d.vols[n] != null && v50 ? d.vols[n] / v50 : null;
+  const cr = (v) => (v == null ? "—" : `₹${v >= 100 ? Math.round(v).toLocaleString("en-IN") : v.toFixed(1)} cr`);
+  const cells = [
+    ["ATR (14)", rs ? `${rs.atr.toFixed(1)}%` : q?.move != null ? `~${q.move}%` : "—", rs ? (rs.atr >= 2.65 ? C.pos : "var(--text)") : "var(--text3)"],
+    ["ADR (20)", rs ? `${rs.adr.toFixed(1)}%` : "—", "var(--text)"],
+    ["TURNOVER 20D", cr(to20), to20 != null && to20 >= 10 ? C.pos : to20 != null && to20 < 3 ? C.neg : "var(--text)"],
+    ["VS 50D", to20 != null && to50 ? `${(to20 / to50).toFixed(1)}×` : "—", "var(--text)"],
+    ["VOL TODAY", vx != null ? `${vx.toFixed(1)}×` : "—", vx != null && vx >= 1.5 ? C.pos : "var(--text)"],
+  ];
+  return (
+    <div style={{ marginTop: 10, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 6 }}>
+        {cells.map(([k, v, c]) => (
+          <div key={k} style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 8, color: "var(--text3)", letterSpacing: "0.08em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{k}</div>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 12, fontWeight: 700, color: c, whiteSpace: "nowrap" }}>{v}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 4 }}>
+        {q?.pass === false ? "Below the quality gate (₹10 cr turnover, 1.8%+ average move) — slippage and slow moves likely." : q?.pass ? "Passes the quality gate." : ""}
+        {!rs ? " Range stats need intraday highs/lows, unavailable for this stock." : ""}
+      </div>
     </div>
   );
 }
@@ -3967,6 +4059,8 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [
   const [err, setErr] = useState(null);
   const [range, setRange] = useState(250);
   const [weekly, setWeekly] = useState(false);
+  const [candles, setCandles] = useState(() => { try { return localStorage.getItem("td_candles") === "1"; } catch (_) { return false; } });
+  const pickCandles = (v) => { setCandles(v); try { localStorage.setItem("td_candles", v ? "1" : "0"); } catch (_) {} if (v && range > 126) setRange(126); };
   useEffect(() => {
     let alive = true;
     setD(null); setErr(null);
@@ -4046,6 +4140,9 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [
               style={range === n ? { borderColor: "var(--text)", color: "var(--text)" } : {}}>{l}</button>
           ))}
           <span style={{ flex: 1 }} />
+          {!weekly && d.highs && (
+            <button className="chip" onClick={() => pickCandles(!candles)} aria-pressed={candles} style={candles ? { borderColor: "var(--text)", color: "var(--text)" } : {}}>Candles</button>
+          )}
           {[[false, "Daily"], [true, "Weekly"]].map(([v, l]) => (
             <button key={l} className="chip" onClick={() => { setWeekly(v); setRange(v ? 104 : 250); }} aria-pressed={weekly === v}
               style={weekly === v ? { borderColor: "var(--text)", color: "var(--text)" } : {}}>{l}</button>
@@ -4055,7 +4152,13 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [
           <span><span style={{ display: "inline-block", width: 10, height: 2, background: "var(--text)", marginRight: 4, verticalAlign: "middle" }} />Price</span>
           {(weekly ? WEEKLY_SERIES : STOCK_SERIES).map(s => <span key={s.key}><span style={{ display: "inline-block", width: 10, height: 2, background: s.color, marginRight: 4, verticalAlign: "middle" }} />{s.label}</span>)}
         </div>
-        <StockChart d={weekly ? wk : d} from={range} series={weekly ? WEEKLY_SERIES : STOCK_SERIES} marks={marks} />
+        <StockChart d={weekly ? wk : d} from={range} series={weekly ? WEEKLY_SERIES : STOCK_SERIES} marks={marks} candles={candles && !weekly} />
+        {candles && !weekly && d.highs && (
+          <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 4 }}>
+            <span style={{ color: C.warn }}>●</span> inside bar (range inside the day before) · <span style={{ color: C.lime, fontFamily: "var(--mono)" }}>LV</span> lowest-volume bar of the last 20 sessions — quiet bars are low-risk places to buy above, stop under their low.
+          </div>
+        )}
+        <StockStats d={d} q={mq?.q_of?.[symbol]} />
         {myTrades.length > 0 && (
           <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 8, borderTop: "1px solid var(--border)", paddingTop: 6 }}>
             <div style={{ color: "var(--text3)", marginBottom: 3 }}>Your trades in {symbol} <span style={{ color: C.pos }}>▲ buy</span> <span style={{ color: C.neg }}>▼ sell</span></div>
@@ -4382,7 +4485,10 @@ function suggestedRisk(d) {
   let pct = env === "EASY MONEY" ? 1 : env === "HARD MONEY" ? 0.5 : 0;
   const why = [env === "EASY MONEY" ? "Easy money" : env === "HARD MONEY" ? "Hard money" : "No money"];
   if (d.overall === "CASH") { pct = 0; why.push("signal CASH"); }
-  if (pct > 0 && d.green_light?.mult != null) { if (d.green_light.mult < 1) { pct *= d.green_light.mult; why.push(`green light ${d.green_light.em} (${d.green_light.mult}×)`); } }
+  if (pct > 0 && d.green_light?.mult != null) {
+    if (d.green_light.mult === 0) { pct = 0; why.push(`green light ${d.green_light.em} — below 9, stand down`); }
+    else if (d.green_light.mult < 1) { pct *= d.green_light.mult; why.push(`green light ${d.green_light.em} (${d.green_light.mult}×)`); }
+  }
   else if (pct > 0 && d.follow_through?.label === "WEAK") { pct /= 2; why.push("follow-through weak"); }
   if (pct > 0 && d.lows_ok === false) { pct /= 2; why.push(`${d.new_lows} at 52w lows`); }
   const heatCap = env === "EASY MONEY" ? 6 : env === "HARD MONEY" ? 3 : 0;
@@ -4438,7 +4544,11 @@ async function stockTrend(sym) {
   const p = fetchStockDetail(sym).then(d => {
     const i = d.closes.length - 1;
     const s20 = smaSeries(d.closes, 20, 15);
-    return { close: d.closes[i], s10: d.s10[i], s20: s20[i], s50: d.s50[i], s200: d.s200[i], date: d.dates[i] };
+    const rs = rangeStats(d, i);
+    const atrAbs = rs ? (rs.atr / 100) * d.closes[i - 1 >= 0 ? i - 1 : i] : null;
+    const low10 = Math.min(...(d.lows || []).slice(-10).filter(v => v != null), Infinity);
+    return { close: d.closes[i], s10: d.s10[i], s20: s20[i], s50: d.s50[i], s200: d.s200[i], date: d.dates[i],
+      atr: atrAbs, ext: atrAbs && d.s10[i] != null ? (d.closes[i] - d.s10[i]) / atrAbs : null, low10: Number.isFinite(low10) ? low10 : null };
   }).catch(() => null);
   _trendCache.set(key, p);
   return p;
@@ -4466,8 +4576,16 @@ function positionHealth(t, trend, mq, livePrice) {
   const days = calcDaysHeld(t);
   const st = getDaysHeldStatus(t.setupType, days);
   if (/Decision needed/.test(st.label)) bump(1, `Day ${days}: past the time limit for a ${t.setupType}`);
-  const label = ["HOLD", "TIGHTEN STOP", "EXIT"][level];
-  return { level, label, color: [C.pos, C.warn, C.neg][level], reasons: reasons.sort((a, b) => b.l - a.l).map(r => r.why) };
+  // Selling into strength: far above the 10-day average in ATRs → trim; trail the stop under the 10-day low
+  let trim = false;
+  if (trend?.ext != null && trend.ext >= 3 && level < 2) { trim = true; reasons.push({ l: 0.5, why: `${trend.ext.toFixed(1)} ATR above its 10-day average — extended; consider selling ⅓ into strength` }); }
+  const entry = t.avgEntry || t.entry, r0 = entry && t.stop ? entry - t.stop : null;
+  if (level < 2 && trend?.low10 != null && stop && trend.close > entry && r0 > 0 && trend.close - entry >= 2 * r0) {
+    const trail = +(trend.low10 * 0.995).toFixed(2);
+    if (trail > stop) reasons.push({ l: 0.4, why: `Up ${((trend.close - entry) / r0).toFixed(1)}R — trail the stop to ₹${trail} (under the 10-day low)` });
+  }
+  const label = level === 0 && trim ? "TRIM" : ["HOLD", "TIGHTEN STOP", "EXIT"][level];
+  return { level, trim, label, color: level === 0 && trim ? C.lime : [C.pos, C.warn, C.neg][level], reasons: reasons.sort((a, b) => b.l - a.l).map(r => r.why) };
 }
 
 function PositionHealth({ trade, livePrice }) {
@@ -5347,12 +5465,15 @@ function sizeFor(plan, portfolio, riskPct) {
 
 function IdeaRow({ x, portfolio, riskPct, onOpen, onPlan, compact }) {
   const size = sizeFor(x.plan, portfolio, riskPct);
+  const cal = useResultsCal();
+  const res = cal ? upcomingResults(cal, x.sym, 10) : null;
   return (
     <div style={{ padding: "9px 0", borderTop: "1px solid var(--border)" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <button onClick={() => onOpen?.(x.sym)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", fontFamily: "var(--display)", fontWeight: 700, fontSize: 14, textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{x.sym}</button>
         <RsBadge rs={x.rs} grade={x.grade} />
         {x.micro && <span style={{ fontSize: 9, color: "var(--text3)", border: "1px solid var(--border)", borderRadius: 6, padding: "0 4px" }}>micro</span>}
+        {res && <span title={`Results ${mqFmtDate(res.date)} — a gap can jump the stop`} style={{ fontSize: 9, fontWeight: 700, color: C.warn, border: `1px solid ${C.warn}66`, borderRadius: 6, padding: "0 4px" }}>📅 {res.inDays === 0 ? "results today" : `results ${res.inDays}d`}</span>}
         <span style={{ flex: 1 }} />
         {x.plan && <button className="chip" style={{ fontSize: 10, padding: "3px 10px" }} onClick={() => onPlan?.({ symbol: x.sym, entry: x.plan.entry, stop: x.plan.stop })}>Plan</button>}
       </div>
@@ -5401,6 +5522,7 @@ function IdeasPage({ watchlist, portfolio, onOpenStock, onPlan }) {
       {head}
       <div className="card" style={{ marginBottom: 12, padding: "10px 14px" }}>
         <div style={{ fontSize: 12, color: "var(--text)" }}>{briefRule(data)}</div>
+        <StandDownNote d={data} style={{ marginTop: 6 }} />
         <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 4 }}>
           Sizes use {s?.pct ?? 0}% risk per trade ({s?.why || "—"}) on {formatINR(portfolio)}. Based on {mqFmtDate(data.as_of)} closes{data.verification?.date === data.as_of ? " ✓ NSE" : ""}.
         </div>
@@ -5437,7 +5559,8 @@ function BestSetups({ watchlist, portfolio, onOpenStock, onPlan, onSeeAll }) {
         <div className="label">Today's best setups</div>
         <button className="chip" style={{ fontSize: 10 }} onClick={onSeeAll}>All ideas ›</button>
       </div>
-      {s?.pct === 0 && <div style={{ fontSize: 11, color: C.warn, margin: "4px 0" }}>Market rules say no new entries today — watch only.</div>}
+      {data.green_light?.band === "SMALL" ? <StandDownNote d={data} style={{ margin: "6px 0" }} />
+        : s?.pct === 0 && <div style={{ fontSize: 11, color: C.warn, margin: "4px 0" }}>Market rules say no new entries today ({s.why}) — watch only.</div>}
       {top.map(x => <IdeaRow key={x.sym} x={x} portfolio={portfolio} riskPct={s?.pct ?? 0} onOpen={onOpenStock} onPlan={onPlan} />)}
     </div>
   );
@@ -5506,7 +5629,30 @@ function PreTradeChecklist({ setup, ticked, onToggle }) {
 const SG_LINK = "https://thestocksgeeks.com/";
 const MBI_COLOR = { GREEN: C.pos, RED: C.neg, NEUTRAL: C.muted };
 const GL_COLOR = { FULL: C.pos, NORMAL: C.lime, HALF: C.warn, SMALL: C.neg };
-const GL_TEXT = { FULL: "Full size", NORMAL: "Normal size (¾)", HALF: "Half size", SMALL: "Small size (¼)" };
+const GL_TEXT = { FULL: "Full size", NORMAL: "Normal size (¾)", HALF: "Half size", SMALL: "Stand down · watch only" };
+/** Shown wherever a new trade can be planned when the green light says stand down. */
+function StandDownNote({ d, style }) {
+  const g = d?.green_light;
+  if (g?.band !== "SMALL") return null;
+  return (
+    <div style={{ fontSize: 11, color: C.neg, border: `1px solid ${C.neg}55`, background: `${C.neg}10`, borderRadius: 8, padding: "6px 9px", lineHeight: 1.45, ...style }}>
+      ⛔ Stand down: green light {g.em} is below 9 — recent breakouts are failing. Since {mqFmtDate(g.from)} the average stock fell {g.bt?.SMALL ? `${g.bt.SMALL.fwd}% over the next 10 sessions (${g.bt.SMALL.up}% up)` : "on such days"}. Watch, don't buy.
+    </div>
+  );
+}
+function CalcStandDown() {
+  const [d, setD] = useState(() => getLastMarketQuadrant());
+  useEffect(() => { let alive = true; loadMarketQuadrant({ allowCompute: false }).then(x => alive && x && setD(x)).catch(() => {}); return () => { alive = false; }; }, []);
+  return <StandDownNote d={d} style={{ marginTop: 8 }} />;
+}
+// Results calendar shared by list rows (one fetch)
+let _calP = null;
+function useResultsCal() {
+  const [cal, setCal] = useState(null);
+  useEffect(() => { let alive = true; (_calP ||= fetchResultsCalendar()).then(c => alive && setCal(c)); return () => { alive = false; }; }, []);
+  return cal;
+}
+
 /** Quality gate for a scan row: tight / coiling setups are quiet by design, so only liquidity applies to them. */
 function qualityOk(q, quiet) {
   if (!q) return true; // no volume data → can't judge, keep it
@@ -5526,7 +5672,7 @@ function BtLine({ items }) {
   ));
 }
 
-function MqMbi({ mbi, universe = "Nifty 500" }) {
+function MqMbi({ mbi, dip, universe = "Nifty 500" }) {
   if (!mbi?.rows?.length) return null;
   const rows = mbi.rows, last = rows[rows.length - 1], T = mbi.thresholds;
   const strip = rows.slice(-10);
@@ -5574,6 +5720,14 @@ function MqMbi({ mbi, universe = "Nifty 500" }) {
         Since {mqFmtDate(b.from)}, average stock over the next {b.horizon || 10} sessions after a — <BtLine items={[["green day", b.green], ["neutral", b.neutral], ["red day", b.red]]} />.
         {contrarian ? " On this data green days came after rallies and did worse than red days — read it as a thermometer, not a buy signal." : ""}
       </div>
+      {dip?.bt && (
+        <div style={{ fontSize: 11, marginTop: 8, padding: "6px 9px", borderRadius: 8, border: `1px solid ${dip.today ? C.pos : "var(--border)"}`, background: dip.today ? `${C.pos}12` : "transparent", color: "var(--text2)", lineHeight: 1.45 }}>
+          <b style={{ color: dip.today ? C.pos : "var(--text2)" }}>{dip.today ? "● Pullback window today" : "Pullback window"}</b> — a red MBI day while the long-term Bias is still BULL.
+          {" "}Past {dip.bt.days} such days: average stock <b>{dip.bt.fwd > 0 ? "+" : ""}{dip.bt.fwd}%</b> over the next {dip.horizon} sessions, {dip.bt.up}% higher
+          {dip.other ? <> (other days {dip.other.fwd > 0 ? "+" : ""}{dip.other.fwd}%, {dip.other.up}% higher)</> : null}. A modest edge — good for adding to leaders on weakness, not for chasing.
+          {!dip.today && dip.recent?.length > 0 && <span style={{ color: "var(--text3)" }}> Last seen {mqFmtDate(dip.recent[dip.recent.length - 1])}.</span>}
+        </div>
+      )}
       <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>
         Rules from <a href={SG_LINK} target="_blank" rel="noreferrer" style={{ color: "var(--text2)" }}>thestocksgeeks.com</a> (Umang); numbers are ours, so they differ from his sheet's universe.
       </div>
@@ -5592,10 +5746,10 @@ function MqGreenLight({ gl }) {
     <div style={mqCardStyle}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
         <div style={{ ...mqHeadStyle, marginBottom: 4 }}>GREEN LIGHT</div>
-        <span style={{ fontSize: 12, fontWeight: 800, color: col }}>{GL_TEXT[gl.band]} · {gl.mult}×</span>
+        <span style={{ fontSize: 12, fontWeight: 800, color: col }}>{GL_TEXT[gl.band]}{gl.mult ? ` · ${gl.mult}×` : ""}</span>
       </div>
       <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8, lineHeight: 1.45 }}>
-        Are breakouts paying? Our follow-through reading put on Stocksgeeks' EM scale: below 9 is poor, 15+ is fine, 25+ is a strong tape. It sets the risk multiplier used for sizing across the app.
+        Are breakouts paying? Our follow-through reading put on Stocksgeeks' EM scale: below 9 is poor (the app stands down: no new entries), 15+ is fine, 25+ is a strong tape. It sets the risk multiplier used for sizing across the app.
       </div>
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 6 }}>
         <span style={{ fontFamily: "var(--display)", fontSize: 30, color: col, lineHeight: 1 }}>{gl.em}</span>

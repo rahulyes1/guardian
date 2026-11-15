@@ -24,7 +24,7 @@ const YF_HEADERS = {
   Origin: "https://finance.yahoo.com",
 };
 
-async function fetchOne(symbol, range, interval, volTail = 0) {
+async function fetchOne(symbol, range, interval, volTail = 0, ohlcTail = 0) {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT);
@@ -44,6 +44,15 @@ async function fetchOne(symbol, range, interval, volTail = 0) {
       const vols = result?.indicators?.quote?.[0]?.volume;
       if (Array.isArray(vols)) out.volTail = vols.slice(-volTail).map((v) => (v == null ? null : Math.round(v)));
     }
+    // Optional: [open, high, low] for the last `ohlcTail` bars (candles, true range)
+    if (ohlcTail > 0) {
+      const q = result?.indicators?.quote?.[0] || {};
+      const r2 = (v) => (v == null ? null : Math.round(v * 100) / 100);
+      if (Array.isArray(q.open) && Array.isArray(q.high) && Array.isArray(q.low)) {
+        const n0 = Math.max(0, timestamp.length - ohlcTail);
+        out.ohlcTail = timestamp.slice(n0).map((_, k) => [r2(q.open[n0 + k]), r2(q.high[n0 + k]), r2(q.low[n0 + k])]);
+      }
+    }
     return out;
   } catch {
     return null;
@@ -57,6 +66,7 @@ export default async function handler(req, res) {
 
   const { symbols } = req.query;
   const volTail = Math.max(0, Math.min(260, parseInt(req.query.vol, 10) || 0)); // ?vol=N → last N volumes
+  const ohlcTail = Math.max(0, Math.min(260, parseInt(req.query.ohlc, 10) || 0)); // ?ohlc=N → last N [open, high, low]
   const range = ALLOWED_RANGES.has(req.query.range) ? req.query.range : "2y";
   const interval = ALLOWED_INTERVALS.has(req.query.interval) ? req.query.interval : "1d";
 
@@ -79,7 +89,7 @@ export default async function handler(req, res) {
   const worker = async () => {
     while (next < symbolList.length && Date.now() - started < DEADLINE) {
       const i = next++;
-      results[i] = await fetchOne(symbolList[i], range, interval, volTail);
+      results[i] = await fetchOne(symbolList[i], range, interval, volTail, ohlcTail);
     }
   };
 

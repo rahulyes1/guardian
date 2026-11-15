@@ -18,7 +18,7 @@ export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 let API_BASE = "";
 export function setApiBase(url) { API_BASE = String(url || "").replace(/\/+$/, ""); }
 
-const LOCAL_KEY       = "td_mq_v14";  // v14: MBI breadth, green light, fund flow, quality gate, IPO lifecycle
+const LOCAL_KEY       = "td_mq_v15";  // v15: + pullback window, stand-down, recent / gated scan records
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
@@ -93,7 +93,7 @@ export function configureSharedStore(getClient) { sharedClientGetter = getClient
 
 function looksValid(d) {
   return d && MQ_SIGNALS.includes(d.overall) && Array.isArray(d.history) && typeof d.total === "number" && d.total >= 400
-    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d && Array.isArray(d.scans.ep) && d.rs_of && d.scan_stats && d.plan_of && d.market_monitor && Array.isArray(d.scans.coil) && d.mbi && d.green_light !== undefined && Array.isArray(d.scans.fundflow) && d.q_of;
+    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d && Array.isArray(d.scans.ep) && d.rs_of && d.scan_stats && d.plan_of && d.market_monitor && Array.isArray(d.scans.coil) && d.mbi && d.green_light !== undefined && Array.isArray(d.scans.fundflow) && d.q_of && d.dip !== undefined;
 }
 async function readShared() {
   const sb = sharedClientGetter?.();
@@ -282,10 +282,26 @@ export function tradePlan(closes, i = closes.length - 1) {
  * which stocks qualified, and how did they do over the next 10 sessions vs the average stock?
  * Returns { scanId: { signals, days, hit, avg, excess, from, to } }.
  */
-export function scanBacktest(axis, stocks, volumes, last, horizon = 10, lookback = 250) {
+export function scanBacktest(axis, stocks, volumes, last, horizon = 10, lookback = 250, opts = {}) {
   const ids = ["pivots", "ep", "tight", "reclaim50", "leaders", "coil"];
-  const acc = Object.fromEntries(ids.map(id => [id, { n: 0, up: 0, sum: 0, ex: 0, days: new Set() }]));
+  const mk = () => Object.fromEntries(ids.map(id => [id, { n: 0, up: 0, sum: 0, ex: 0, days: new Set() }]));
+  const acc = mk(), accR = mk(), accQ = mk();
   const start = Math.max(60, last - horizon - lookback), end = last - horizon;
+  const recentFrom = end - 62; // last ~3 months of signals
+  const minTo = opts.microcap ? 3 : 10;
+  // Quality gate as it stood on day t: 20-day turnover (₹ cr) and 60-day average move, same rules as q_of
+  const qAt = (st, t, quiet) => {
+    const v = volumes?.[st.ticker], c = st.closes; if (!v) return true;
+    let to = 0, tn = 0, mv = 0, mn = 0;
+    for (let k = t - 59; k <= t; k++) {
+      if (k < 1 || c[k] == null) continue;
+      if (k > t - 20 && v[k] != null) { to += c[k] * v[k]; tn++; }
+      if (c[k - 1] != null) { mv += Math.abs(c[k] / c[k - 1] - 1); mn++; }
+    }
+    if (tn < 10 || mn < 20) return true; // unknown → kept, as in the UI
+    const liq = to / tn / 1e7 >= minTo;
+    return quiet ? liq : liq && mv / mn >= 0.018;
+  };
   for (let t = start; t <= end; t++) {
     let uSum = 0, uN = 0;
     const fwd = new Map();
@@ -296,7 +312,13 @@ export function scanBacktest(axis, stocks, volumes, last, horizon = 10, lookback
     }
     if (!uN) continue;
     const uAvg = uSum / uN;
-    const hit = (id, st) => { const r = fwd.get(st); if (r == null) return; const a = acc[id]; a.n++; a.sum += r; a.ex += r - uAvg; if (r > 0) a.up++; a.days.add(t); };
+    const add = (a, r) => { a.n++; a.sum += r; a.ex += r - uAvg; if (r > 0) a.up++; a.days.add(t); };
+    const hit = (id, st) => {
+      const r = fwd.get(st); if (r == null) return;
+      add(acc[id], r);
+      if (t >= recentFrom) add(accR[id], r);
+      if (qAt(st, t, id === "tight" || id === "coil")) add(accQ[id], r);
+    };
     for (const st of stocks) {
       if (!fwd.has(st)) continue;
       const c = st.closes, p = c[t - 1], x = c[t];
@@ -327,11 +349,13 @@ export function scanBacktest(axis, stocks, volumes, last, horizon = 10, lookback
       }
     }
   }
+  const sum = (a) => (a.n ? { signals: a.n, days: a.days.size, hit: Math.round((a.up / a.n) * 100), avg: Math.round((a.sum / a.n) * 1000) / 10,
+    excess: Math.round((a.ex / a.n) * 1000) / 10 } : null);
   const out = {};
   for (const id of ids) {
-    const a = acc[id];
-    out[id] = a.n ? { signals: a.n, days: a.days.size, hit: Math.round((a.up / a.n) * 100), avg: Math.round((a.sum / a.n) * 1000) / 10,
-      excess: Math.round((a.ex / a.n) * 1000) / 10, from: axis[start], to: axis[end], horizon } : null;
+    const a = sum(acc[id]);
+    out[id] = a ? { ...a, from: axis[start], to: axis[end], horizon,
+      recent: sum(accR[id]), recent_from: axis[Math.max(start, recentFrom)], gated: sum(accQ[id]) } : null;
   }
   return out;
 }
@@ -930,7 +954,9 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     const turnover = tn >= 10 ? r1(to / tn / 1e7) : null, move = mn >= 20 ? Math.round((mv / mn) * 1000) / 10 : null;
     let hi = null; for (let k = Math.max(0, last - 251); k <= last; k++) if (c[k] != null) hi = hi == null ? c[k] : Math.max(hi, c[k]);
     const off = c[last] != null && hi ? (c[last] / hi - 1) * 100 : null;
-    qOf[sym] = { to: turnover, move, band: off == null ? null : off >= -10 ? "near" : off >= -25 ? "mid" : "far",
+    let vx = null;
+    if (v && v[last] != null) { let sm = 0, cn = 0; for (let k = last - 50; k < last; k++) if (k >= 0 && v[k] != null) { sm += v[k]; cn++; } if (cn >= 20 && sm > 0) vx = r1(v[last] / (sm / cn)); }
+    qOf[sym] = { to: turnover, move, vx, band: off == null ? null : off >= -10 ? "near" : off >= -25 ? "mid" : "far",
       liq: turnover != null ? turnover >= minTo : null,
       pass: turnover != null && move != null ? turnover >= minTo && move >= 1.8 : null };
   }
@@ -1038,7 +1064,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   const ftAll = computeFollowThrough(axis, aligned, volumes, 10, 100000);
   const emEq = (h) => (h.rate == null ? null : r1(Math.max(0, -15.12 + 0.30 * h.rate + 0.1268 * h.events)));
   const glBand = (v) => (v == null ? null : v >= 25 ? "FULL" : v >= 15 ? "NORMAL" : v >= 9 ? "HALF" : "SMALL");
-  const GL_MULT = { FULL: 1, NORMAL: 0.75, HALF: 0.5, SMALL: 0.25 };
+  const GL_MULT = { FULL: 1, NORMAL: 0.75, HALF: 0.5, SMALL: 0 }; // below 9 = stand down (watch only)
   let greenLight = null;
   if (ftAll?.history?.length) {
     const idxOf = Object.fromEntries(axis.map((d, i) => [d, i]));
@@ -1053,6 +1079,18 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
       bt: Object.fromEntries(Object.entries(bt).map(([k, xs]) => [k, bucketStats(xs)])), from: hist.find(h => h.em != null)?.d || null };
   }
 
+  // ── Pullback window: a red MBI day while the long-term Bias is still BULL (≥50% above the 200-SMA, held).
+  //    Tested first with "and green light 9+ and signal not CASH": that fired once in a year, so it was dropped.
+  let dip = null;
+  {
+    const isDip = (r) => r.color === "RED" && regime[r.i] === "BULL";
+    const hits = [], rest = [];
+    for (const r of mbiRows) { if (r.i + 10 > last) continue; const f = fwdAvg(r.i); if (f != null) (isDip(r) ? hits : rest).push(f); }
+    const lastRow = mbiRows[mbiRows.length - 1];
+    const recent = mbiRows.slice(-10).filter(isDip).map(r => r.d);
+    dip = { today: lastRow ? isDip(lastRow) : false, recent, bt: bucketStats(hits), other: bucketStats(rest), horizon: 10, from: mbiRows[0]?.d || null };
+  }
+
   const enrich = (rows) => (rows || []).forEach(r => { r.rs = rsOf[r.sym] ?? null; r.grade = gradeOf[r.sym] ?? null; r.plan = planOf[r.sym] ?? null; r.q = qOf[r.sym] ?? null; });
   enrich(leaders);
   for (const k of ["pivots", "tight", "reclaim50", "ep", "ipo", "coil", "fundflow"]) enrich(scans[k]);
@@ -1060,7 +1098,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   for (const t of themes) enrich(t.top);
 
   // ── scan backtests: what happened 10 sessions after each past signal ──
-  const scanStats = scanBacktest(axis, stocks, volumes, last);
+  const scanStats = scanBacktest(axis, stocks, volumes, last, 10, 250, { microcap: !!opts.microcap });
   scanStats.fundflow = ffBt;
 
   const asOf = axis[last];
@@ -1070,7 +1108,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     swing_state: swingState, momentum_sign: momentumSign, momentum_dir: momentumDir,
     momentum_leaders: momentumLeaders, environment,
     follow_through: ftAll ? { ...ftAll, history: ftAll.history.slice(-40) } : null,
-    mbi, green_light: greenLight, q_of: qOf,
+    mbi, green_light: greenLight, q_of: qOf, dip,
     leaders_new: leadersNew, scans, scan_stats: scanStats, rs_of: rsOf, rs_breaks: rsBreaks, grade_of: gradeOf, plan_of: planOf, market_monitor: marketMonitor,
     lows_ok: newLows <= LOWS_OK_MAX, lows_ok_max: LOWS_OK_MAX,
     pct_above_20: pct20,
@@ -1228,7 +1266,7 @@ export function upcomingResults(cal, sym, days = 7) {
 }
 
 // ─── wider universe: NSE Microcap 250 (loaded on demand, scans only) ─────────
-const MICRO_KEY = "td_mq_micro_v5"; // v5: + fund flow, quality gate, IPO lifecycle
+const MICRO_KEY = "td_mq_micro_v6"; // v6: + recent / gated scan records
 let _microInflight = null;
 export async function loadMicrocapScans({ force = false } = {}) {
   if (!force) {
