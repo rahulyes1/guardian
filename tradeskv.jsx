@@ -5565,7 +5565,8 @@ function buildIdeas(d, micro, watchlist, blockBuys = null) {
   const G = { A: 30, B: 15, C: 0 };
   // Each list's weight follows its own record vs the average stock: +6 base, ±4 per point of excess (−6…+12)
   const SCAN_OF = { pivot: "pivots", tight: "tight", ep: "ep", epr: "ep", coil: "coil", leader: "leaders", flow: "fundflow", htf: "htf", pb21: "pb21", first52: "first52" };
-  const statsFor = (x) => ((x.micro ? micro?.scan_stats : null) || d.scan_stats);
+  // 5-year records when the nightly job published them (far more signals than one year); microcaps use their own
+  const statsFor = (x) => ((x.micro ? micro?.scan_stats : null) || d.long_bt?.scan_stats || d.scan_stats);
   const weight = (tag, x) => { const ex = statsFor(x)?.[SCAN_OF[tag]]?.excess; return ex == null ? 6 : Math.max(-6, Math.min(12, 6 + ex * 4)); };
   return [...map.values()].map(x => {
     const st = status[x.sector];
