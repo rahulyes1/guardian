@@ -18,7 +18,7 @@ export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 let API_BASE = "";
 export function setApiBase(url) { API_BASE = String(url || "").replace(/\/+$/, ""); }
 
-const LOCAL_KEY       = "td_mq_v13";  // v13: market monitor, coiling scan, delivery %
+const LOCAL_KEY       = "td_mq_v14";  // v14: MBI breadth, green light, fund flow, quality gate, IPO lifecycle
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
@@ -93,7 +93,7 @@ export function configureSharedStore(getClient) { sharedClientGetter = getClient
 
 function looksValid(d) {
   return d && MQ_SIGNALS.includes(d.overall) && Array.isArray(d.history) && typeof d.total === "number" && d.total >= 400
-    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d && Array.isArray(d.scans.ep) && d.rs_of && d.scan_stats && d.plan_of && d.market_monitor && Array.isArray(d.scans.coil);
+    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d && Array.isArray(d.scans.ep) && d.rs_of && d.scan_stats && d.plan_of && d.market_monitor && Array.isArray(d.scans.coil) && d.mbi && d.green_light !== undefined && Array.isArray(d.scans.fundflow) && d.q_of;
 }
 async function readShared() {
   const sb = sharedClientGetter?.();
@@ -746,20 +746,31 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     }
     scanEp.sort((a, b) => (b.results - a.results) || (b.d > a.d ? 1 : b.d < a.d ? -1 : 0) || (b.volx * b.chg - a.volx * a.chg));
   }
-  // 5. IPO bases: listed within ~12 months (20–260 sessions of history), trading within 5% of
-  //    the highest close since listing (or breaking it today)
+  // 5. IPO lifecycle (Stocksgeeks-style): listed ≤260 sessions ago, holding the average that fits its age —
+  //    under 50 sessions above the 20-SMA, 50–100 above the 50-SMA, 100–260 above the 100-SMA.
+  //    "pop" = a 4.5%+ day in the last 5 sessions on above-average volume.
   const scanIpo = [];
   for (const [ticker, c] of Object.entries(aligned)) {
     const first = c.findIndex(x => x != null);
     const age = last - first;
-    if (first < 0 || age < 20 || age > 260 || c[last] == null) continue;
+    if (first < 0 || age < 10 || age > 260 || c[last] == null) continue;
+    const per = age < 50 ? 20 : age < 100 ? 50 : 100;
+    const ma = smaSeries(c, per, Math.min(per, Math.max(8, Math.ceil(per * 0.75))))[last];
+    if (ma == null || c[last] <= ma) continue;
     let hi = -Infinity; for (let k = first; k < last; k++) if (c[k] != null) hi = Math.max(hi, c[k]);
-    if (c[last] < hi * 0.95) continue;
+    const v = volumes?.[ticker];
+    let pop = null;
+    for (let i = last; i >= Math.max(first + 1, last - 4); i--) {
+      if (c[i] == null || c[i - 1] == null || c[i] / c[i - 1] - 1 < 0.045) continue;
+      let sm = 0, cn = 0; if (v) for (let k = Math.max(first, i - 50); k < i; k++) if (v[k] != null) { sm += v[k]; cn++; }
+      if (!v || (v[i] != null && cn >= 5 && v[i] > sm / cn)) { pop = { d: axis[i], chg: r1((c[i] / c[i - 1] - 1) * 100) }; break; }
+    }
     const sym = ticker.replace(/\.NS$/, "");
-    scanIpo.push({ sym, sector: sectorMap[sym] || "Other", days: age, from_listing: r1((c[last] / c[first] - 1) * 100),
-      off_high: r1((c[last] / Math.max(hi, c[last]) - 1) * 100), breakout: c[last] > hi });
+    scanIpo.push({ sym, sector: sectorMap[sym] || "Other", days: age, stage: age < 50 ? "<50d" : age < 100 ? "50–100d" : "100–260d", ma: per,
+      from_listing: r1((c[last] / c[first] - 1) * 100),
+      off_high: r1((c[last] / Math.max(hi, c[last]) - 1) * 100), breakout: c[last] > hi, pop });
   }
-  scanIpo.sort((a, b) => (b.breakout - a.breakout) || (b.from_listing - a.from_listing));
+  scanIpo.sort((a, b) => (!!b.pop - !!a.pop) || (b.breakout - a.breakout) || (b.off_high ?? -999) - (a.off_high ?? -999));
 
   const scans = {
     pivots: scanPivots.slice(0, 15), pivots_total: scanPivots.length,
@@ -902,14 +913,155 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   const avgP = (xs) => (xs.length ? { days: xs.length, fwd: r1((xs.reduce((a, b) => a + b, 0) / xs.length) * 100), up: Math.round((xs.filter(v => v > 0).length / xs.length) * 100) } : null);
   const marketMonitor = { rows: mmRows.slice(-30), bt: { strong: avgP(mmBt.strong), weak: avgP(mmBt.weak), mid: avgP(mmBt.mid) } };
 
-  const enrich = (rows) => (rows || []).forEach(r => { r.rs = rsOf[r.sym] ?? null; r.grade = gradeOf[r.sym] ?? null; r.plan = planOf[r.sym] ?? null; });
+  // ── Quality gate (Stocksgeeks "Scan" liquidity + volatility): average daily turnover over 20 sessions
+  //    in ₹ crore, and the average daily move over 60 sessions (mean |close-to-close| %, a close-only stand-in for ATR%).
+  //    liq: turnover ≥ ₹10 cr (₹3 cr for microcaps). pass: liq and average move ≥ 1.8% (≈ ATR 2.65%).
+  //    Tight / coiling setups are quiet by design, so the UI applies only liq to them.
+  const minTo = opts.microcap ? 3 : 10;
+  const qOf = {};
+  for (const [ticker, c] of Object.entries(aligned)) {
+    const v = volumes?.[ticker]; const sym = ticker.replace(/\.NS$/, "");
+    let to = 0, tn = 0, mv = 0, mn = 0;
+    for (let k = last - 59; k <= last; k++) {
+      if (k < 1 || c[k] == null) continue;
+      if (k > last - 20 && v && v[k] != null) { to += c[k] * v[k]; tn++; }
+      if (c[k - 1] != null) { mv += Math.abs(c[k] / c[k - 1] - 1); mn++; }
+    }
+    const turnover = tn >= 10 ? r1(to / tn / 1e7) : null, move = mn >= 20 ? Math.round((mv / mn) * 1000) / 10 : null;
+    let hi = null; for (let k = Math.max(0, last - 251); k <= last; k++) if (c[k] != null) hi = hi == null ? c[k] : Math.max(hi, c[k]);
+    const off = c[last] != null && hi ? (c[last] / hi - 1) * 100 : null;
+    qOf[sym] = { to: turnover, move, band: off == null ? null : off >= -10 ? "near" : off >= -25 ? "mid" : "far",
+      liq: turnover != null ? turnover >= minTo : null,
+      pass: turnover != null && move != null ? turnover >= minTo && move >= 1.8 : null };
+  }
+
+  // ── Fund Flow (Stocksgeeks): a green week on ≥5× the average weekly volume of the prior weeks (up to 50),
+  //    ₹5 cr+ daily turnover, average move ≥ 2% (≈ ATR 3%), 50-SMA ≥ 200-SMA, within 25% of the 52-week high.
+  //    Weeks are Monday–Friday groups of the trading days. Signals from the last 4 weeks are listed.
+  const weekOf = (d) => { const t = Date.parse(d + "T00:00:00Z"); const day = (new Date(t).getUTCDay() + 6) % 7; return new Date(t - day * 86400000).toISOString().slice(0, 10); };
+  const weeks = [];
+  axis.forEach((d, i) => { const w = weekOf(d); if (!weeks.length || weeks[weeks.length - 1].wk !== w) weeks.push({ wk: w, start: i, end: i }); else weeks[weeks.length - 1].end = i; });
+  const weekVolCache = new Map();
+  const weekVols = (st) => {
+    if (weekVolCache.has(st)) return weekVolCache.get(st);
+    const v = volumes?.[st.ticker];
+    const out = v ? weeks.map(w => { let sm = 0, cn = 0; for (let k = w.start; k <= w.end; k++) if (v[k] != null) { sm += v[k]; cn++; } return cn >= Math.min(3, w.end - w.start + 1) ? sm : null; }) : null;
+    weekVolCache.set(st, out); return out;
+  };
+  const ffHit = (st, wi) => {
+    const v = volumes?.[st.ticker], wv = weekVols(st); if (!v || !wv) return null;
+    const W = weeks[wi], c = st.closes, e = W.end, prevEnd = wi > 0 ? weeks[wi - 1].end : null;
+    if (prevEnd == null || c[e] == null || c[prevEnd] == null || c[e] <= c[prevEnd]) return null;
+    const cur = wv[wi]; if (cur == null) return null;
+    let sm = 0, cn = 0; for (let j = Math.max(0, wi - 50); j < wi; j++) if (wv[j] != null) { sm += wv[j]; cn++; }
+    if (cn < 20) return null;
+    const volx = cur / (sm / cn); if (volx < 5) return null;
+    let to = 0, tn = 0, mv = 0, mn = 0;
+    for (let k = e - 19; k <= e; k++) { if (k < 1 || c[k] == null) continue; if (v[k] != null) { to += c[k] * v[k]; tn++; } if (c[k - 1] != null) { mv += Math.abs(c[k] / c[k - 1] - 1); mn++; } }
+    if (tn < 10 || to / tn / 1e7 < 5 || mn < 10 || mv / mn < 0.02) return null;
+    if (st.s50[e] == null || st.s200[e] == null || st.s50[e] < st.s200[e] || st.h252[e] == null || c[e] < st.h252[e] * 0.75) return null;
+    return { volx: r1(volx), wchg: r1((c[e] / c[prevEnd] - 1) * 100) };
+  };
+  const fundflow = [];
+  const lastWk = weeks.length - 1;
+  for (const st of stocks) {
+    for (let wi = lastWk; wi >= Math.max(1, lastWk - 3); wi--) {
+      const h = ffHit(st, wi); if (!h) continue;
+      fundflow.push({ ...base(st), wk: weeks[wi].wk, volx: h.volx, wchg: h.wchg, live: wi === lastWk }); break;
+    }
+  }
+  fundflow.sort((a, b) => (b.wk > a.wk ? 1 : b.wk < a.wk ? -1 : 0) || b.volx - a.volx);
+  scans.fundflow = fundflow.slice(0, 15); scans.fundflow_total = fundflow.length;
+  // Backtest: each completed signal week → next 10 sessions vs the average stock
+  const ffBt = (() => {
+    let n = 0, up = 0, sum = 0, ex = 0, from = null, to = null;
+    for (let wi = 21; wi < weeks.length; wi++) {
+      const e = weeks[wi].end; if (e + 10 > last) break;
+      let us = 0, un = 0; for (const st of stocks) { const a = st.closes[e], b = st.closes[e + 10]; if (a != null && b != null) { us += b / a - 1; un++; } }
+      if (!un) continue;
+      for (const st of stocks) {
+        if (!ffHit(st, wi)) continue;
+        const a = st.closes[e], b = st.closes[e + 10]; if (a == null || b == null) continue;
+        const r = b / a - 1; n++; sum += r; ex += r - us / un; if (r > 0) up++; from ??= weeks[wi].wk; to = weeks[wi].wk;
+      }
+    }
+    return n ? { signals: n, hit: Math.round((up / n) * 100), avg: Math.round((sum / n) * 1000) / 10, excess: Math.round((ex / n) * 1000) / 10, from, to, horizon: 10 } : null;
+  })();
+
+  // ── MBI-style breadth (rules published by Stocksgeeks; computed on this universe) ──
+  //    4.5R = stocks up ≥4.5% ÷ stocks down ≥4.5% × 100; 20R / 50R = stocks above ÷ below the 20 / 50-SMA × 100;
+  //    each with its day-over-day change; 52WH / 52WL = % of stocks closing at a 52-week high / low.
+  //    Seven boxes go green or red; green boxes − red boxes ≥ 3 is a green day, ≤ −3 a red day.
+  const mbiDay = (i) => {
+    let up = 0, dn = 0, n = 0, a20 = 0, b20 = 0, a50 = 0, b50 = 0, wh = 0, wl = 0, nh = 0;
+    for (const st of stocks) {
+      const c = st.closes;
+      if (c[i] == null) continue;
+      if (c[i - 1] != null) { n++; const ch = c[i] / c[i - 1] - 1; if (ch >= 0.045) up++; else if (ch <= -0.045) dn++; }
+      if (st.s20[i] != null) { if (c[i] > st.s20[i]) a20++; else b20++; }
+      if (st.s50[i] != null) { if (c[i] > st.s50[i]) a50++; else b50++; }
+      if (st.h252[i] != null && i >= 251) { nh++; if (c[i] >= st.h252[i]) wh++; if (c[i] <= st.l252[i]) wl++; }
+    }
+    const rt = (a, b) => (b ? Math.round((a / b) * 100) : a ? 999 : null);
+    return { r45: n ? rt(up, dn) : null, r20: rt(a20, b20), r50: rt(a50, b50),
+      wh: nh ? Math.round((wh / nh) * 10000) / 100 : null, wl: nh ? Math.round((wl / nh) * 10000) / 100 : null };
+  };
+  const MBI_T = { r45: [200, 50], r20: [75, 50], r50: [85, 60], chg: 20 };
+  const box = (v, [g, r]) => (v == null ? 0 : v > g ? 1 : v < r ? -1 : 0);
+  const chBox = (x) => (x == null ? 0 : x >= MBI_T.chg ? 1 : x <= -MBI_T.chg ? -1 : 0);
+  const mbiRows = [];
+  const mbiStart = Math.max(2, last - 300);
+  let prev = mbiDay(mbiStart - 1);
+  for (let i = mbiStart; i <= last; i++) {
+    const m = mbiDay(i);
+    const ch = (k) => (m[k] != null && prev[k] != null ? m[k] - prev[k] : null);
+    const c45 = ch("r45"), c20 = ch("r20"), c50 = ch("r50");
+    const boxes = [box(m.r45, MBI_T.r45), chBox(c45), box(m.r20, MBI_T.r20), chBox(c20), box(m.r50, MBI_T.r50), chBox(c50),
+      m.wh == null || m.wl == null ? 0 : m.wh > m.wl ? 1 : m.wl > m.wh ? -1 : 0];
+    const score = boxes.reduce((a, b) => a + b, 0);
+    mbiRows.push({ d: axis[i], i, ...m, c45, c20, c50, boxes, score, color: score >= 3 ? "GREEN" : score <= -3 ? "RED" : "NEUTRAL" });
+    prev = m;
+  }
+  const fwdAvg = (t) => { let sm = 0, cn = 0; for (const st of stocks) { const a = st.closes[t], z = st.closes[t + 10]; if (a != null && z != null) { sm += z / a - 1; cn++; } } return cn ? sm / cn : null; };
+  const bucketStats = (xs) => (xs.length ? { days: xs.length, fwd: r1((xs.reduce((a, b) => a + b, 0) / xs.length) * 100), up: Math.round((xs.filter(x => x > 0).length / xs.length) * 100) } : null);
+  const mbiBt = (() => {
+    const g = { GREEN: [], NEUTRAL: [], RED: [] };
+    for (const r of mbiRows) { if (r.i + 10 > last) continue; const f = fwdAvg(r.i); if (f != null) g[r.color].push(f); }
+    return { green: bucketStats(g.GREEN), neutral: bucketStats(g.NEUTRAL), red: bucketStats(g.RED), from: mbiRows[0]?.d || null, horizon: 10 };
+  })();
+  const mbi = { rows: mbiRows.slice(-30).map(({ i, ...r }) => r), bt: mbiBt, thresholds: MBI_T };
+
+  // ── Green light: our own EM-equivalent follow-through reading on the EM scale (9 / 15 / 25).
+  //    Fitted to the public Stocksgeeks EM series (r ≈ 0.83 over 197 sessions):
+  //    EMeq = −15.1 + 0.30 × (% of the last 10 sessions' pocket pivots still above their pivot close)
+  //           + 0.127 × (number of those pivots). Bands set the position-size multiplier.
+  const ftAll = computeFollowThrough(axis, aligned, volumes, 10, 100000);
+  const emEq = (h) => (h.rate == null ? null : r1(Math.max(0, -15.12 + 0.30 * h.rate + 0.1268 * h.events)));
+  const glBand = (v) => (v == null ? null : v >= 25 ? "FULL" : v >= 15 ? "NORMAL" : v >= 9 ? "HALF" : "SMALL");
+  const GL_MULT = { FULL: 1, NORMAL: 0.75, HALF: 0.5, SMALL: 0.25 };
+  let greenLight = null;
+  if (ftAll?.history?.length) {
+    const idxOf = Object.fromEntries(axis.map((d, i) => [d, i]));
+    const hist = ftAll.history.map(h => ({ d: h.d, em: emEq(h) }));
+    const bt = { FULL: [], NORMAL: [], HALF: [], SMALL: [] };
+    for (const h of hist) {
+      const t = idxOf[h.d], b = glBand(h.em); if (b == null || t + 10 > last) continue;
+      const f = fwdAvg(t); if (f != null) bt[b].push(f);
+    }
+    const now = hist[hist.length - 1].em, band = glBand(now);
+    greenLight = { em: now, band, mult: band ? GL_MULT[band] : null, history: hist.slice(-30),
+      bt: Object.fromEntries(Object.entries(bt).map(([k, xs]) => [k, bucketStats(xs)])), from: hist.find(h => h.em != null)?.d || null };
+  }
+
+  const enrich = (rows) => (rows || []).forEach(r => { r.rs = rsOf[r.sym] ?? null; r.grade = gradeOf[r.sym] ?? null; r.plan = planOf[r.sym] ?? null; r.q = qOf[r.sym] ?? null; });
   enrich(leaders);
-  for (const k of ["pivots", "tight", "reclaim50", "ep", "ipo", "coil"]) enrich(scans[k]);
+  for (const k of ["pivots", "tight", "reclaim50", "ep", "ipo", "coil", "fundflow"]) enrich(scans[k]);
   for (const rows of Object.values(sectorStocks)) enrich(rows);
   for (const t of themes) enrich(t.top);
 
   // ── scan backtests: what happened 10 sessions after each past signal ──
   const scanStats = scanBacktest(axis, stocks, volumes, last);
+  scanStats.fundflow = ffBt;
 
   const asOf = axis[last];
   return {
@@ -917,7 +1069,8 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
     bias_turning: biasTurning, bias_days: biasDays, bias_needed: BIAS_DAYS,
     swing_state: swingState, momentum_sign: momentumSign, momentum_dir: momentumDir,
     momentum_leaders: momentumLeaders, environment,
-    follow_through: computeFollowThrough(axis, aligned, volumes),
+    follow_through: ftAll ? { ...ftAll, history: ftAll.history.slice(-40) } : null,
+    mbi, green_light: greenLight, q_of: qOf,
     leaders_new: leadersNew, scans, scan_stats: scanStats, rs_of: rsOf, rs_breaks: rsBreaks, grade_of: gradeOf, plan_of: planOf, market_monitor: marketMonitor,
     lows_ok: newLows <= LOWS_OK_MAX, lows_ok_max: LOWS_OK_MAX,
     pct_above_20: pct20,
@@ -1075,7 +1228,7 @@ export function upcomingResults(cal, sym, days = 7) {
 }
 
 // ─── wider universe: NSE Microcap 250 (loaded on demand, scans only) ─────────
-const MICRO_KEY = "td_mq_micro_v4"; // v4: + coiling
+const MICRO_KEY = "td_mq_micro_v5"; // v5: + fund flow, quality gate, IPO lifecycle
 let _microInflight = null;
 export async function loadMicrocapScans({ force = false } = {}) {
   if (!force) {
@@ -1101,8 +1254,8 @@ export async function loadMicrocapScans({ force = false } = {}) {
     const vols = alignVolumes(axis, allVol);
     if (verification) verification.volumes_filled = fillVolumesFromBhav(axis, vols, bhav);
     const r = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, vols, null, cal?.results || null,
-      { rsBreaks: getLastMarketQuadrant()?.rs_breaks || null });
-    const data = { as_of: r.as_of, final: r.final, verification, total: r.total, scans: r.scans, leaders: r.leaders, sector_of: r.sector_of, rs_of: r.rs_of, grade_of: r.grade_of, plan_of: r.plan_of };
+      { rsBreaks: getLastMarketQuadrant()?.rs_breaks || null, microcap: true });
+    const data = { as_of: r.as_of, final: r.final, verification, total: r.total, scans: r.scans, leaders: r.leaders, sector_of: r.sector_of, rs_of: r.rs_of, grade_of: r.grade_of, plan_of: r.plan_of, q_of: r.q_of, scan_stats: r.scan_stats };
     try { localStorage.setItem(MICRO_KEY, JSON.stringify({ data, savedAt: Date.now() })); } catch (_) {}
     return data;
   })().finally(() => { _microInflight = null; });

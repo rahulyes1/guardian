@@ -3210,6 +3210,8 @@ function MarketQuadrantPage({ onPickStock }) {
       <MqFlowsDeals data={data} onPickStock={onPickStock} />
       <MqFollowThrough data={data} />
       <MqMarketMonitor mm={data.market_monitor} />
+      <MqGreenLight gl={data.green_light} />
+      <MqMbi mbi={data.mbi} />
 
       <MqVerificationBadge data={data} />
 
@@ -3604,6 +3606,16 @@ function MarketBrief({ onOpenQuad, onOpenScan }) {
         </div>
       )}
       <FlowsLine flows={flows} />
+      {(d.mbi?.rows?.length || d.green_light?.band) && (() => {
+        const m = d.mbi?.rows?.[d.mbi.rows.length - 1], g = d.green_light;
+        return (
+          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 6 }}>
+            {m && <>MBI <b style={{ color: MBI_COLOR[m.color] }}>{m.color.toLowerCase()} day</b></>}
+            {m && g?.band ? " · " : ""}
+            {g?.band && <>Green light <b style={{ color: GL_COLOR[g.band] }}>{g.em} → {GL_TEXT[g.band].toLowerCase()}</b></>}
+          </div>
+        );
+      })()}
 
       <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
         <button className="btn-primary" style={{ flex: 1, padding: "10px 8px", fontSize: 12 }} onClick={onOpenScan}>
@@ -3629,8 +3641,10 @@ const SCAN_DEFS = [
     cols: [["RANGE", r => r.range10 != null ? `${r.range10}%` : "—"], ["HIGH", r => r.off_high != null ? `${r.off_high}%` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"]] },
   { id: "ep", label: "Earnings EP", hint: "Episodic pivots: ≥8% up on ≥3× average volume in the last 5 sessions and still holding. ★ = results were due around the move.",
     cols: [["DAY", r => mqFmtDate(r.d)], ["MOVE", r => `+${r.chg}% ${r.volx}×`], ["SINCE", r => `${r.held > 0 ? "+" : ""}${r.held}%`]] },
-  { id: "ipo", label: "IPO bases", hint: "Listed within ~12 months and trading within 5% of the highest close since listing. ↑ = breaking above it today.",
-    cols: [["AGE", r => `${r.days}d`], ["LISTING", r => `${r.from_listing > 0 ? "+" : ""}${r.from_listing}%`], ["HIGH", r => (r.breakout ? "↑ new" : `${r.off_high}%`)]] },
+  { id: "fundflow", label: "Fund flow", hint: "Stocksgeeks' Fund Flow: a green week on 5×+ the average weekly volume, ₹5 cr+ daily turnover, an average move of 2%+ a day (≈ ATR 3%), 50-SMA above the 200-SMA and within 25% of the 52-week high. Signals from the last 4 weeks; ● = this week (still forming).",
+    cols: [["WEEK", r => `${r.live ? "● " : ""}${mqFmtDate(r.wk)}`], ["VOL×", r => `${r.volx}×`], ["WEEK %", r => `${r.wchg > 0 ? "+" : ""}${r.wchg}%`]] },
+  { id: "ipo", label: "IPO lifecycle", hint: "Listed within ~260 sessions and holding the average that fits its age: under 50 sessions above the 20-SMA, 50–100 above the 50-SMA, 100–260 above the 100-SMA. ⚡ = a 4.5%+ day on above-average volume in the last 5 sessions; ↑ = at a new high since listing.",
+    cols: [["AGE", r => `${r.days}d`], ["LISTING", r => `${r.from_listing > 0 ? "+" : ""}${r.from_listing}%`], ["NOW", r => (r.pop ? `⚡+${r.pop.chg}%` : r.breakout ? "↑ new" : `${r.off_high}%`)]] },
   { id: "reclaim50", label: "Reclaimed 50-SMA", hint: "Closed back above the 50-day average today after being below it yesterday.",
     cols: [["200↑", r => (r.a200 ? "yes" : "no")], ["HIGH", r => r.off_high != null ? `${r.off_high}%` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"]] },
 ];
@@ -3638,7 +3652,8 @@ const SCAN_DEFS = [
 const SCAN_SORT = {
   pivots: (a, b) => b.volx * b.chg - a.volx * a.chg,
   ep: (a, b) => (b.results - a.results) || (b.d > a.d ? 1 : b.d < a.d ? -1 : 0) || (b.volx * b.chg - a.volx * a.chg),
-  ipo: (a, b) => (b.breakout - a.breakout) || (b.from_listing - a.from_listing),
+  ipo: (a, b) => (!!b.pop - !!a.pop) || (b.breakout - a.breakout) || (b.off_high ?? -999) - (a.off_high ?? -999),
+  fundflow: (a, b) => (b.wk > a.wk ? 1 : b.wk < a.wk ? -1 : 0) || b.volx - a.volx,
   leaders: (a, b) => (b.ret12m ?? b.ret3m ?? -999) - (a.ret12m ?? a.ret3m ?? -999),
   tight: (a, b) => (b.ret3m ?? -999) - (a.ret3m ?? -999),
   coil: (a, b) => (b.rs ?? 0) - (a.rs ?? 0),
@@ -3660,6 +3675,7 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
     return () => { alive = false; };
   }, [micro]);
   const [tab, setTab] = useState(() => { try { return localStorage.getItem("td_scan_tab") || "pivots"; } catch (_) { return "pivots"; } });
+  const [quality, toggleQuality] = useQualityGate();
   const pick = (id) => { setTab(id); try { localStorage.setItem("td_scan_tab", id); } catch (_) {} };
 
   const head = (
@@ -3685,23 +3701,27 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
   const hot = (l) => ["HOT", "WARM"].includes(statusOf[l.sector]);
   const base = {
     pivots: (data.scans.pivots || []).map(r => ({ ...r, deliv: data.deliv_of?.[r.sym] ?? null })), tight: data.scans.tight || [], reclaim50: data.scans.reclaim50 || [],
-    ep: data.scans.ep || [], ipo: data.scans.ipo || [], leaders: (data.leaders || []).filter(hot), coil: data.scans.coil || [],
+    ep: data.scans.ep || [], ipo: data.scans.ipo || [], leaders: (data.leaders || []).filter(hot), coil: data.scans.coil || [], fundflow: data.scans.fundflow || [],
   };
   const totals = { pivots: data.scans.pivots_total, tight: data.scans.tight_total, reclaim50: data.scans.reclaim50_total,
-    ep: data.scans.ep_total || 0, ipo: data.scans.ipo_total || 0, leaders: base.leaders.length, coil: data.scans.coil_total || 0 };
+    ep: data.scans.ep_total || 0, ipo: data.scans.ipo_total || 0, leaders: base.leaders.length, coil: data.scans.coil_total || 0, fundflow: data.scans.fundflow_total || 0 };
   const lists = { ...base };
   if (micro && microData?.scans) {
     const m = microData.scans, tag = (xs) => (xs || []).map(x => ({ ...x, micro: true }));
-    const add = { pivots: tag(m.pivots), tight: tag(m.tight), reclaim50: tag(m.reclaim50), ep: tag(m.ep), ipo: tag(m.ipo), leaders: tag((microData.leaders || []).filter(hot)), coil: tag(m.coil) };
+    const add = { pivots: tag(m.pivots), tight: tag(m.tight), reclaim50: tag(m.reclaim50), ep: tag(m.ep), ipo: tag(m.ipo), leaders: tag((microData.leaders || []).filter(hot)), coil: tag(m.coil), fundflow: tag(m.fundflow) };
     for (const k of Object.keys(add)) {
       const seen = new Set(base[k].map(x => x.sym));
       lists[k] = [...base[k], ...add[k].filter(x => !seen.has(x.sym))].sort(SCAN_SORT[k]).slice(0, 25);
-      totals[k] = (totals[k] || 0) + ({ pivots: m.pivots_total, tight: m.tight_total, reclaim50: m.reclaim50_total, ep: m.ep_total, ipo: m.ipo_total, leaders: add.leaders.length, coil: m.coil_total }[k] || 0);
+      totals[k] = (totals[k] || 0) + ({ pivots: m.pivots_total, tight: m.tight_total, reclaim50: m.reclaim50_total, ep: m.ep_total, ipo: m.ipo_total, leaders: add.leaders.length, coil: m.coil_total, fundflow: m.fundflow_total }[k] || 0);
     }
   }
   const isWatch = tab === "watch";
   const def = SCAN_DEFS.find(x => x.id === tab) || SCAN_DEFS[0];
-  const rows = lists[def.id] || [];
+  const quiet = def.id === "tight" || def.id === "coil";
+  const qOfRow = (r) => r.q ?? data.q_of?.[r.sym] ?? microData?.q_of?.[r.sym] ?? null;
+  const rawRows = lists[def.id] || [];
+  const rows = quality ? rawRows.filter(r => qualityOk(qOfRow(r), quiet)) : rawRows;
+  const hiddenQ = rawRows.length - rows.length;
   const verified = data.verification && data.verification.date === data.as_of;
 
   return (
@@ -3714,6 +3734,8 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
           <button key={l} className="chip" onClick={() => setMicro(v)} aria-pressed={micro === v}
             style={micro === v ? { borderColor: "var(--text)", color: "var(--text)" } : {}}>{l}</button>
         ))}
+        <button className="chip" onClick={toggleQuality} aria-pressed={quality} title="Stocksgeeks-style quality gate: ₹10 cr+ daily turnover (₹3 cr microcaps) and an average move of 1.8%+ a day. Tight / coiling lists use the turnover test only."
+          style={quality ? { borderColor: C.pos, color: C.pos } : {}}>Quality {quality ? "on" : "off"}</button>
         {micro && microState === "loading" && <span>loading microcaps…</span>}
         {micro && microState && microState !== "loading" && <span style={{ color: "var(--red)" }}>{microState}</span>}
       </div>
@@ -3735,6 +3757,7 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
       <div className="card">
         <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 10, lineHeight: 1.45 }}>{def.hint}</div>
         <ScanEdge st={data.scan_stats?.[def.id]} />
+        {quality && hiddenQ > 0 && <div style={{ fontSize: 10, color: "var(--text3)", margin: "-4px 0 8px" }}>{hiddenQ} hidden by the quality gate ({quiet ? "turnover under the minimum" : "thin turnover or slow mover"}).</div>}
         {rows.length === 0 ? (
           <div style={{ fontSize: 12, color: "var(--text3)", padding: "16px 0", textAlign: "center" }}>Nothing qualifies today.</div>
         ) : (
@@ -3753,6 +3776,7 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
                       {r.results && <span style={{ color: C.warn, marginRight: 4 }} title="Results were due around this move">★</span>}
                       {r.sector}{st && st !== "—" && <span style={{ color: MQ_DIM_COLOR[st], marginLeft: 4 }}>· {st}</span>}
                       {r.micro && <span style={{ marginLeft: 4, color: "var(--text3)", border: "1px solid var(--border)", borderRadius: 6, padding: "0 4px", fontSize: 9 }}>micro</span>}
+                      {qOfRow(r)?.to != null && <span style={{ marginLeft: 4, fontFamily: "var(--mono)" }} title="20-day average turnover · 60-day average daily move">· ₹{qOfRow(r).to >= 100 ? Math.round(qOfRow(r).to) : qOfRow(r).to}cr · {qOfRow(r).move}%/d</span>}
                     </div>
                   </div>
                   {def.cols.map(([h, f]) => (
@@ -4358,7 +4382,8 @@ function suggestedRisk(d) {
   let pct = env === "EASY MONEY" ? 1 : env === "HARD MONEY" ? 0.5 : 0;
   const why = [env === "EASY MONEY" ? "Easy money" : env === "HARD MONEY" ? "Hard money" : "No money"];
   if (d.overall === "CASH") { pct = 0; why.push("signal CASH"); }
-  if (pct > 0 && d.follow_through?.label === "WEAK") { pct /= 2; why.push("follow-through weak"); }
+  if (pct > 0 && d.green_light?.mult != null) { if (d.green_light.mult < 1) { pct *= d.green_light.mult; why.push(`green light ${d.green_light.em} (${d.green_light.mult}×)`); } }
+  else if (pct > 0 && d.follow_through?.label === "WEAK") { pct /= 2; why.push("follow-through weak"); }
   if (pct > 0 && d.lows_ok === false) { pct /= 2; why.push(`${d.new_lows} at 52w lows`); }
   const heatCap = env === "EASY MONEY" ? 6 : env === "HARD MONEY" ? 3 : 0;
   return { pct: Math.round(pct * 100) / 100, heatCap, why: why.join(" · ") };
@@ -5269,7 +5294,7 @@ function readMicro() {
   try { return JSON.parse(localStorage.getItem("td_mq_micro_v3") || "null")?.data || null; } catch (_) { return null; }
 }
 
-const IDEA_TAG = { coil: "Coiling", deliv: "High delivery", block: "Block/bulk buy", pivot: "Pivot today", tight: "Tight", ep: "EP", epr: "EP ★ results", ipo: "IPO base", ipoup: "IPO ↑ new high", leader: "Leader", watch: "★ Watching" };
+const IDEA_TAG = { coil: "Coiling", deliv: "High delivery", block: "Block/bulk buy", pivot: "Pivot today", tight: "Tight", ep: "EP", epr: "EP ★ results", ipo: "IPO lifecycle", ipoup: "IPO ↑ new high", ipopop: "IPO ⚡ 4.5% day", flow: "Fund flow", leader: "Leader", watch: "★ Watching" };
 
 /**
  * One ranked, de-duplicated list of what's worth acting on today.
@@ -5285,7 +5310,7 @@ function buildIdeas(d, micro, watchlist, blockBuys = null) {
     const x = map.get(r.sym) || {
       sym: r.sym, sector: r.sector || src?.sector_of?.[r.sym] || d.sector_of?.[r.sym] || "Other",
       rs: r.rs ?? src?.rs_of?.[r.sym] ?? null, grade: r.grade ?? src?.grade_of?.[r.sym] ?? null,
-      plan: r.plan ?? src?.plan_of?.[r.sym] ?? null, tags: new Set(), micro: !!isMicro,
+      plan: r.plan ?? src?.plan_of?.[r.sym] ?? null, q: r.q ?? src?.q_of?.[r.sym] ?? d.q_of?.[r.sym] ?? null, tags: new Set(), micro: !!isMicro,
     };
     x.tags.add(tag); map.set(r.sym, x);
   };
@@ -5294,7 +5319,8 @@ function buildIdeas(d, micro, watchlist, blockBuys = null) {
     (sc.pivots || []).forEach(r => add(r, "pivot", isMicro));
     (sc.tight || []).forEach(r => add(r, "tight", isMicro));
     (sc.ep || []).forEach(r => add(r, r.results ? "epr" : "ep", isMicro));
-    (sc.ipo || []).forEach(r => add(r, r.breakout ? "ipoup" : "ipo", isMicro));
+    (sc.ipo || []).forEach(r => add(r, r.pop ? "ipopop" : r.breakout ? "ipoup" : "ipo", isMicro));
+    (sc.fundflow || []).forEach(r => add(r, "flow", isMicro));
     (sc.coil || []).forEach(r => add(r, "coil", isMicro));
   };
   take(d.scans, false);
@@ -5308,7 +5334,8 @@ function buildIdeas(d, micro, watchlist, blockBuys = null) {
   return [...map.values()].map(x => {
     const st = status[x.sector];
     const score = (G[x.grade] ?? 0) + (x.rs ?? 0) / 5 + x.tags.size * 6 + (st === "HOT" ? 6 : st === "WARM" ? 3 : 0) + (x.tags.has("watch") ? 8 : 0);
-    return { ...x, sectorStatus: st, score: Math.round(score) };
+    const quietOnly = [...x.tags].every(t => ["tight", "coil", "watch", "deliv", "block"].includes(t));
+    return { ...x, sectorStatus: st, score: Math.round(score), qok: qualityOk(x.q, quietOnly) };
   }).sort((a, b) => b.score - a.score);
 }
 
@@ -5349,6 +5376,7 @@ function IdeasPage({ watchlist, portfolio, onOpenStock, onPlan }) {
   const blockBuys = (deals?.deals || []).filter(x => x.side === "BUY").map(x => x.sym);
   const [filter, setFilter] = useState(() => { try { return localStorage.getItem("td_ideas_filter") || "all"; } catch (_) { return "all"; } });
   const pick = (f) => { setFilter(f); try { localStorage.setItem("td_ideas_filter", f); } catch (_) {} };
+  const [quality, toggleQuality] = useQualityGate();
   const head = (
     <div style={{ marginBottom: 12 }}>
       <div className="section-title">Ideas</div>
@@ -5364,7 +5392,8 @@ function IdeasPage({ watchlist, portfolio, onOpenStock, onPlan }) {
     );
   }
   const micro = readMicro();
-  const all = buildIdeas(data, micro, watchlist, blockBuys);
+  const allRaw = buildIdeas(data, micro, watchlist, blockBuys);
+  const all = quality ? allRaw.filter(x => x.qok || x.tags.has("watch")) : allRaw;
   const rows = all.filter(x => filter === "a" ? x.grade === "A" : filter === "watch" ? x.tags.has("watch") : filter === "n500" ? !x.micro : true);
   const s = suggestedRisk(data);
   return (
@@ -5380,6 +5409,8 @@ function IdeasPage({ watchlist, portfolio, onOpenStock, onPlan }) {
         {[["all", `All ${all.length}`], ["a", `A-grade ${all.filter(x => x.grade === "A").length}`], ["watch", `★ Watchlist ${all.filter(x => x.tags.has("watch")).length}`], ["n500", "Nifty 500 only"]].map(([id, l]) => (
           <button key={id} className="chip" aria-pressed={filter === id} onClick={() => pick(id)} style={filter === id ? { borderColor: "var(--text)", color: "var(--text)", whiteSpace: "nowrap" } : { whiteSpace: "nowrap" }}>{l}</button>
         ))}
+        <button className="chip" onClick={toggleQuality} aria-pressed={quality} title="Hide thin or slow stocks (₹10 cr+ turnover, 1.8%+ average daily move). Watchlist stocks always show."
+          style={quality ? { borderColor: C.pos, color: C.pos, whiteSpace: "nowrap" } : { whiteSpace: "nowrap" }}>Quality {quality ? "on" : "off"}{quality && allRaw.length > all.length ? ` · ${allRaw.length - all.length} hidden` : ""}</button>
       </div>
       <div className="card" style={{ paddingTop: 6 }}>
         {rows.length === 0 ? <div style={{ fontSize: 12, color: "var(--text3)", padding: "16px 0", textAlign: "center" }}>Nothing here today.</div>
@@ -5396,7 +5427,8 @@ function IdeasPage({ watchlist, portfolio, onOpenStock, onPlan }) {
 function BestSetups({ watchlist, portfolio, onOpenStock, onPlan, onSeeAll }) {
   const { data } = useMarketQuadrant();
   if (!data?.scans) return null;
-  const top = buildIdeas(data, readMicro(), watchlist).filter(x => x.plan).slice(0, 5);
+  let quality = true; try { quality = localStorage.getItem("td_quality") !== "0"; } catch (_) {}
+  const top = buildIdeas(data, readMicro(), watchlist).filter(x => x.plan && (!quality || x.qok || x.tags.has("watch"))).slice(0, 5);
   const s = suggestedRisk(data);
   if (!top.length) return null;
   return (
@@ -5470,6 +5502,128 @@ function PreTradeChecklist({ setup, ticked, onToggle }) {
 }
 
 // ── Market Monitor (QUAD) ──
+// ── Stocksgeeks-derived pieces: MBI breadth, green light, quality gate ──
+const SG_LINK = "https://thestocksgeeks.com/";
+const MBI_COLOR = { GREEN: C.pos, RED: C.neg, NEUTRAL: C.muted };
+const GL_COLOR = { FULL: C.pos, NORMAL: C.lime, HALF: C.warn, SMALL: C.neg };
+const GL_TEXT = { FULL: "Full size", NORMAL: "Normal size (¾)", HALF: "Half size", SMALL: "Small size (¼)" };
+/** Quality gate for a scan row: tight / coiling setups are quiet by design, so only liquidity applies to them. */
+function qualityOk(q, quiet) {
+  if (!q) return true; // no volume data → can't judge, keep it
+  const v = quiet ? q.liq : q.pass;
+  return v !== false;
+}
+function useQualityGate() {
+  const [on, set] = useState(() => { try { return localStorage.getItem("td_quality") !== "0"; } catch (_) { return true; } });
+  const toggle = () => set(v => { try { localStorage.setItem("td_quality", v ? "0" : "1"); } catch (_) {} return !v; });
+  return [on, toggle];
+}
+function BtLine({ items }) {
+  const xs = items.filter(([, b]) => b);
+  if (!xs.length) return null;
+  return xs.map(([label, b], i) => (
+    <span key={label}>{i ? " · " : ""}{label}: <b style={{ color: b.fwd > 0.3 ? C.pos : b.fwd < -0.3 ? C.neg : "var(--text2)" }}>{b.fwd > 0 ? "+" : ""}{b.fwd}%</b> ({b.up}% up, {b.days}d)</span>
+  ));
+}
+
+function MqMbi({ mbi, universe = "Nifty 500" }) {
+  if (!mbi?.rows?.length) return null;
+  const rows = mbi.rows, last = rows[rows.length - 1], T = mbi.thresholds;
+  const strip = rows.slice(-10);
+  const fmt = (v) => (v == null ? "—" : v >= 999 ? "∞" : v);
+  const sg = (v) => (v == null ? "" : v > 0 ? `+${v}` : `${v}`);
+  const cells = [
+    ["4.5R", fmt(last.r45), last.boxes[0], `>${T.r45[0]} green · <${T.r45[1]} red — stocks up 4.5%+ ÷ down 4.5%+ ×100`],
+    ["CHG", sg(last.c45), last.boxes[1], `±${T.chg}`],
+    ["20R", fmt(last.r20), last.boxes[2], `>${T.r20[0]} · <${T.r20[1]} — above ÷ below 20-SMA ×100`],
+    ["CHG", sg(last.c20), last.boxes[3], `±${T.chg}`],
+    ["50R", fmt(last.r50), last.boxes[4], `>${T.r50[0]} · <${T.r50[1]} — above ÷ below 50-SMA ×100`],
+    ["CHG", sg(last.c50), last.boxes[5], `±${T.chg}`],
+    ["52W H/L", `${last.wh ?? "—"}/${last.wl ?? "—"}`, last.boxes[6], "% of stocks at a 52-week high / low"],
+  ];
+  const bc = (b) => (b > 0 ? C.pos : b < 0 ? C.neg : "var(--border)");
+  const b = mbi.bt || {};
+  const contrarian = b.green && b.red && b.green.fwd < b.red.fwd;
+  return (
+    <div style={mqCardStyle}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+        <div style={{ ...mqHeadStyle, marginBottom: 4 }}>MBI BREADTH</div>
+        <span style={{ fontSize: 12, fontWeight: 800, color: MBI_COLOR[last.color] }}>{last.color} DAY <span style={{ fontFamily: "var(--mono)", fontWeight: 600 }}>({sg(last.score) || 0})</span></span>
+      </div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8, lineHeight: 1.45 }}>
+        Stocksgeeks' Market Breadth Indicator rules, computed on the {universe}. Seven boxes turn green or red; green − red ≥ 3 is a green day, ≤ −3 a red day.
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 4, marginBottom: 10 }}>
+        {cells.map(([k, v, bx, tip], i) => (
+          <div key={i} title={tip} style={{ border: `1.5px solid ${bc(bx)}`, background: bx ? `${bc(bx)}18` : "transparent", borderRadius: 6, padding: "4px 2px", textAlign: "center", minWidth: 0 }}>
+            <div style={{ fontSize: 8, color: "var(--text3)", letterSpacing: "0.06em", whiteSpace: "nowrap" }}>{k}</div>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 11, fontWeight: 700, color: bx ? bc(bx) : "var(--text2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{v}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 9, color: "var(--text3)", letterSpacing: "0.1em", marginBottom: 4 }}>LAST 10 SESSIONS</div>
+      <div style={{ display: "flex", gap: 3, marginBottom: 8 }}>
+        {strip.map(r => (
+          <div key={r.d} title={`${mqFmtDate(r.d)} · ${r.color} (${sg(r.score) || 0})`} style={{ flex: 1, minWidth: 0, textAlign: "center" }}>
+            <div style={{ height: 18, borderRadius: 4, background: MBI_COLOR[r.color], opacity: r.color === "NEUTRAL" ? 0.35 : 0.9 }} />
+            <div style={{ fontSize: 8, color: "var(--text3)", marginTop: 2, fontFamily: "var(--mono)", whiteSpace: "nowrap", overflow: "hidden" }}>{r.d.slice(8)}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 10, color: "var(--text3)", lineHeight: 1.5 }}>
+        Since {mqFmtDate(b.from)}, average stock over the next {b.horizon || 10} sessions after a — <BtLine items={[["green day", b.green], ["neutral", b.neutral], ["red day", b.red]]} />.
+        {contrarian ? " On this data green days came after rallies and did worse than red days — read it as a thermometer, not a buy signal." : ""}
+      </div>
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>
+        Rules from <a href={SG_LINK} target="_blank" rel="noreferrer" style={{ color: "var(--text2)" }}>thestocksgeeks.com</a> (Umang); numbers are ours, so they differ from his sheet's universe.
+      </div>
+    </div>
+  );
+}
+
+function MqGreenLight({ gl }) {
+  if (!gl || gl.em == null) return null;
+  const col = GL_COLOR[gl.band];
+  const pct = Math.min(100, (gl.em / 40) * 100);
+  const hist = (gl.history || []).filter(h => h.em != null);
+  const max = Math.max(40, ...hist.map(h => h.em));
+  const b = gl.bt || {};
+  return (
+    <div style={mqCardStyle}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+        <div style={{ ...mqHeadStyle, marginBottom: 4 }}>GREEN LIGHT</div>
+        <span style={{ fontSize: 12, fontWeight: 800, color: col }}>{GL_TEXT[gl.band]} · {gl.mult}×</span>
+      </div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8, lineHeight: 1.45 }}>
+        Are breakouts paying? Our follow-through reading put on Stocksgeeks' EM scale: below 9 is poor, 15+ is fine, 25+ is a strong tape. It sets the risk multiplier used for sizing across the app.
+      </div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 6 }}>
+        <span style={{ fontFamily: "var(--display)", fontSize: 30, color: col, lineHeight: 1 }}>{gl.em}</span>
+        <span style={{ fontSize: 11, color: "var(--text3)" }}>EM-equivalent</span>
+      </div>
+      <div style={{ position: "relative", height: 8, borderRadius: 4, background: "var(--bg3)", marginBottom: 4 }}>
+        {[9, 15, 25].map(t => <div key={t} style={{ position: "absolute", left: `${(t / 40) * 100}%`, top: -2, bottom: -2, width: 1, background: "var(--text3)" }} />)}
+        <div style={{ width: `${pct}%`, height: "100%", borderRadius: 4, background: col }} />
+      </div>
+      <div style={{ position: "relative", height: 12, fontSize: 8, color: "var(--text3)", fontFamily: "var(--mono)", marginBottom: 8 }}>
+        {[9, 15, 25].map(t => <span key={t} style={{ position: "absolute", left: `calc(${(t / 40) * 100}% - 6px)` }}>{t}</span>)}
+      </div>
+      {hist.length > 1 && (
+        <svg viewBox="0 0 300 40" style={{ width: "100%", height: 40, display: "block", marginBottom: 6 }} preserveAspectRatio="none">
+          {[9, 15, 25].map(t => <line key={t} x1="0" x2="300" y1={40 - (t / max) * 40} y2={40 - (t / max) * 40} stroke="var(--border)" strokeDasharray="3 3" />)}
+          <polyline fill="none" stroke={col} strokeWidth="1.8" points={hist.map((h, i) => `${(i / (hist.length - 1)) * 300},${40 - (h.em / max) * 40}`).join(" ")} />
+        </svg>
+      )}
+      <div style={{ fontSize: 10, color: "var(--text3)", lineHeight: 1.5 }}>
+        Since {mqFmtDate(gl.from)}, average stock over the next 10 sessions — <BtLine items={[["25+", b.FULL], ["15–25", b.NORMAL], ["9–15", b.HALF], ["below 9", b.SMALL]]} />.
+      </div>
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>
+        Our own formula, lined up against the public EM series on <a href={SG_LINK} target="_blank" rel="noreferrer" style={{ color: "var(--text2)" }}>thestocksgeeks.com</a> (r ≈ 0.83); Umang's EM itself is his and not reproduced here.
+      </div>
+    </div>
+  );
+}
+
 function MqMarketMonitor({ mm }) {
   if (!mm?.rows?.length) return null;
   const rows = mm.rows.slice(-10).reverse();
