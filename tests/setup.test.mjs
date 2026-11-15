@@ -51,3 +51,21 @@ test("a half-posted newest day is set aside instead of computed on", async () =>
   const full = { "A.NS": [1, 2], "B.NS": [1, 2] };
   assert.equal(trimIncompleteLastDay(["d1", "d2"], full), null);
 });
+
+test("trade plan keeps the stop at least 1.5× the average daily move away", async () => {
+  const { tradePlan } = await import("../marketQuadrant.js");
+  const closes = Array.from({ length: 80 }, (_, i) => 100 * (1 + 0.03 * Math.sin(i))); // ~2% average daily move
+  closes[79] = closes[78]; // flat last day
+  const p = tradePlan(closes);
+  const dist = (p.entry - p.stop) / p.entry;
+  let mv = 0, n = 0; for (let k = 20; k < 80; k++) { mv += Math.abs(closes[k] / closes[k - 1] - 1); n++; }
+  assert.ok(dist >= Math.min(0.08, 1.5 * (mv / n)) - 0.0005);
+});
+
+test("setup hits: a stock up 70% that flags tightly near its peak is a high-tight flag", async () => {
+  const { setupHits, smaSeries, emaSeries } = await import("../marketQuadrant.js");
+  const c = Array.from({ length: 260 }, (_, i) => (i < 215 ? 100 : i < 240 ? 100 + (i - 215) * 3 : 175 + (i % 2)));
+  const roll = (n) => c.map((_, i) => Math.max(...c.slice(Math.max(0, i - n + 1), i + 1)));
+  const st = { closes: c, s50: smaSeries(c, 50, 40), s200: smaSeries(c, 200, 150), e21: emaSeries(c, 21), h252: roll(252) };
+  assert.ok(setupHits(st, 259, true).includes("htf"));
+});

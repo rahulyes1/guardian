@@ -1540,7 +1540,9 @@ function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillS
   const riskBudget = (portfolio * r) / 100;
   const stopDist = valid ? e - s : null;
   const stopPct = valid ? ((stopDist / e) * 100).toFixed(2) : null;
-  const autoQty = valid ? Math.floor(riskBudget / stopDist) : 0;
+  const liqCr = getLastMarketQuadrant()?.q_of?.[normalizeSymbol(symbol || "")]?.to ?? null;
+  const capped = valid ? capQty(Math.floor(riskBudget / stopDist), e, portfolio, liqCr) : { qty: 0, cap: null };
+  const autoQty = capped.qty;
   const finalQty = qtyMode === "manual" && qty ? parseInt(qty) : autoQty;
   const posValue = valid ? e * finalQty : 0;
   const actualRisk = valid ? stopDist * finalQty : 0;
@@ -3645,6 +3647,12 @@ function MarketBrief({ onOpenQuad, onOpenScan }) {
 const SCAN_DEFS = [
   { id: "pivots", label: "Pivots today", hint: "Up ≥4.5% today on volume above yesterday's and the 50-day average — fresh institutional demand.",
     cols: [["CHG", r => r.chg != null ? `+${r.chg}%` : "—"], ["VOL×", r => r.volx != null ? `${r.volx}×` : "—"], ["DELIV", r => r.deliv != null ? `${Math.round(r.deliv)}%` : "—"]] },
+  { id: "htf", label: "High-tight flag", hint: "Up 60%+ from its low about two months ago, then a tight 10-day flag (≤15% range) near the peak. Rare, fast and volatile — size small.",
+    cols: [["RANGE", r => r.off_high != null ? `${r.off_high}%` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"], ["vs 21E", r => r.e21 != null ? `${r.e21 > 0 ? "+" : ""}${r.e21}%` : "—"]] },
+  { id: "pb21", label: "21-EMA pullback", hint: "A leader (RS 80+, 50-day above the 200-day) that ran 8%+ above its 21-day EMA in the last 3 weeks and has pulled back to within 2% of it — the classic low-risk add.",
+    cols: [["vs 21E", r => r.e21 != null ? `${r.e21 > 0 ? "+" : ""}${r.e21}%` : "—"], ["HIGH", r => r.off_high != null ? `${r.off_high}%` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"]] },
+  { id: "first52", label: "First 52w high", hint: "First close at a 52-week high in 20+ sessions, by an RS 80+ stage-2 stock — a fresh breakout to new ground.",
+    cols: [["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"], ["vs 21E", r => r.e21 != null ? `${r.e21 > 0 ? "+" : ""}${r.e21}%` : "—"], ["HIGH", r => r.off_high != null ? `${r.off_high}%` : "—"]] },
   { id: "coil", label: "Coiling", hint: "Anticipation setups: RS 80+, above the 50-SMA, the tightest 10-day range in a month and volume drying up — strong stocks going quiet before a possible breakout.",
     cols: [["RANGE", r => r.range10 != null ? `${r.range10}%` : "—"], ["HIGH", r => r.off_high != null ? `${r.off_high}%` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"]] },
   { id: "leaders", label: "Leaders · hot sectors", hint: "Above 10/50/200-SMA, within 5% of 52-week high, in a HOT or WARM sector.",
@@ -3666,6 +3674,7 @@ const SCAN_SORT = {
   ep: (a, b) => (b.results - a.results) || (b.d > a.d ? 1 : b.d < a.d ? -1 : 0) || (b.volx * b.chg - a.volx * a.chg),
   ipo: (a, b) => (!!b.pop - !!a.pop) || (b.breakout - a.breakout) || (b.off_high ?? -999) - (a.off_high ?? -999),
   fundflow: (a, b) => (b.wk > a.wk ? 1 : b.wk < a.wk ? -1 : 0) || b.volx - a.volx,
+  htf: (a, b) => (b.rs ?? 0) - (a.rs ?? 0), pb21: (a, b) => (b.rs ?? 0) - (a.rs ?? 0), first52: (a, b) => (b.rs ?? 0) - (a.rs ?? 0),
   leaders: (a, b) => (b.ret12m ?? b.ret3m ?? -999) - (a.ret12m ?? a.ret3m ?? -999),
   tight: (a, b) => (b.ret3m ?? -999) - (a.ret3m ?? -999),
   coil: (a, b) => (b.rs ?? 0) - (a.rs ?? 0),
@@ -3714,22 +3723,24 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
   const base = {
     pivots: (data.scans.pivots || []).map(r => ({ ...r, deliv: data.deliv_of?.[r.sym] ?? null })), tight: data.scans.tight || [], reclaim50: data.scans.reclaim50 || [],
     ep: data.scans.ep || [], ipo: data.scans.ipo || [], leaders: (data.leaders || []).filter(hot), coil: data.scans.coil || [], fundflow: data.scans.fundflow || [],
+    htf: data.scans.htf || [], pb21: data.scans.pb21 || [], first52: data.scans.first52 || [],
   };
   const totals = { pivots: data.scans.pivots_total, tight: data.scans.tight_total, reclaim50: data.scans.reclaim50_total,
-    ep: data.scans.ep_total || 0, ipo: data.scans.ipo_total || 0, leaders: base.leaders.length, coil: data.scans.coil_total || 0, fundflow: data.scans.fundflow_total || 0 };
+    ep: data.scans.ep_total || 0, ipo: data.scans.ipo_total || 0, leaders: base.leaders.length, coil: data.scans.coil_total || 0, fundflow: data.scans.fundflow_total || 0,
+    htf: data.scans.htf_total || 0, pb21: data.scans.pb21_total || 0, first52: data.scans.first52_total || 0 };
   const lists = { ...base };
   if (micro && microData?.scans) {
     const m = microData.scans, tag = (xs) => (xs || []).map(x => ({ ...x, micro: true }));
-    const add = { pivots: tag(m.pivots), tight: tag(m.tight), reclaim50: tag(m.reclaim50), ep: tag(m.ep), ipo: tag(m.ipo), leaders: tag((microData.leaders || []).filter(hot)), coil: tag(m.coil), fundflow: tag(m.fundflow) };
+    const add = { pivots: tag(m.pivots), tight: tag(m.tight), reclaim50: tag(m.reclaim50), ep: tag(m.ep), ipo: tag(m.ipo), leaders: tag((microData.leaders || []).filter(hot)), coil: tag(m.coil), fundflow: tag(m.fundflow), htf: tag(m.htf), pb21: tag(m.pb21), first52: tag(m.first52) };
     for (const k of Object.keys(add)) {
       const seen = new Set(base[k].map(x => x.sym));
       lists[k] = [...base[k], ...add[k].filter(x => !seen.has(x.sym))].sort(SCAN_SORT[k]).slice(0, 25);
-      totals[k] = (totals[k] || 0) + ({ pivots: m.pivots_total, tight: m.tight_total, reclaim50: m.reclaim50_total, ep: m.ep_total, ipo: m.ipo_total, leaders: add.leaders.length, coil: m.coil_total, fundflow: m.fundflow_total }[k] || 0);
+      totals[k] = (totals[k] || 0) + ({ pivots: m.pivots_total, tight: m.tight_total, reclaim50: m.reclaim50_total, ep: m.ep_total, ipo: m.ipo_total, leaders: add.leaders.length, coil: m.coil_total, fundflow: m.fundflow_total, htf: m.htf_total, pb21: m.pb21_total, first52: m.first52_total }[k] || 0);
     }
   }
   const isWatch = tab === "watch";
   const def = SCAN_DEFS.find(x => x.id === tab) || SCAN_DEFS[0];
-  const quiet = def.id === "tight" || def.id === "coil";
+  const quiet = def.id === "tight" || def.id === "coil" || def.id === "pb21";
   const qOfRow = (r) => r.q ?? data.q_of?.[r.sym] ?? microData?.q_of?.[r.sym] ?? null;
   const rawRows = lists[def.id] || [];
   const rows = quality ? rawRows.filter(r => qualityOk(qOfRow(r), quiet)) : rawRows;
@@ -4602,7 +4613,9 @@ function positionHealth(t, trend, mq, livePrice) {
   if (mq?.follow_through?.label === "WEAK") bump(1, "Breakouts are failing market-wide");
   const days = calcDaysHeld(t);
   const st = getDaysHeldStatus(t.setupType, days);
-  if (/Decision needed/.test(st.label)) bump(1, `Day ${days}: past the time limit for a ${t.setupType}`);
+  const r1 = (t.avgEntry || t.entry) && t.stop ? (t.avgEntry || t.entry) - t.stop : null;
+  const working = r1 > 0 && trend?.close != null && trend.close >= (t.avgEntry || t.entry) + r1; // up 1R or more
+  if (/Decision needed/.test(st.label) && !working) bump(1, `Day ${days}: past the time limit for a ${t.setupType} and not up 1R`);
   // Selling into strength: far above the 10-day average in ATRs → trim; trail the stop under the 10-day low
   let trim = false;
   if (trend?.ext != null && trend.ext >= 3 && level < 2) { trim = true; reasons.push({ l: 0.5, why: `${trend.ext.toFixed(1)} ATR above its 10-day average — extended; consider selling ⅓ into strength` }); }
@@ -5440,7 +5453,7 @@ function readMicro() {
   try { return JSON.parse(localStorage.getItem("td_mq_micro_v3") || "null")?.data || null; } catch (_) { return null; }
 }
 
-const IDEA_TAG = { coil: "Coiling", deliv: "High delivery", block: "Block/bulk buy", pivot: "Pivot today", tight: "Tight", ep: "EP", epr: "EP ★ results", ipo: "IPO lifecycle", ipoup: "IPO ↑ new high", ipopop: "IPO ⚡ 4.5% day", flow: "Fund flow", leader: "Leader", watch: "★ Watching" };
+const IDEA_TAG = { coil: "Coiling", deliv: "High delivery", block: "Block/bulk buy", pivot: "Pivot today", tight: "Tight", ep: "EP", epr: "EP ★ results", ipo: "IPO lifecycle", ipoup: "IPO ↑ new high", ipopop: "IPO ⚡ 4.5% day", flow: "Fund flow", htf: "High-tight flag", pb21: "21-EMA pullback", first52: "First 52w high", leader: "Leader", watch: "★ Watching" };
 
 /**
  * One ranked, de-duplicated list of what's worth acting on today.
@@ -5458,6 +5471,7 @@ function buildIdeas(d, micro, watchlist, blockBuys = null) {
       rs: r.rs ?? src?.rs_of?.[r.sym] ?? null, grade: r.grade ?? src?.grade_of?.[r.sym] ?? null,
       plan: r.plan ?? src?.plan_of?.[r.sym] ?? null, q: r.q ?? src?.q_of?.[r.sym] ?? d.q_of?.[r.sym] ?? null, tags: new Set(), micro: !!isMicro,
     };
+    if (r.stage2 === false) x.stage2 = false;
     x.tags.add(tag); map.set(r.sym, x);
   };
   const take = (sc, isMicro) => {
@@ -5467,6 +5481,9 @@ function buildIdeas(d, micro, watchlist, blockBuys = null) {
     (sc.ep || []).forEach(r => add(r, r.results ? "epr" : "ep", isMicro));
     (sc.ipo || []).forEach(r => add(r, r.pop ? "ipopop" : r.breakout ? "ipoup" : "ipo", isMicro));
     (sc.fundflow || []).forEach(r => add(r, "flow", isMicro));
+    (sc.htf || []).forEach(r => add(r, "htf", isMicro));
+    (sc.pb21 || []).forEach(r => add(r, "pb21", isMicro));
+    (sc.first52 || []).forEach(r => add(r, "first52", isMicro));
     (sc.coil || []).forEach(r => add(r, "coil", isMicro));
   };
   take(d.scans, false);
@@ -5477,22 +5494,40 @@ function buildIdeas(d, micro, watchlist, blockBuys = null) {
   for (const x of map.values()) if ((x.tags.has("pivot") || x.tags.has("coil")) && (d.deliv_of?.[x.sym] ?? 0) >= 50) x.tags.add("deliv");
   for (const sym of blockBuys || []) if (map.has(sym)) map.get(sym).tags.add("block");
   const G = { A: 30, B: 15, C: 0 };
+  // Each list's weight follows its own record vs the average stock: +6 base, ±4 per point of excess (−6…+12)
+  const SCAN_OF = { pivot: "pivots", tight: "tight", ep: "ep", epr: "ep", coil: "coil", leader: "leaders", flow: "fundflow", htf: "htf", pb21: "pb21", first52: "first52" };
+  const weight = (tag) => { const ex = d.scan_stats?.[SCAN_OF[tag]]?.excess; return ex == null ? 6 : Math.max(-6, Math.min(12, 6 + ex * 4)); };
   return [...map.values()].map(x => {
     const st = status[x.sector];
-    const score = (G[x.grade] ?? 0) + (x.rs ?? 0) / 5 + x.tags.size * 6 + (st === "HOT" ? 6 : st === "WARM" ? 3 : 0) + (x.tags.has("watch") ? 8 : 0);
-    const quietOnly = [...x.tags].every(t => ["tight", "coil", "watch", "deliv", "block"].includes(t));
+    if (x.tags.has("pivot") && !((x.rs ?? 0) >= 80 && x.stage2 !== false)) x.tags.delete("pivot"); // pivots only paid in RS 80+ stage-2 names
+    const scanTags = [...x.tags].filter(t => SCAN_OF[t]);
+    const watchOnly = scanTags.length > 0 && scanTags.every(t => (d.scan_stats?.[SCAN_OF[t]]?.excess ?? 0) <= -0.5);
+    const score = (G[x.grade] ?? 0) + (x.rs ?? 0) / 5 + [...x.tags].reduce((a, t) => a + (SCAN_OF[t] ? weight(t) : 6), 0) + (st === "HOT" ? 6 : st === "WARM" ? 3 : 0) + (x.tags.has("watch") ? 8 : 0) - (watchOnly ? 20 : 0);
+    if (!x.tags.size) return null;
+    x.watchOnly = watchOnly;
+    const quietOnly = [...x.tags].every(t => ["tight", "coil", "pb21", "watch", "deliv", "block"].includes(t));
     return { ...x, sectorStatus: st, score: Math.round(score), qok: qualityOk(x.q, quietOnly) };
-  }).sort((a, b) => b.score - a.score);
+  }).filter(Boolean).sort((a, b) => b.score - a.score);
 }
 
-function sizeFor(plan, portfolio, riskPct) {
+const MAX_POSITION_PCT = 25, MAX_TURNOVER_PCT = 2;
+/** Quantity from risk, then capped at 25% of capital and 2% of the stock's 20-day average turnover (₹ cr). */
+function capQty(qty, entry, portfolio, turnoverCr) {
+  let cap = null;
+  const byCap = Math.floor((portfolio * MAX_POSITION_PCT / 100) / entry);
+  if (qty > byCap) { qty = byCap; cap = `capped at ${MAX_POSITION_PCT}% of capital`; }
+  if (turnoverCr > 0) { const byLiq = Math.floor((turnoverCr * 1e7 * MAX_TURNOVER_PCT / 100) / entry); if (qty > byLiq) { qty = byLiq; cap = `capped at ${MAX_TURNOVER_PCT}% of daily turnover`; } }
+  return { qty, cap };
+}
+function sizeFor(plan, portfolio, riskPct, turnoverCr = null) {
   if (!plan || !portfolio || !(riskPct > 0) || !(plan.entry > plan.stop)) return null;
-  const qty = Math.floor((portfolio * riskPct / 100) / (plan.entry - plan.stop));
-  return qty > 0 ? { qty, value: qty * plan.entry } : null;
+  const raw = Math.floor((portfolio * riskPct / 100) / (plan.entry - plan.stop));
+  const { qty, cap } = capQty(raw, plan.entry, portfolio, turnoverCr);
+  return qty > 0 ? { qty, value: qty * plan.entry, cap } : null;
 }
 
 function IdeaRow({ x, portfolio, riskPct, onOpen, onPlan, compact }) {
-  const size = sizeFor(x.plan, portfolio, riskPct);
+  const size = x.watchOnly ? null : sizeFor(x.plan, portfolio, riskPct, x.q?.to);
   const cal = useResultsCal();
   const res = cal ? upcomingResults(cal, x.sym, 10) : null;
   return (
@@ -5512,7 +5547,8 @@ function IdeaRow({ x, portfolio, riskPct, onOpen, onPlan, compact }) {
       {x.plan && !compact && (
         <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 4, fontFamily: "var(--mono)" }}>
           Entry ₹{x.plan.entry} · Stop ₹{x.plan.stop} ({x.plan.riskPct}%)
-          {size ? <span style={{ color: "var(--text)" }}> · {size.qty} sh ≈ {formatINR(size.value)}</span> : riskPct === 0 ? <span style={{ color: C.warn }}> · no new entries today</span> : null}
+          {x.watchOnly ? <span style={{ color: C.warn }} title="Only on lists whose record lost to the average stock"> · watch only (weak-record list)</span>
+            : size ? <span style={{ color: "var(--text)" }}> · {size.qty} sh ≈ {formatINR(size.value)}{size.cap && <span style={{ color: C.warn }}> ({size.cap})</span>}</span> : riskPct === 0 ? <span style={{ color: C.warn }}> · no new entries today</span> : null}
         </div>
       )}
     </div>
@@ -5879,7 +5915,7 @@ function GQuad() {
 function GRecord({ stats }) {
   const rows = Object.entries(stats || {}).filter(([, v]) => v && v.excess != null);
   if (!rows.length) return null;
-  const NAME = { pivots: "Pivots", ep: "Earnings EP", tight: "Tight", reclaim50: "Reclaim 50", leaders: "Leaders", coil: "Coiling", fundflow: "Fund flow" };
+  const NAME = { pivots: "Pivots", ep: "Earnings EP", tight: "Tight", reclaim50: "Reclaim 50", leaders: "Leaders", coil: "Coiling", fundflow: "Fund flow", htf: "High-tight", pb21: "21-EMA pb", first52: "First 52w hi" };
   const mx = Math.max(1.5, ...rows.map(([, v]) => Math.abs(v.excess)));
   return (
     <div style={{ margin: "8px 0 12px" }}>

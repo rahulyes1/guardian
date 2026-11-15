@@ -18,7 +18,7 @@ export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 let API_BASE = "";
 export function setApiBase(url) { API_BASE = String(url || "").replace(/\/+$/, ""); }
 
-const LOCAL_KEY       = "td_mq_v16";  // v16: accuracy fixes (universe-scaled green light, MBI infinities, listings)
+const LOCAL_KEY       = "td_mq_v17";  // v16: accuracy fixes (universe-scaled green light, MBI infinities, listings)
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
@@ -93,7 +93,7 @@ export function configureSharedStore(getClient) { sharedClientGetter = getClient
 
 function looksValid(d) {
   return d && MQ_SIGNALS.includes(d.overall) && Array.isArray(d.history) && typeof d.total === "number" && d.total >= 400
-    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d && Array.isArray(d.scans.ep) && d.rs_of && d.scan_stats && d.plan_of && d.market_monitor && Array.isArray(d.scans.coil) && d.mbi && d.green_light !== undefined && Array.isArray(d.scans.fundflow) && d.q_of && d.dip !== undefined;
+    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d && Array.isArray(d.scans.ep) && d.rs_of && d.scan_stats && d.plan_of && d.market_monitor && Array.isArray(d.scans.coil) && d.mbi && d.green_light !== undefined && Array.isArray(d.scans.fundflow) && d.q_of && d.dip !== undefined && Array.isArray(d.scans.htf);
 }
 async function readShared() {
   const sb = sharedClientGetter?.();
@@ -273,6 +273,10 @@ export function tradePlan(closes, i = closes.length - 1) {
   const entry = +(breaking ? c : pivot * 1.002).toFixed(2);
   let stop = +(Math.min(...w5) * 0.99).toFixed(2), note = null;
   if (stop >= entry) stop = +(entry * 0.95).toFixed(2);
+  // A stop inside normal daily noise gets hit by noise: keep it at least 1.5× the 60-day average move away
+  let mv = 0, mn = 0; for (let k = Math.max(1, i - 59); k <= i; k++) if (closes[k] != null && closes[k - 1] != null) { mv += Math.abs(closes[k] / closes[k - 1] - 1); mn++; }
+  const minDist = mn >= 20 ? 1.5 * (mv / mn) : 0;
+  if (minDist > 0 && (entry - stop) / entry < minDist) { stop = +(entry * (1 - minDist)).toFixed(2); note = `Stop widened to 1.5× the average daily move (${(minDist * 100).toFixed(1)}%)`; }
   if ((entry - stop) / entry > 0.08) { stop = +(entry * 0.92).toFixed(2); note = "Stop capped at 8% below entry"; }
   return { entry, stop, riskPct: +(((entry - stop) / entry) * 100).toFixed(1), breaking, pivot: +pivot.toFixed(2), note };
 }
@@ -283,7 +287,7 @@ export function tradePlan(closes, i = closes.length - 1) {
  * Returns { scanId: { signals, days, hit, avg, excess, from, to } }.
  */
 export function scanBacktest(axis, stocks, volumes, last, horizon = 10, lookback = 250, opts = {}) {
-  const ids = ["pivots", "ep", "tight", "reclaim50", "leaders", "coil"];
+  const ids = ["pivots", "ep", "tight", "reclaim50", "leaders", "coil", "htf", "pb21", "first52"];
   const mk = () => Object.fromEntries(ids.map(id => [id, { n: 0, up: 0, sum: 0, ex: 0, days: new Set() }]));
   const acc = mk(), accR = mk(), accQ = mk();
   const start = Math.max(60, last - horizon - lookback), end = last - horizon;
@@ -312,6 +316,8 @@ export function scanBacktest(axis, stocks, volumes, last, horizon = 10, lookback
     }
     if (!uN) continue;
     const uAvg = uSum / uN;
+    const r63 = []; for (const st of stocks) { const a = st.closes[t], b = st.closes[t - 63]; if (a != null && b != null) r63.push(a / b - 1); }
+    r63.sort((a, b) => a - b); const rsCut = r63.length ? r63[Math.floor(r63.length * 0.8)] : Infinity;
     const add = (a, r) => { a.n++; a.sum += r; a.ex += r - uAvg; if (r > 0) a.up++; a.days.add(t); };
     const hit = (id, st) => {
       const r = fwd.get(st); if (r == null) return;
@@ -339,6 +345,7 @@ export function scanBacktest(axis, stocks, volumes, last, horizon = 10, lookback
       }
       if (s50 != null && st.s50[t - 1] != null && x > s50 && p <= st.s50[t - 1]) hit("reclaim50", st);
       if (st.s10[t] != null && s50 != null && s200 != null && h != null && x > st.s10[t] && x > s50 && x > s200 && x >= h * 0.95) hit("leaders", st);
+      { const b = st.closes[t - 63]; for (const id of setupHits(st, t, b != null && x / b - 1 >= rsCut)) hit(id, st); }
       if (s50 != null && x > s50) {
         const rng = (i) => { const w = c.slice(i - 9, i + 1).filter(y => y != null); return w.length >= 8 ? Math.max(...w) / Math.min(...w) - 1 : null; };
         const now = rng(t);
@@ -416,6 +423,43 @@ export function computeFollowThrough(axis, aligned, volumes, lookback = 10, keep
 const NOT_IPO = new Set(["TMCV", "PIRAMALFIN", "VAML", "VISL", "VOGL", "VEDPOWER"]);
 
 // ─── series math ─────────────────────────────────────────────────────────────
+export function emaSeries(arr, period) {
+  const out = new Array(arr.length).fill(null), k = 2 / (period + 1);
+  let e = null, seen = 0;
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i]; if (v == null) { out[i] = e != null && seen >= period ? e : null; continue; }
+    e = e == null ? v : v * k + e * (1 - k); seen++;
+    out[i] = seen >= period ? e : null;
+  }
+  return out;
+}
+/** Classic setups on day t (closes only). rsOk = strength rank 80+ (or a stand-in for it). */
+export function setupHits(st, t, rsOk) {
+  const c = st.closes, x = c[t]; const out = [];
+  if (x == null) return out;
+  const stage2 = st.s50[t] != null && st.s200[t] != null && x > st.s200[t] && st.s50[t] > st.s200[t];
+  // High-tight flag (lite): up 60%+ from the low ~2 months ago, last 10 closes within 15%, near the peak
+  let lo = Infinity, pk = -Infinity;
+  for (let k = t - 50; k <= t - 10; k++) if (k >= 0 && c[k] != null) lo = Math.min(lo, c[k]);
+  for (let k = t - 15; k <= t; k++) if (k >= 0 && c[k] != null) pk = Math.max(pk, c[k]);
+  const w = c.slice(Math.max(0, t - 9), t + 1).filter(v => v != null);
+  if (Number.isFinite(lo) && pk / lo >= 1.6 && w.length >= 8 && Math.max(...w) / Math.min(...w) - 1 <= 0.15 && x >= pk * 0.9) out.push("htf");
+  if (rsOk && stage2) {
+    // Pullback to the 21-day EMA in a leader: was 8%+ above it in the last 15 sessions, now within ±2%
+    const e = st.e21[t];
+    if (e != null && Math.abs(x / e - 1) <= 0.02) {
+      let ext = false; for (let k = t - 15; k < t; k++) if (k >= 0 && c[k] != null && st.e21[k] != null && c[k] / st.e21[k] - 1 >= 0.08) { ext = true; break; }
+      if (ext) out.push("pb21");
+    }
+    // First close at a 52-week high in 20+ sessions
+    if (st.h252[t] != null && x >= st.h252[t]) {
+      let prior = false; for (let k = t - 20; k < t; k++) if (k >= 0 && c[k] != null && st.h252[k] != null && c[k] >= st.h252[k]) { prior = true; break; }
+      if (!prior) out.push("first52");
+    }
+  }
+  return out;
+}
+
 export function smaSeries(arr, period, minP = Math.ceil(period * 0.75)) {
   const out = new Array(arr.length).fill(null);
   const buf = new Array(period).fill(null);
@@ -460,6 +504,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
       s50:  smaSeries(closes, 50, 40),
       s20:  smaSeries(closes, 20, 15),
       s10:  smaSeries(closes, 10, 8),
+      e21:  emaSeries(closes, 21),
       h252: rollExtreme(closes, 252, true), l252: rollExtreme(closes, 252, false),
       h20:  rollExtreme(closes, 20, true),  l20:  rollExtreme(closes, 20, false),
       h65:  rollExtreme(closes, 65, true),  l65:  rollExtreme(closes, 65, false),
@@ -909,6 +954,12 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
       off_high: st.h252[last] != null ? r1((cl / st.h252[last] - 1) * 100) : null });
   }
   coil.sort((a, b) => (rsOf[b.sym] ?? 0) - (rsOf[a.sym] ?? 0));
+  const setups = { htf: [], pb21: [], first52: [] };
+  for (const st of stocks) {
+    const hits = setupHits(st, last, (rsOf[st.sym] ?? 0) >= 80);
+    for (const id of hits) setups[id].push({ ...base(st), e21: st.e21[last] != null ? r1((st.closes[last] / st.e21[last] - 1) * 100) : null });
+  }
+  for (const [id, rows] of Object.entries(setups)) { rows.sort((a, b) => (rsOf[b.sym] ?? 0) - (rsOf[a.sym] ?? 0)); scans[id] = rows.slice(0, 15); scans[id + "_total"] = rows.length; }
   scans.coil = coil.slice(0, 15); scans.coil_total = coil.length;
 
   // Market Monitor (Stockbee-style breadth of momentum): stocks up / down ≥4% on rising volume
@@ -1101,7 +1152,9 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
 
   const enrich = (rows) => (rows || []).forEach(r => { r.rs = rsOf[r.sym] ?? null; r.grade = gradeOf[r.sym] ?? null; r.plan = planOf[r.sym] ?? null; r.q = qOf[r.sym] ?? null; });
   enrich(leaders);
-  for (const k of ["pivots", "tight", "reclaim50", "ep", "ipo", "coil", "fundflow"]) enrich(scans[k]);
+  for (const k of ["pivots", "tight", "reclaim50", "ep", "ipo", "coil", "fundflow", "htf", "pb21", "first52"]) enrich(scans[k]);
+  // pivots: flag whether the stock is a strong stage-2 name (where pivots actually worked)
+  for (const r of scans.pivots) { const st = stocks.find(x => x.sym === r.sym); r.stage2 = !!(st && st.s50[last] != null && st.s200[last] != null && st.s50[last] > st.s200[last] && st.closes[last] > st.s200[last]); }
   for (const rows of Object.values(sectorStocks)) enrich(rows);
   for (const t of themes) enrich(t.top);
 
@@ -1109,6 +1162,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   const scanStats = scanBacktest(axis, stocks, volumes, last, 10, 250, { microcap: !!opts.microcap });
   scanStats.fundflow = ffBt;
   if (scanStats.coil) scanStats.coil.approx = "Record tests the price pattern only — without the RS 80+ and volume dry-up filters of today's list.";
+  for (const id of ["pb21", "first52"]) if (scanStats[id]) scanStats[id].approx = "Record uses the top 20% by 3-month return as a stand-in for RS 80+.";
   if (scanStats.ep) scanStats.ep.approx = "Record enters on the move day itself; today's list also keeps moves up to 5 sessions old.";
   for (const v of Object.values(scanStats)) if (v) v.survivor = true; // tested on today's index members
 
@@ -1277,7 +1331,7 @@ export function upcomingResults(cal, sym, days = 7) {
 }
 
 // ─── wider universe: NSE Microcap 250 (loaded on demand, scans only) ─────────
-const MICRO_KEY = "td_mq_micro_v7"; // v7: accuracy fixes
+const MICRO_KEY = "td_mq_micro_v8"; // v8: + HTF, 21-EMA pullback, first 52w high
 let _microInflight = null;
 export async function loadMicrocapScans({ force = false } = {}) {
   if (!force) {
