@@ -27,8 +27,8 @@ const THEME_TOKENS = {
   selectorInactiveText: C.muted,
   portfolioValue: "#D4CCB6",
   openRiskValue: "#D4CCB6",
-  heatNeutral: "#D4CCB6",
-  heatWarm: C.muted,
+  heatNeutral: "var(--text)",
+  heatWarm: C.warn,
   heatHot: C.neg,
 };
 
@@ -899,10 +899,10 @@ const GlobalStyle = () => (
       /* ── Flame orange-red (loss / Rengoku) ── */
       --red:     #DC143C;
       /* ── Thunder gold (caution / Zenitsu) ── */
-      --amber:   #A39C89;
+      --amber:   #F59E0B;
       /* ── Void violet (primary accent) ── */
-      --blue:    #8B0000;
-      --violet:  #DC143C;
+      --blue:    #1D4ED8;
+      --violet:  #3B82F6;
       --mono:    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
       --display: 'Inter', sans-serif;
       --body:    'Inter', sans-serif;
@@ -913,8 +913,8 @@ const GlobalStyle = () => (
       --bg: #F6F4EF; --bg2: #FFFFFF; --bg3: #F1EEE7; --bg4: #E9E5DC;
       --border: #DDD7CB; --border2: #CFC8BA;
       --text: #1D1B17; --text2: #4A463E; --text3: #6E685C;
-      --green: #15803D; --green2: #166534; --red: #C8102E; --amber: #8A6D3B;
-      --blue: #8B0000; --violet: #C8102E; --bar: rgba(246,244,239,0.96);
+      --green: #15803D; --green2: #166534; --red: #C8102E; --amber: #B45309;
+      --blue: #1E3A8A; --violet: #1D4ED8; --bar: rgba(246,244,239,0.96);
       color-scheme: light;
     }
     .skel { background: linear-gradient(90deg, var(--bg3) 25%, var(--bg4) 50%, var(--bg3) 75%); background-size: 200% 100%; animation: skel 1.4s ease-in-out infinite; border-radius: 8px; }
@@ -1131,7 +1131,7 @@ const GlobalStyle = () => (
     .chip.active {
       border-color: var(--violet);
       color: var(--violet);
-      background: rgba(220, 20, 60, 0.08);
+      background: rgba(59, 130, 246, 0.10);
       box-shadow: none;
     }
 
@@ -1381,6 +1381,7 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
       <SectionBoundary name="Market brief">
         <MarketBrief onOpenQuad={() => setPage("quadrant")} onOpenScan={() => setPage("scan")} />
       </SectionBoundary>
+      <Guide id="app" />
 
       {/* 2 · Your book — what needs action first */}
       <SectionBoundary name="Your positions">
@@ -1525,8 +1526,10 @@ function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillS
   const [entry, setEntry] = useState("");
   const [stop, setStop] = useState("");
   const [target, setTarget] = useState("");
-  const [riskPct, setRiskPct] = useState(1);
-  const [customRisk, setCustomRisk] = useState("");
+  // Start from today's suggested risk (the same number TODAY and IDEAS use)
+  const todayRisk = suggestedRisk(getLastMarketQuadrant())?.pct;
+  const [riskPct, setRiskPct] = useState(() => ([0.5, 1, 1.5, 2].includes(todayRisk) ? todayRisk : 1));
+  const [customRisk, setCustomRisk] = useState(() => (todayRisk > 0 && ![0.5, 1, 1.5, 2].includes(todayRisk) ? String(todayRisk) : ""));
   const [qty, setQty] = useState("");
   const [qtyMode, setQtyMode] = useState("auto");
 
@@ -3184,6 +3187,8 @@ function MarketQuadrantPage({ onPickStock }) {
         </div>
       )}
 
+      <QuadJumpBar />
+      <div id="q-signal" style={{ scrollMarginTop: 100 }}><Guide id="signal" d={data} compact /></div>
       {/* ── Overall Signal ── */}
       <div style={{ background: sigBg, border: `1px solid ${sigColor}33`, borderRadius: 18, padding: "20px 16px", marginBottom: 14, textAlign: "center" }}>
         <div style={{ fontSize: 11, color: "var(--text3)", letterSpacing: "0.14em", marginBottom: 8 }}>OVERALL SIGNAL</div>
@@ -3206,18 +3211,12 @@ function MarketQuadrantPage({ onPickStock }) {
         )}
       </div>
 
-      <MqEnvironment data={data} />
-      <EtfPanel lockout={data.environment?.lockout} onPickStock={onPickStock} />
-      <MqFlowsDeals data={data} onPickStock={onPickStock} />
-      <MqFollowThrough data={data} />
-      <MqMarketMonitor mm={data.market_monitor} />
-      <MqGreenLight gl={data.green_light} />
-      <MqMbi mbi={data.mbi} dip={data.dip} />
 
       <MqVerificationBadge data={data} />
 
       <MqSignalTimeline history={h} />
 
+      <QuadSection id="dims" title="The four readings" d={data} />
       {/* ── Four Dimensions ── */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
         {[
@@ -3254,6 +3253,11 @@ function MarketQuadrantPage({ onPickStock }) {
         ))}
       </div>
 
+      <QuadSection id="sizing" title="Sizing" d={data} />
+      <MqEnvironment data={data} />
+      <MqGreenLight gl={data.green_light} />
+      <MqFollowThrough data={data} />
+      <QuadSection id="breadth" title="Breadth" d={data} />
       <MqBreadthChart history={h} />
 
       {/* ── Breadth Bars ── */}
@@ -3294,12 +3298,18 @@ function MarketQuadrantPage({ onPickStock }) {
         </div>
       </div>
 
+      <MqMbi mbi={data.mbi} dip={data.dip} />
+      <MqMarketMonitor mm={data.market_monitor} />
+      <QuadSection id="sectors" title="Sectors & themes" d={data} />
       <MqSectorGrid sectors={data.sectors} sectorStocks={data.sector_stocks} selected={sector} onSelect={setSector} onPickStock={onPickStock} />
       <MqRotationMap data={data} onSelect={(n) => { setSector(n); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
       <MqSectorRotation data={data} onSelect={setSector} />
       <MqThemes themes={data.themes} onPickStock={onPickStock} />
       <MqLeaders leaders={sector ? data.leaders.filter(l => l.sector === sector) : data.leaders} sector={sector} onClear={() => setSector(null)} onPickStock={onPickStock} />
 
+      <QuadSection id="flows" title="Institutions" d={data} />
+      <MqFlowsDeals data={data} onPickStock={onPickStock} />
+      <EtfPanel lockout={data.environment?.lockout} onPickStock={onPickStock} />
       {/* ── To Upgrade ── */}
       {data.to_upgrade?.length > 0 && (
         <div style={mqCardStyle}>
@@ -3327,6 +3337,7 @@ function MarketQuadrantPage({ onPickStock }) {
         </div>
       )}
 
+      <QuadSection id="record" title="Track record" d={data} />
       <MqSignalBacktest bt={data.signal_backtest} />
       <MqWeeklyReport data={data} />
 
@@ -3434,16 +3445,15 @@ function MarketSignalStats({ closed }) {
 
 /** One-line rule for today, from signal + environment + follow-through + lows. */
 function briefRule(d) {
-  const env = d.environment?.name;
-  let rule;
-  if (d.overall === "CASH" || env === "NO MONEY") rule = "No new entries. Protect capital; let stops do their job.";
-  else if (env === "HARD MONEY") rule = d.environment?.lockout
-    ? "Small size. Prefer index ETFs or lower-timeframe entries; don't chase extended stocks."
-    : "Half size. Only A+ setups in HOT/WARM sectors; take profits quicker.";
-  else rule = d.follow_through?.label === "STRONG"
-    ? "Full size on A-grade setups in HOT/WARM sectors; let winners run."
-    : "Normal size, but wait for follow-through — breakouts are a coin flip right now.";
-  if (d.lows_ok === false) rule += ` ${d.new_lows} stocks at 52-week lows — cap size.`;
+  const env = d.environment?.name, sr = suggestedRisk(d);
+  if (!sr || sr.pct === 0) {
+    const why = d.green_light?.band === "SMALL" ? "breakouts are failing (green light below 9)" : d.overall === "CASH" ? "the signal is CASH" : "no-money environment";
+    return `No new entries — ${why}. Protect capital; let stops do their job.`;
+  }
+  let rule = `Risk ${sr.pct}% per trade. `;
+  if (env === "HARD MONEY") rule += d.environment?.lockout ? "Prefer index ETFs or lower-timeframe entries; don't chase extended stocks." : "Only A+ setups in HOT/WARM sectors; take profits quicker.";
+  else rule += sr.pct >= 1 ? "A/B setups in HOT/WARM sectors; let winners run." : "Best setups only; wait for follow-through.";
+  if (d.lows_ok === false) rule += ` ${d.new_lows} stocks at 52-week lows.`;
   return rule;
 }
 
@@ -3489,12 +3499,12 @@ function Skeleton({ lines = 4 }) {
 }
 
 const TOUR = [
-  ["TODAY", "Your market brief: today's signal, environment and one rule for the day, what changed, your watchlist alerts and open positions with HOLD / TIGHTEN / EXIT."],
-  ["SCAN", "Ready-made lists from the Nifty 500 (and Microcap 250): pivots, tight setups, earnings EPs, IPO bases, leaders — each with its past-year record, strength rank and grade."],
-  ["Stock pages", "Tap any stock for its chart (daily or weekly), relative strength, setup grade, results warning and a suggested entry/stop you can send to CALC."],
-  ["CALC", "Size the trade: risk is suggested from today's environment and capped by your total open risk."],
-  ["TRADES", "Your journal (or import a Zerodha tradebook) and stats: results by market condition, discipline, equity curve, drawdown odds and exit replay."],
-  ["QUAD", "The full Nifty 500 breadth picture, verified against NSE every evening: Bias, Trend, Swing, Momentum, sectors, themes, rotation and the weekly report."],
+  ["TODAY", "Your market brief — signal, today's risk per trade and what changed — then your positions with HOLD / TRIM / TIGHTEN / EXIT and today's best setups. Tap ⓘ for how it all fits together."],
+  ["SCAN", "Ready-made lists from the Nifty 500 (and Microcap 250), each with its own track record. The quality gate hides thin or slow stocks."],
+  ["IDEAS", "Everything worth a look in one ranked list, already sized for today's risk, with results dates flagged."],
+  ["Plan sheet", "Tap Plan on any idea (or + Plan a trade): entry, stop and quantity from today's risk, capped by your open risk."],
+  ["PLAYBOOK", "Your setups with rules and live examples, plus your journal, Zerodha import and stats."],
+  ["QUAD", "The full market picture — readings, sizing, breadth, sectors, institutions and every gauge's record. Each section has an ⓘ guide."],
 ];
 function Tour({ onDone }) {
   const [i, setI] = useState(0);
@@ -3535,6 +3545,7 @@ function AppSettings({ onTour }) {
 function MarketBrief({ onOpenQuad, onOpenScan }) {
   const { data, loading, error, progress, retry } = useMarketQuadrant();
   const { flows } = useFlowsDeals();
+  const [allChanges, setAllChanges] = useState(false);
   if (!data?.history) {
     return (
       <div className="card" style={{ marginBottom: 14 }}>
@@ -3592,12 +3603,13 @@ function MarketBrief({ onOpenQuad, onOpenScan }) {
       {changes.length > 0 && (
         <div style={{ marginTop: 12 }}>
           <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.12em", marginBottom: 6 }}>WHAT CHANGED</div>
-          {changes.slice(0, 8).map((c, i) => (
+          {changes.slice(0, allChanges ? 8 : 3).map((c, i) => (
             <div key={i} style={{ display: "flex", gap: 8, fontSize: 12, color: "var(--text2)", padding: "3px 0", lineHeight: 1.4 }}>
               <span style={{ width: 6, height: 6, borderRadius: 3, background: c.tone, marginTop: 6, flexShrink: 0 }} />
               <span>{c.text}</span>
             </div>
           ))}
+          {changes.length > 3 && <button className="chip" style={{ marginTop: 4, fontSize: 11 }} onClick={() => setAllChanges(v => !v)}>{allChanges ? "Show less" : `+${Math.min(8, changes.length) - 3} more`}</button>}
         </div>
       )}
 
@@ -3613,7 +3625,7 @@ function MarketBrief({ onOpenQuad, onOpenScan }) {
           <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 6 }}>
             {m && <>MBI <b style={{ color: MBI_COLOR[m.color] }}>{m.color.toLowerCase()} day</b></>}
             {m && g?.band ? " · " : ""}
-            {g?.band && <>Green light <b style={{ color: GL_COLOR[g.band] }}>{g.em} → {GL_TEXT[g.band].toLowerCase()}</b></>}
+            {g?.band && <>Green light <b style={{ color: GL_COLOR[g.band] }}>{g.em}</b></>}
             {d.dip?.today && <> · <b style={{ color: C.pos }}>pullback window</b></>}
           </div>
         );
@@ -3625,9 +3637,7 @@ function MarketBrief({ onOpenQuad, onOpenScan }) {
         </button>
         <button className="btn-ghost" style={{ flex: 1, padding: "10px 8px", fontSize: 12 }} onClick={onOpenQuad}>Full QUAD ›</button>
       </div>
-      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 8 }}>
-        Header regime ({d.bias}) is set automatically from this breadth data.
-      </div>
+
     </div>
   );
 }
@@ -3730,6 +3740,7 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
     <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
       {head}
       <MarketSignalBanner />
+      <Guide id="scan" d={data} />
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 11, color: "var(--text3)" }}>
         Universe:
         {[[false, "Nifty 500"], [true, "+ Microcap 250"]].map(([v, l]) => (
@@ -4361,6 +4372,7 @@ function MqWeeklyReport({ data }) {
           <button onClick={copy} className="chip" style={{ fontSize: 10, letterSpacing: 0 }}>{copied ? "Copied ✓" : "Copy"}</button>
         </span>
       </div>
+      <Guide id="ideas" d={data} />
       <div style={{ display: "flex", gap: 6, overflowX: "auto", marginBottom: 10, scrollbarWidth: "none" }}>
         {reports.map((r, i) => (
           <button key={r.key} className="chip" onClick={() => setSel(i)} aria-pressed={i === sel}
@@ -5793,6 +5805,216 @@ function MqGreenLight({ gl }) {
       <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>
         Our own formula, lined up against the public EM series on <a href={SG_LINK} target="_blank" rel="noreferrer" style={{ color: "var(--text2)" }}>thestocksgeeks.com</a> (r ≈ 0.83); Umang's EM itself is his and not reproduced here.
       </div>
+    </div>
+  );
+}
+
+// ─── Infographic guides: "How to read this" for every section ─────────────────
+function GScale({ min = 0, max = 100, zones, value, unit = "", label }) {
+  const pos = (v) => `${Math.max(0, Math.min(100, ((v - min) / (max - min)) * 100))}%`;
+  return (
+    <div style={{ margin: "8px 0 14px" }}>
+      {label && <div style={{ fontSize: 11, color: "var(--text2)", marginBottom: 4 }}>{label}{value != null && <b style={{ fontFamily: "var(--mono)", marginLeft: 6 }}>{value}{unit}</b>}</div>}
+      <div style={{ position: "relative", display: "flex", height: 14, borderRadius: 7, overflow: "hidden" }}>
+        {zones.map(([a, b, c], i) => <div key={i} style={{ width: `${((b - a) / (max - min)) * 100}%`, background: c, opacity: 0.75 }} />)}
+        {value != null && <div style={{ position: "absolute", left: pos(value), top: -3, bottom: -3, width: 3, marginLeft: -1.5, background: "var(--text)", borderRadius: 2, boxShadow: "0 0 0 2px var(--bg2)" }} />}
+      </div>
+      <div style={{ display: "flex", fontSize: 9.5, color: "var(--text3)", marginTop: 3 }}>
+        {zones.map(([a, b, , t], i) => <div key={i} style={{ width: `${((b - a) / (max - min)) * 100}%`, textAlign: "center", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis", padding: "0 1px" }}>{t}</div>)}
+      </div>
+    </div>
+  );
+}
+function GFlow({ steps }) {
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "stretch", gap: 4, margin: "8px 0 12px" }}>
+      {steps.map((st, i) => (
+        <Fragment key={i}>
+          {i > 0 && <div style={{ alignSelf: "center", color: "var(--text3)", fontSize: 14 }} aria-hidden="true">{st.op || "→"}</div>}
+          <div style={{ flex: "1 1 70px", minWidth: 70, border: `1.5px solid ${st.c || "var(--border2)"}`, background: st.c ? `${st.c}14` : "var(--bg3)", borderRadius: 10, padding: "6px 7px", textAlign: "center" }}>
+            <div style={{ fontSize: 10.5, fontWeight: 800, color: st.c || "var(--text)", letterSpacing: "0.04em" }}>{st.t}</div>
+            {st.s && <div style={{ fontSize: 10, color: "var(--text2)", marginTop: 2, lineHeight: 1.35 }}>{st.s}</div>}
+          </div>
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+function GPoints({ items }) {
+  return (
+    <div style={{ display: "grid", gap: 5 }}>
+      {items.map(([icon, text], i) => (
+        <div key={i} style={{ display: "flex", gap: 8, fontSize: 12, color: "var(--text2)", lineHeight: 1.45 }}>
+          <span style={{ flexShrink: 0, width: 18, textAlign: "center" }} aria-hidden="true">{icon}</span><span>{text}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+function GQuad() {
+  const cell = (t, s, c, arrow) => (
+    <div style={{ border: `1.5px solid ${c}`, background: `${c}14`, borderRadius: 10, padding: "8px 6px", textAlign: "center", position: "relative" }}>
+      <div style={{ fontSize: 11, fontWeight: 800, color: c }}>{t}</div>
+      <div style={{ fontSize: 10, color: "var(--text2)", marginTop: 2 }}>{s}</div>
+      <div style={{ position: "absolute", right: 6, top: 4, fontSize: 12, color: "var(--text3)" }}>{arrow}</div>
+    </div>
+  );
+  return (
+    <div style={{ margin: "8px 0 12px" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "18px 1fr 1fr", gap: 6, alignItems: "center" }}>
+        <div style={{ fontSize: 9, color: "var(--text3)", writingMode: "vertical-rl", transform: "rotate(180deg)", textAlign: "center" }}>rising</div>
+        {cell("IMPROVING", "weak but getting better — early", C.lime, "→")}
+        {cell("LEADING", "strong and still rising — buy here", C.pos, "↓")}
+        <div style={{ fontSize: 9, color: "var(--text3)", writingMode: "vertical-rl", transform: "rotate(180deg)", textAlign: "center" }}>falling</div>
+        {cell("LAGGING", "weak and getting weaker — avoid", C.neg, "↑")}
+        {cell("WEAKENING", "strong but fading — tighten", C.warn, "←")}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "18px 1fr 1fr", gap: 6, fontSize: 9.5, color: "var(--text3)", marginTop: 3, textAlign: "center" }}>
+        <span /> <span>breadth below 50%</span><span>breadth 50%+</span>
+      </div>
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 4, textAlign: "center" }}>Sectors usually rotate clockwise: Improving → Leading → Weakening → Lagging</div>
+    </div>
+  );
+}
+function GRecord({ stats }) {
+  const rows = Object.entries(stats || {}).filter(([, v]) => v && v.excess != null);
+  if (!rows.length) return null;
+  const NAME = { pivots: "Pivots", ep: "Earnings EP", tight: "Tight", reclaim50: "Reclaim 50", leaders: "Leaders", coil: "Coiling", fundflow: "Fund flow" };
+  const mx = Math.max(1.5, ...rows.map(([, v]) => Math.abs(v.excess)));
+  return (
+    <div style={{ margin: "8px 0 12px" }}>
+      <div style={{ fontSize: 10, color: "var(--text3)", marginBottom: 4 }}>Each scan vs the average stock, 10 sessions later (past year)</div>
+      {rows.sort((a, b) => b[1].excess - a[1].excess).map(([k, v]) => (
+        <div key={k} style={{ display: "grid", gridTemplateColumns: "78px 1fr 1fr 40px", alignItems: "center", gap: 4, fontSize: 10.5, margin: "2px 0" }}>
+          <span style={{ color: "var(--text2)", whiteSpace: "nowrap" }}>{NAME[k] || k}</span>
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>{v.excess < 0 && <div style={{ width: `${(Math.abs(v.excess) / mx) * 100}%`, height: 10, background: C.neg, borderRadius: "5px 0 0 5px" }} />}</div>
+          <div style={{ borderLeft: "1px solid var(--text3)" }}>{v.excess > 0 && <div style={{ width: `${(v.excess / mx) * 100}%`, height: 10, background: C.pos, borderRadius: "0 5px 5px 0" }} />}</div>
+          <span style={{ fontFamily: "var(--mono)", color: v.excess >= 0.5 ? C.pos : v.excess <= -0.5 ? C.neg : "var(--text3)", textAlign: "right" }}>{v.excess > 0 ? "+" : ""}{v.excess}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const GUIDES = {
+  app: () => ({
+    title: "How TRADESK works — 5 steps every day",
+    body: <>
+      <GFlow steps={[{ t: "1 · MARKET", s: "Is the tape safe? Signal + environment", c: C.lime }, { t: "2 · SIZE", s: "Risk % per trade for today", c: C.warn }, { t: "3 · SETUPS", s: "SCAN / IDEAS: graded, ranked", c: C.pos }, { t: "4 · PLAN", s: "Entry, stop, quantity", c: "var(--violet)" }, { t: "5 · MANAGE", s: "Hold · Trim · Tighten · Exit", c: C.neg }]} />
+      <GPoints items={[["🧭", "The market decides how much you risk — never the stock alone."], ["🎯", "Only take A/B setups that pass the quality gate, in HOT/WARM sectors."], ["🛑", "Every trade has a stop before entry. Size = risk ÷ (entry − stop)."], ["🔁", "Positions are re-checked every day: below the 10/20/50-day line or a cold sector → act."]]} />
+    </>,
+  }),
+  signal: (d) => ({
+    title: "Overall signal — four readings, one verdict",
+    body: <>
+      <GFlow steps={[{ t: "BIAS", s: "long term (200-day)" }, { t: "TREND", s: "medium (50-day)", op: "+" }, { t: "SWING", s: "short (10 vs 20-day)", op: "+" }, { t: "MOMENTUM", s: "is breadth accelerating?", op: "+" }]} />
+      <GFlow steps={[{ t: "3–4 positive", s: "INVEST — trade normally", c: MQ_SIGNAL_COLOR.INVEST }, { t: "2 positive", s: "SELECTIVE — best setups only", c: MQ_SIGNAL_COLOR.SELECTIVE, op: "·" }, { t: "0–1 positive", s: "CASH — protect capital", c: MQ_SIGNAL_COLOR.CASH, op: "·" }]} />
+      <GPoints items={[["📊", `Today: ${d.overall}. Bias ${d.bias}, Trend ${d.trend}, Swing ${d.swing_state}, Momentum ${d.momentum_sign === "POSITIVE" ? "positive" : "negative"}.`], ["✓", "Computed from all Nifty 500 stocks and checked against NSE's official closes every evening."], ["⏳", "Bias only flips after 20 sessions on the other side of 50% — it ignores short shake-outs."]]} />
+    </>,
+  }),
+  dims: (d) => ({
+    title: "The four readings — % of stocks above their averages",
+    body: <>
+      <GScale label="Bias · above the 200-day" value={d.pct_above_200} unit="%" zones={[[0, 30, C.neg, "weak"], [30, 50, C.warn, "mixed"], [50, 75, C.lime, "healthy"], [75, 100, C.pos, "strong"]]} />
+      <GScale label="Trend · above the 50-day" value={d.pct_above_50} unit="%" zones={[[0, 20, C.neg, "washed out"], [20, 50, C.warn, "weak"], [50, 80, C.lime, "healthy"], [80, 100, C.pos, "hot"]]} />
+      <GScale label="Swing · above the 10-day" value={d.pct_above_10} unit="%" zones={[[0, 20, C.neg, "oversold"], [20, 50, C.warn, "down-swing"], [50, 80, C.lime, "up-swing"], [80, 100, C.pos, "stretched"]]} />
+      <GPoints items={[["💡", "The black marker is today. Moving right = more stocks in uptrends."], ["↗", "Momentum looks at whether the 50-day breadth is rising faster than its recent average."]]} />
+    </>,
+  }),
+  sizing: (d) => {
+    const s = suggestedRisk(d), env = d.environment?.name, g = d.green_light;
+    return {
+      title: "Sizing — how today's risk per trade is set",
+      body: <>
+        <GFlow steps={[
+          { t: "ENVIRONMENT", s: `${env || "—"}: Easy 1% · Hard 0.5% · No money 0%`, c: MQ_ENV_COLOR[env] },
+          { t: "GREEN LIGHT", s: g?.em != null ? `${g.em}: 15+ full · 9–15 half · below 9 stop` : "15+ full · 9–15 half · below 9 stop", c: GL_COLOR[g?.band], op: "×" },
+          { t: "TODAY", s: s ? `${s.pct}% risk per trade` : "—", c: s?.pct > 0 ? C.pos : C.neg, op: "=" },
+        ]} />
+        {g?.em != null && <GScale label="Green light (EM-equivalent)" min={0} max={40} value={g.em} zones={[[0, 9, C.neg, "stop"], [9, 15, C.warn, "half"], [15, 25, C.lime, "full"], [25, 40, C.pos, "strong"]]} />}
+        <GPoints items={[["🧮", "Quantity = (portfolio × risk %) ÷ (entry − stop). The calculator and IDEAS use this same number."], ["🔥", `Total open risk (heat) is capped at ${s?.heatCap ?? "—"}% today.`], ["⛔", "Signal CASH, No money, or green light below 9 → no new entries."]]} />
+      </>,
+    };
+  },
+  breadth: (d) => {
+    const m = d.mbi?.rows?.[d.mbi.rows.length - 1];
+    return {
+      title: "Breadth — how many stocks are taking part",
+      body: <>
+        <GScale label="Stocks above the 50-day" value={d.pct_above_50} unit="%" zones={[[0, 20, C.pos, "washed out → bounces"], [20, 50, C.warn, "weak"], [50, 80, C.lime, "healthy"], [80, 100, C.neg, "overheated"]]} />
+        <div style={{ fontSize: 11, color: "var(--text2)", margin: "4px 0" }}>MBI day colour = green boxes − red boxes</div>
+        <GFlow steps={[{ t: "≥ +3", s: "GREEN day", c: C.pos }, { t: "−2 … +2", s: "NEUTRAL", c: C.muted, op: "·" }, { t: "≤ −3", s: "RED day", c: C.neg, op: "·" }]} />
+        <GPoints items={[["🌡", `Today ${m ? `${m.color.toLowerCase()} (${m.score > 0 ? "+" : ""}${m.score})` : "—"}. Breadth is a thermometer: on this data red days were followed by better returns than green days.`], ["📈", "Market Monitor: stocks up ≥4% vs down ≥4%. Watch the 10-day ratio for whether momentum is paying."], ["🆕", "Net new highs > 0 for 3 sessions is one of the conditions for the Trend to turn UP."]]} />
+      </>,
+    };
+  },
+  sectors: () => ({
+    title: "Sectors — where the strength is",
+    body: <>
+      <GQuad />
+      <GPoints items={[["👆", "Tap a sector to see the stocks carrying it, strongest first."], ["🔥", "HOT ≥ 70% of its stocks above the 50-day · WARM ≥ 50% · COOL ≥ 30% · COLD below."], ["🎯", "Most big winners come from the top 2–3 sectors — favour LEADING and IMPROVING."]]} />
+    </>,
+  }),
+  flows: () => ({
+    title: "Institutions — who is buying",
+    body: <GPoints items={[["🏦", "FII = foreign funds, DII = Indian funds (mutual funds, insurers). Net buying in ₹ crore, from NSE (provisional)."], ["🤝", "Bulk / block deals: large single trades. A big buyer in a stock you like is a plus — the IDEAS list tags it."], ["⚖", "Flows explain the index; your stocks still need their own setup."]]} />,
+  }),
+  record: (d) => ({
+    title: "Track record — does it actually work?",
+    body: <>
+      <GRecord stats={d.scan_stats} />
+      <GPoints items={[["✓", "\"vs average stock\" is what matters: +0.5 or more = a real edge, near 0 = no edge, negative = it lost."], ["🔎", "Records use today's index members, so they're a little optimistic. Treat small differences as noise."], ["🧪", "Every gauge in TRADESK shows its own record — trust the ones that earned it."]]} />
+    </>,
+  }),
+  scan: (d) => ({
+    title: "How to use SCAN",
+    body: <>
+      <GFlow steps={[{ t: "PICK A LIST", s: "each has its past-year record" }, { t: "QUALITY ON", s: "₹10 cr+ turnover, 1.8%+ daily move", c: C.pos }, { t: "RS + GRADE", s: "RS 80+, grade A/B" }, { t: "OPEN STOCK", s: "chart, plan, results date" }]} />
+      <GRecord stats={d.scan_stats} />
+      <GPoints items={[["✓", "A ✓ on a tab = that scan beat the average stock over the last 3 months."], ["⚠", "Lists with a negative record are for watching, not buying blindly."]]} />
+    </>,
+  }),
+  ideas: () => ({
+    title: "How IDEAS ranks stocks",
+    body: <>
+      <GFlow steps={[{ t: "GRADE", s: "A +30 · B +15" }, { t: "STRENGTH", s: "RS ÷ 5", op: "+" }, { t: "LISTS", s: "+6 per scan it's in", op: "+" }, { t: "SECTOR", s: "HOT +6 · WARM +3", op: "+" }, { t: "WATCH", s: "+8 if on your list", op: "+" }]} />
+      <GPoints items={[["🧹", "Quality on hides thin or slow stocks (your watchlist always shows)."], ["📅", "A results badge means the company reports soon — a gap can jump your stop."], ["📐", "Quantities use today's risk % and each stock's suggested entry/stop."]]} />
+    </>,
+  }),
+};
+
+/** Collapsible infographic. Remembers open/closed per guide. */
+function Guide({ id, d, compact }) {
+  const key = `td_guide_${id}`;
+  const [open, setOpen] = useState(() => { try { return localStorage.getItem(key) === "1"; } catch (_) { return false; } });
+  const toggle = () => setOpen(v => { try { localStorage.setItem(key, v ? "0" : "1"); } catch (_) {} return !v; });
+  const g = GUIDES[id]?.(d || {});
+  if (!g) return null;
+  return (
+    <div style={{ marginBottom: compact ? 8 : 12 }}>
+      <button onClick={toggle} aria-expanded={open} style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", minHeight: 36, background: open ? "var(--bg3)" : "transparent", border: "1px dashed var(--border2)", borderRadius: open ? "10px 10px 0 0" : 10, padding: "6px 12px", color: "var(--text2)", fontSize: 12, cursor: "pointer", textAlign: "left" }}>
+        <span aria-hidden="true">ⓘ</span><span style={{ flex: 1 }}>{open ? g.title : `How to read: ${g.title.split(" — ")[0]}`}</span><span aria-hidden="true">{open ? "▴" : "▾"}</span>
+      </button>
+      {open && <div style={{ border: "1px dashed var(--border2)", borderTop: "none", borderRadius: "0 0 10px 10px", padding: "4px 12px 12px", background: "var(--bg3)" }}>{g.body}</div>}
+    </div>
+  );
+}
+/** QUAD section header with an anchor and its guide. */
+function QuadSection({ id, title, d }) {
+  return (
+    <div id={`q-${id}`} style={{ scrollMarginTop: 100, margin: "22px 0 8px" }}>
+      <div style={{ fontFamily: "var(--display)", fontSize: 20, color: "var(--text)", marginBottom: 6 }}>{title}</div>
+      <Guide id={id} d={d} compact />
+    </div>
+  );
+}
+const QUAD_JUMPS = [["signal", "Signal"], ["dims", "Readings"], ["sizing", "Sizing"], ["breadth", "Breadth"], ["sectors", "Sectors"], ["flows", "Institutions"], ["record", "Record"]];
+function QuadJumpBar() {
+  return (
+    <div style={{ display: "flex", gap: 6, overflowX: "auto", scrollbarWidth: "none", margin: "0 0 10px", paddingBottom: 2 }}>
+      {QUAD_JUMPS.map(([id, l]) => (
+        <button key={id} className="chip" style={{ whiteSpace: "nowrap" }} onClick={() => document.getElementById(`q-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" })}>{l}</button>
+      ))}
     </div>
   );
 }
