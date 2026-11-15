@@ -3645,7 +3645,7 @@ const SCAN_DEFS = [
     cols: [["DAY", r => mqFmtDate(r.d)], ["MOVE", r => `+${r.chg}% ${r.volx}×`], ["SINCE", r => `${r.held > 0 ? "+" : ""}${r.held}%`]] },
   { id: "fundflow", label: "Fund flow", hint: "Stocksgeeks' Fund Flow: a green week on 5×+ the average weekly volume, ₹5 cr+ daily turnover, an average move of 2%+ a day (≈ ATR 3%), 50-SMA above the 200-SMA and within 25% of the 52-week high. Signals from the last 4 weeks; ● = this week (still forming).",
     cols: [["WEEK", r => `${r.live ? "● " : ""}${mqFmtDate(r.wk)}`], ["VOL×", r => `${r.volx}×`], ["WEEK %", r => `${r.wchg > 0 ? "+" : ""}${r.wchg}%`]] },
-  { id: "ipo", label: "IPO lifecycle", hint: "Listed within ~260 sessions and holding the average that fits its age: under 50 sessions above the 20-SMA, 50–100 above the 50-SMA, 100–260 above the 100-SMA. ⚡ = a 4.5%+ day on above-average volume in the last 5 sessions; ↑ = at a new high since listing.",
+  { id: "ipo", label: "New listings", hint: "IPOs (and demergers, marked) listed within ~260 sessions and holding the average that fits its age: under 50 sessions above the 20-SMA, 50–100 above the 50-SMA, 100–260 above the 100-SMA. ⚡ = a 4.5%+ day on above-average volume in the last 5 sessions; ↑ = at a new high since listing.",
     cols: [["AGE", r => `${r.days}d`], ["LISTING", r => `${r.from_listing > 0 ? "+" : ""}${r.from_listing}%`], ["NOW", r => (r.pop ? `⚡+${r.pop.chg}%` : r.breakout ? "↑ new" : `${r.off_high}%`)]] },
   { id: "reclaim50", label: "Reclaimed 50-SMA", hint: "Closed back above the 50-day average today after being below it yesterday.",
     cols: [["200↑", r => (r.a200 ? "yes" : "no")], ["HIGH", r => r.off_high != null ? `${r.off_high}%` : "—"], ["3M", r => r.ret3m != null ? `${r.ret3m > 0 ? "+" : ""}${r.ret3m}%` : "—"]] },
@@ -3777,6 +3777,7 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
                     <RsBadge rs={r.rs ?? data.rs_of?.[r.sym] ?? microData?.rs_of?.[r.sym]} grade={r.grade ?? data.grade_of?.[r.sym] ?? microData?.grade_of?.[r.sym]} />
                     <div style={{ fontSize: 10, color: "var(--text3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                       {r.results && <span style={{ color: C.warn, marginRight: 4 }} title="Results were due around this move">★</span>}
+                      {r.not_ipo && <span style={{ color: C.warn, marginRight: 4 }} title="Demerger / relisting — 'from listing' starts at its first traded day">demerger ·</span>}
                       {r.sector}{st && st !== "—" && <span style={{ color: MQ_DIM_COLOR[st], marginLeft: 4 }}>· {st}</span>}
                       {r.micro && <span style={{ marginLeft: 4, color: "var(--text3)", border: "1px solid var(--border)", borderRadius: 6, padding: "0 4px", fontSize: 9 }}>micro</span>}
                       {qOfRow(r)?.to != null && <span style={{ marginLeft: 4, fontFamily: "var(--mono)" }} title="20-day average turnover · 60-day average daily move">· ₹{qOfRow(r).to >= 100 ? Math.round(qOfRow(r).to) : qOfRow(r).to}cr · {qOfRow(r).move}%/d</span>}
@@ -3826,7 +3827,11 @@ function ScanEdge({ st }) {
       {st.gated && <div>Quality gate passes only: {sub(st.gated)}{st.gated.excess - st.excess >= 0.3 ? " — the gate helped" : st.gated.excess - st.excess <= -0.3 ? " — the gate hurt" : ""}</div>}
     </div>
   );
-  return <><ScanEdgeMain st={st} />{extra}</>;
+  return <><ScanEdgeMain st={st} />{extra}<ScanEdgeNotes st={st} /></>;
+}
+function ScanEdgeNotes({ st }) {
+  if (!st?.approx && !st?.survivor) return null;
+  return <div style={{ fontSize: 10, color: "var(--text3)", margin: "-6px 0 10px", lineHeight: 1.45 }}>{st.approx ? `⚠ ${st.approx} ` : ""}{st.survivor ? "Tested on today's index members, so stocks that dropped out are missing — real results would be a little worse." : ""}</div>;
 }
 function ScanEdgeMain({ st }) {
   const tone = st.excess >= 0.5 ? C.pos : st.excess <= -0.5 ? C.neg : "var(--text3)";
@@ -3846,6 +3851,13 @@ const STOCK_SERIES = [
   { key: "s200", label: "200-SMA", color: "#3987E5" },
 ];
 const IDX_TICKER = "^CRSLDX"; // Nifty 500
+
+/** The newest bar is still forming: it's today (IST), before 15:45, and NSE hasn't confirmed it. */
+function isIntradayBar(day, verified) {
+  const ist = new Date(Date.now() + 19800000);
+  const today = ist.toISOString().slice(0, 10), mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+  return day === today && mins < 15 * 60 + 45 && verified?.date !== day;
+}
 
 async function fetchStockDetail(sym) {
   const tk = `${sym}.NS`;
@@ -3867,14 +3879,15 @@ async function fetchStockDetail(sym) {
   const sd = toDays(s), id = ix ? toDays(ix) : {};
   const dates = Object.keys(sd).sort();
   const closes = dates.map(d => sd[d].c), vols = dates.map(d => sd[d].v);
-  const opens = dates.map(d => sd[d].o?.[0] ?? null), highs = dates.map(d => sd[d].o?.[1] ?? null), lows = dates.map(d => sd[d].o?.[2] ?? null);
+  let opens = dates.map(d => sd[d].o?.[0] ?? null), highs = dates.map(d => sd[d].o?.[1] ?? null), lows = dates.map(d => sd[d].o?.[2] ?? null);
+  if (!highs.some(v => v != null)) { opens = null; highs = null; lows = null; }
 
   // Verify / correct the latest closes against NSE's official bhavcopy
   let verified = null;
   const b = bhavRes?.closes?.[sym];
   if (b && bhavRes.date) {
     let i = dates.indexOf(bhavRes.date);
-    if (i < 0 && bhavRes.date > dates[dates.length - 1]) { dates.push(bhavRes.date); closes.push(b[1]); vols.push(null); opens.push(null); highs.push(null); lows.push(null); i = dates.length - 1; }
+    if (i < 0 && bhavRes.date > dates[dates.length - 1]) { dates.push(bhavRes.date); closes.push(b[1]); vols.push(b[2] ?? null); opens?.push(null); highs?.push(null); lows?.push(null); i = dates.length - 1; }
     if (i >= 0) {
       const fix = (k, official) => { if (k >= 0 && official != null && Math.abs(closes[k] / official - 1) > 0.001) { closes[k] = official; return true; } return false; };
       const c1 = fix(i, b[1]), c2 = fix(i - 1, b[0]);
@@ -3883,8 +3896,9 @@ async function fetchStockDetail(sym) {
   }
   const idx = dates.map(d => id[d]?.c ?? null);
   const delivery = b && b[3] != null && bhavRes?.date ? { pct: b[3], date: bhavRes.date } : null;
+  const intraday = isIntradayBar(dates[dates.length - 1], verified);
   return {
-    sym, dates, closes, vols, idx, verified, delivery, opens, highs, lows,
+    sym, dates, closes, vols, idx, verified, delivery, opens, highs, lows, intraday,
     s10: smaSeries(closes, 10, 8), s50: smaSeries(closes, 50, 40), s200: smaSeries(closes, 200, 150),
   };
 }
@@ -3910,7 +3924,7 @@ function candleMarks(d) {
     const h = d.highs[i], l = d.lows[i], ph = d.highs[i - 1], pl = d.lows[i - 1];
     if (h != null && l != null && ph != null && pl != null && h <= ph && l >= pl) out.inside.add(i);
   }
-  let best = null; for (let i = Math.max(0, n - 20); i < n; i++) if (d.vols[i] != null && (best == null || d.vols[i] < d.vols[best])) best = i;
+  let best = null; for (let i = Math.max(0, n - 20); i < (d.intraday ? n - 1 : n); i++) if (d.vols[i] != null && (best == null || d.vols[i] < d.vols[best])) best = i;
   out.lvc = best;
   return out;
 }
@@ -4010,7 +4024,7 @@ function StockStats({ d, q }) {
   const vx = d.vols[n] != null && v50 ? d.vols[n] / v50 : null;
   const cr = (v) => (v == null ? "—" : `₹${v >= 100 ? Math.round(v).toLocaleString("en-IN") : v.toFixed(1)} cr`);
   const cells = [
-    ["ATR (14)", rs ? `${rs.atr.toFixed(1)}%` : q?.move != null ? `~${q.move}%` : "—", rs ? (rs.atr >= 2.65 ? C.pos : "var(--text)") : "var(--text3)"],
+    rs ? ["ATR (14)", `${rs.atr.toFixed(1)}%`, rs.atr >= 2.65 ? C.pos : "var(--text)"] : ["AVG MOVE", q?.move != null ? `${q.move}%` : "—", "var(--text3)"],
     ["ADR (20)", rs ? `${rs.adr.toFixed(1)}%` : "—", "var(--text)"],
     ["TURNOVER 20D", cr(to20), to20 != null && to20 >= 10 ? C.pos : to20 != null && to20 < 3 ? C.neg : "var(--text)"],
     ["VS 50D", to20 != null && to50 ? `${(to20 / to50).toFixed(1)}×` : "—", "var(--text)"],
@@ -4117,7 +4131,7 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [
         <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
           <span style={{ fontFamily: "var(--mono)", fontSize: 24, fontWeight: 700 }}>₹{c.toFixed(2)}</span>
           <span style={{ fontFamily: "var(--mono)", fontSize: 13, color: col(chg) }}>{pct(chg)}</span>
-          <span style={{ fontSize: 11, color: "var(--text3)" }}>{mqFmtDate(d.dates[last])} close{d.verified ? (d.verified.date === d.dates[last] ? " · ✓ NSE" : "") : " · unverified"}</span>
+          <span style={{ fontSize: 11, color: d.intraday ? C.warn : "var(--text3)" }}>{d.intraday ? `${mqFmtDate(d.dates[last])} · intraday (not a close)` : `${mqFmtDate(d.dates[last])} close${d.verified?.date === d.dates[last] ? " · ✓ NSE" : " · unverified"}`}</span>
         </div>
         <div style={{ marginTop: 10 }}><WatchButton symbol={symbol} watchlist={watchlist} setWatchlist={setWatchlist} /></div>
         <ResultsWarning symbol={symbol} style={{ marginTop: 8 }} />
@@ -4368,7 +4382,7 @@ function currentMarketTags(symbol) {
   const sector = d.sector_of?.[sym] || null;
   return {
     as_of: d.as_of, signal: d.overall, env: d.environment?.name || null,
-    ft: d.follow_through?.label || null, sector,
+    ft: d.follow_through?.label || null, sector, risk: suggestedRisk(d)?.pct ?? null, em: d.green_light?.em ?? null,
     sectorStatus: sector ? (d.sectors || []).find(s => s.name === sector)?.status || null : null,
   };
 }
@@ -4539,7 +4553,7 @@ function SizingAdvice({ portfolio, trades, riskPct, onApply }) {
 // Per-stock daily trend for open positions (cached per symbol per day)
 const _trendCache = new Map();
 async function stockTrend(sym) {
-  const key = `${sym}|${istDayKey(Math.floor(Date.now() / 1000))}`;
+  const key = `${sym}|${Math.floor(Date.now() / 1200000)}`; // 20-minute buckets: intraday prices go stale
   if (_trendCache.has(key)) return _trendCache.get(key);
   const p = fetchStockDetail(sym).then(d => {
     const i = d.closes.length - 1;
@@ -4547,7 +4561,7 @@ async function stockTrend(sym) {
     const rs = rangeStats(d, i);
     const atrAbs = rs ? (rs.atr / 100) * d.closes[i - 1 >= 0 ? i - 1 : i] : null;
     const low10 = Math.min(...(d.lows || []).slice(-10).filter(v => v != null), Infinity);
-    return { close: d.closes[i], s10: d.s10[i], s20: s20[i], s50: d.s50[i], s200: d.s200[i], date: d.dates[i],
+    return { close: d.closes[i], s10: d.s10[i], s20: s20[i], s50: d.s50[i], s200: d.s200[i], date: d.dates[i], intraday: d.intraday,
       atr: atrAbs, ext: atrAbs && d.s10[i] != null ? (d.closes[i] - d.s10[i]) / atrAbs : null, low10: Number.isFinite(low10) ? low10 : null };
   }).catch(() => null);
   _trendCache.set(key, p);
@@ -4562,9 +4576,10 @@ function positionHealth(t, trend, mq, livePrice) {
   const bump = (l, why) => { level = Math.max(level, l); reasons.push({ l, why }); };
   const stop = t.currentStop || t.stop;
   if (price != null && stop && price <= stop) bump(2, `At/below stop ₹${stop}`);
-  if (trend?.s50 != null && trend.close < trend.s50) bump(2, "Closed below its 50-day SMA");
-  else if (trend?.s20 != null && trend.close < trend.s20) bump(1, "Closed below its 20-day SMA");
-  else if (trend?.s10 != null && trend.close < trend.s10) bump(1, "Closed below its 10-day SMA");
+  const verb = trend?.intraday ? "Trading below" : "Closed below", tag = trend?.intraday ? " (intraday — wait for the close)" : "";
+  if (trend?.s50 != null && trend.close < trend.s50) bump(trend.intraday ? 1 : 2, `${verb} its 50-day SMA${tag}`);
+  else if (trend?.s20 != null && trend.close < trend.s20) bump(1, `${verb} its 20-day SMA${tag}`);
+  else if (trend?.s10 != null && trend.close < trend.s10) bump(1, `${verb} its 10-day SMA${tag}`);
   const sector = mq?.sector_of?.[normalizeSymbol(t.symbol)];
   const sec = sector ? (mq.sectors || []).find(s => s.name === sector) : null;
   if (sec && ["COOL", "COLD"].includes(sec.status)) bump(1, `Sector ${sector} is ${sec.status}`);
@@ -4616,7 +4631,7 @@ function PositionHealth({ trade, livePrice }) {
       )}
       {trend && (
         <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 4, fontFamily: "var(--mono)" }}>
-          10d {trend.s10?.toFixed(1) ?? "—"} · 20d {trend.s20?.toFixed(1) ?? "—"} · 50d {trend.s50?.toFixed(1) ?? "—"} (close {mqFmtDate(trend.date)})
+          10d {trend.s10?.toFixed(1) ?? "—"} · 20d {trend.s20?.toFixed(1) ?? "—"} · 50d {trend.s50?.toFixed(1) ?? "—"} ({trend.intraday ? "intraday" : "close"} {mqFmtDate(trend.date)})
         </div>
       )}
     </div>
@@ -4627,7 +4642,8 @@ function PositionHealth({ trade, livePrice }) {
 function disciplineScore(t, mq, portfolio) {
   const ctx = tradeContext(t, mq);
   const entryRow = historyOnDate(mq, t.entries?.[0]?.date || t.date);
-  const sugg = suggestedRisk(entryRow ? { environment: { name: ctx.env }, overall: ctx.signal, follow_through: { label: ctx.ft } } : null);
+  const sugg = t.marketTags?.risk != null ? { pct: t.marketTags.risk }
+    : suggestedRisk(entryRow ? { environment: { name: ctx.env }, overall: ctx.signal, follow_through: { label: ctx.ft } } : null);
   const riskPct = portfolio && t.riskAmount ? (t.riskAmount / portfolio) * 100 : null;
   const checks = [
     ["Signal wasn't CASH", ctx.signal ? ctx.signal !== "CASH" : null],
@@ -5629,14 +5645,14 @@ function PreTradeChecklist({ setup, ticked, onToggle }) {
 const SG_LINK = "https://thestocksgeeks.com/";
 const MBI_COLOR = { GREEN: C.pos, RED: C.neg, NEUTRAL: C.muted };
 const GL_COLOR = { FULL: C.pos, NORMAL: C.lime, HALF: C.warn, SMALL: C.neg };
-const GL_TEXT = { FULL: "Full size", NORMAL: "Normal size (¾)", HALF: "Half size", SMALL: "Stand down · watch only" };
+const GL_TEXT = { FULL: "Full size", NORMAL: "Full size", HALF: "Half size", SMALL: "Stand down · watch only" };
 /** Shown wherever a new trade can be planned when the green light says stand down. */
 function StandDownNote({ d, style }) {
   const g = d?.green_light;
   if (g?.band !== "SMALL") return null;
   return (
     <div style={{ fontSize: 11, color: C.neg, border: `1px solid ${C.neg}55`, background: `${C.neg}10`, borderRadius: 8, padding: "6px 9px", lineHeight: 1.45, ...style }}>
-      ⛔ Stand down: green light {g.em} is below 9 — recent breakouts are failing. Since {mqFmtDate(g.from)} the average stock fell {g.bt?.SMALL ? `${g.bt.SMALL.fwd}% over the next 10 sessions (${g.bt.SMALL.up}% up)` : "on such days"}. Watch, don't buy.
+      ⛔ Stand down: green light {g.em} is below 9 — recent breakouts are failing. Since {mqFmtDate(g.from)} readings below 9 were followed by {g.bt?.SMALL ? `${g.bt.SMALL.fwd > 0 ? "+" : ""}${g.bt.SMALL.fwd}% for the average stock over 10 sessions (${g.bt.SMALL.up}% higher)` : "weak returns"}. Watch, don't buy.
     </div>
   );
 }
@@ -5676,14 +5692,14 @@ function MqMbi({ mbi, dip, universe = "Nifty 500" }) {
   if (!mbi?.rows?.length) return null;
   const rows = mbi.rows, last = rows[rows.length - 1], T = mbi.thresholds;
   const strip = rows.slice(-10);
-  const fmt = (v) => (v == null ? "—" : v >= 999 ? "∞" : v);
+  const fmt = (v, k) => (last.inf?.[k] ? "∞" : v == null ? "—" : v);
   const sg = (v) => (v == null ? "" : v > 0 ? `+${v}` : `${v}`);
   const cells = [
-    ["4.5R", fmt(last.r45), last.boxes[0], `>${T.r45[0]} green · <${T.r45[1]} red — stocks up 4.5%+ ÷ down 4.5%+ ×100`],
+    ["4.5R", fmt(last.r45, "r45"), last.boxes[0], `>${T.r45[0]} green · <${T.r45[1]} red — stocks up 4.5%+ ÷ down 4.5%+ ×100`],
     ["CHG", sg(last.c45), last.boxes[1], `±${T.chg}`],
-    ["20R", fmt(last.r20), last.boxes[2], `>${T.r20[0]} · <${T.r20[1]} — above ÷ below 20-SMA ×100`],
+    ["20R", fmt(last.r20, "r20"), last.boxes[2], `>${T.r20[0]} · <${T.r20[1]} — above ÷ below 20-SMA ×100`],
     ["CHG", sg(last.c20), last.boxes[3], `±${T.chg}`],
-    ["50R", fmt(last.r50), last.boxes[4], `>${T.r50[0]} · <${T.r50[1]} — above ÷ below 50-SMA ×100`],
+    ["50R", fmt(last.r50, "r50"), last.boxes[4], `>${T.r50[0]} · <${T.r50[1]} — above ÷ below 50-SMA ×100`],
     ["CHG", sg(last.c50), last.boxes[5], `±${T.chg}`],
     ["52W H/L", `${last.wh ?? "—"}/${last.wl ?? "—"}`, last.boxes[6], "% of stocks at a 52-week high / low"],
   ];
@@ -5724,7 +5740,10 @@ function MqMbi({ mbi, dip, universe = "Nifty 500" }) {
         <div style={{ fontSize: 11, marginTop: 8, padding: "6px 9px", borderRadius: 8, border: `1px solid ${dip.today ? C.pos : "var(--border)"}`, background: dip.today ? `${C.pos}12` : "transparent", color: "var(--text2)", lineHeight: 1.45 }}>
           <b style={{ color: dip.today ? C.pos : "var(--text2)" }}>{dip.today ? "● Pullback window today" : "Pullback window"}</b> — a red MBI day while the long-term Bias is still BULL.
           {" "}Past {dip.bt.days} such days: average stock <b>{dip.bt.fwd > 0 ? "+" : ""}{dip.bt.fwd}%</b> over the next {dip.horizon} sessions, {dip.bt.up}% higher
-          {dip.other ? <> (other days {dip.other.fwd > 0 ? "+" : ""}{dip.other.fwd}%, {dip.other.up}% higher)</> : null}. A modest edge — good for adding to leaders on weakness, not for chasing.
+          {dip.other ? <> (other days {dip.other.fwd > 0 ? "+" : ""}{dip.other.fwd}%, {dip.other.up}% higher)</> : null}.
+          {" "}{dip.other && dip.bt.days >= 30 && dip.bt.fwd - dip.other.fwd >= 0.5 && dip.bt.up - dip.other.up >= 5
+            ? "A real if modest edge — good for adding to leaders on weakness."
+            : "Too few days (and overlapping 10-day windows) to call it an edge yet — treat as context."}
           {!dip.today && dip.recent?.length > 0 && <span style={{ color: "var(--text3)" }}> Last seen {mqFmtDate(dip.recent[dip.recent.length - 1])}.</span>}
         </div>
       )}
@@ -5749,7 +5768,7 @@ function MqGreenLight({ gl }) {
         <span style={{ fontSize: 12, fontWeight: 800, color: col }}>{GL_TEXT[gl.band]}{gl.mult ? ` · ${gl.mult}×` : ""}</span>
       </div>
       <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8, lineHeight: 1.45 }}>
-        Are breakouts paying? Our follow-through reading put on Stocksgeeks' EM scale: below 9 is poor (the app stands down: no new entries), 15+ is fine, 25+ is a strong tape. It sets the risk multiplier used for sizing across the app.
+        Are breakouts paying? Our follow-through reading put on Stocksgeeks' EM scale: below 9 the app stands down (no new entries), 9–15 is half size, 15+ is full size. On the data only the "below 9" split was clear, so 25+ isn't treated as extra.
       </div>
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 6 }}>
         <span style={{ fontFamily: "var(--display)", fontSize: 30, color: col, lineHeight: 1 }}>{gl.em}</span>
@@ -5788,7 +5807,7 @@ function MqMarketMonitor({ mm }) {
   return (
     <div style={mqCardStyle}>
       <div style={{ ...mqHeadStyle, marginBottom: 4 }}>MARKET MONITOR</div>
-      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8 }}>Stocks up / down ≥4% on rising volume each day (Stockbee-style). 10-day ratio above 2 = momentum-friendly, below 0.5 = breakouts tend to fail.</div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8 }}>Stocks up / down ≥4% on rising volume each day (Stockbee-style). Traders read a 10-day ratio above 2 as momentum-friendly and below 0.5 as hostile — check the record underneath before trusting it.</div>
       <div style={{ display: "flex", gap: 14, marginBottom: 8, flexWrap: "wrap" }}>
         <span style={{ fontSize: 12 }}>5-day ratio <b style={{ fontFamily: "var(--mono)", color: tone(last.r5) }}>{last.r5 ?? "—"}</b></span>
         <span style={{ fontSize: 12 }}>10-day ratio <b style={{ fontFamily: "var(--mono)", color: tone(last.r10) }}>{last.r10 ?? "—"}</b></span>

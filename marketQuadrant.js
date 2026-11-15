@@ -18,7 +18,7 @@ export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 let API_BASE = "";
 export function setApiBase(url) { API_BASE = String(url || "").replace(/\/+$/, ""); }
 
-const LOCAL_KEY       = "td_mq_v15";  // v15: + pullback window, stand-down, recent / gated scan records
+const LOCAL_KEY       = "td_mq_v16";  // v16: accuracy fixes (universe-scaled green light, MBI infinities, listings)
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
@@ -409,8 +409,11 @@ export function computeFollowThrough(axis, aligned, volumes, lookback = 10, keep
   const lastH = history[history.length - 1];
   if (!lastH) return null;
   const label = lastH.rate == null ? "NO PIVOTS" : lastH.rate >= FT_BANDS.strong ? "STRONG" : lastH.rate >= FT_BANDS.weak ? "MIXED" : "WEAK";
-  return { rate: lastH.rate, events: lastH.events, avg_gain: lastH.avg_gain, fresh: lastH.fresh, label, history: history.slice(-keep) };
+  return { rate: lastH.rate, events: lastH.events, avg_gain: lastH.avg_gain, fresh: lastH.fresh, label, universe: tickers.length, history: history.slice(-keep) };
 }
+
+// Recent demergers / relistings: their first traded day is not an IPO (keep this list current)
+const NOT_IPO = new Set(["TMCV", "PIRAMALFIN", "VAML", "VISL", "VOGL", "VEDPOWER"]);
 
 // ─── series math ─────────────────────────────────────────────────────────────
 export function smaSeries(arr, period, minP = Math.ceil(period * 0.75)) {
@@ -777,7 +780,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   for (const [ticker, c] of Object.entries(aligned)) {
     const first = c.findIndex(x => x != null);
     const age = last - first;
-    if (first < 0 || age < 10 || age > 260 || c[last] == null) continue;
+    if (first < 0 || age < 15 || age > 260 || c[last] == null) continue;
     const per = age < 50 ? 20 : age < 100 ? 50 : 100;
     const ma = smaSeries(c, per, Math.min(per, Math.max(8, Math.ceil(per * 0.75))))[last];
     if (ma == null || c[last] <= ma) continue;
@@ -790,7 +793,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
       if (!v || (v[i] != null && cn >= 5 && v[i] > sm / cn)) { pop = { d: axis[i], chg: r1((c[i] / c[i - 1] - 1) * 100) }; break; }
     }
     const sym = ticker.replace(/\.NS$/, "");
-    scanIpo.push({ sym, sector: sectorMap[sym] || "Other", days: age, stage: age < 50 ? "<50d" : age < 100 ? "50–100d" : "100–260d", ma: per,
+    scanIpo.push({ sym, sector: sectorMap[sym] || "Other", days: age, not_ipo: NOT_IPO.has(sym) || undefined, stage: age < 50 ? "<50d" : age < 100 ? "50–100d" : "100–260d", ma: per,
       from_listing: r1((c[last] / c[first] - 1) * 100),
       off_high: r1((c[last] / Math.max(hi, c[last]) - 1) * 100), breakout: c[last] > hi, pop });
   }
@@ -924,7 +927,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   const mmRows = [];
   const mmStart = Math.max(64, last - 260);
   const daily = []; for (let i = mmStart; i <= last; i++) daily.push({ i, ...mmDay(i) });
-  const ratio = (k, n) => { const w = daily.slice(Math.max(0, k - n + 1), k + 1); const u = w.reduce((a, x) => a + x.up, 0), dd = w.reduce((a, x) => a + x.dn, 0); return dd ? r1(u / dd) : (u ? 9.9 : null); };
+  const ratio = (k, n) => { const w = daily.slice(Math.max(0, k - n + 1), k + 1); const u = w.reduce((a, x) => a + x.up, 0), dd = w.reduce((a, x) => a + x.dn, 0); return dd ? r1(u / dd) : (u ? 99 : null); };
   daily.forEach((x, k) => mmRows.push({ d: axis[x.i], up: x.up, dn: x.dn, r5: ratio(k, 5), r10: ratio(k, 10), q25u: x.q25u, q25d: x.q25d }));
   // What happened to the average stock over the next 10 sessions after strong / weak readings
   const mmBt = { strong: [], weak: [], mid: [] };
@@ -1028,7 +1031,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
       if (st.s50[i] != null) { if (c[i] > st.s50[i]) a50++; else b50++; }
       if (st.h252[i] != null && i >= 251) { nh++; if (c[i] >= st.h252[i]) wh++; if (c[i] <= st.l252[i]) wl++; }
     }
-    const rt = (a, b) => (b ? Math.round((a / b) * 100) : a ? 999 : null);
+    const rt = (a, b) => (b ? Math.round((a / b) * 100) : a ? Infinity : null);
     return { r45: n ? rt(up, dn) : null, r20: rt(a20, b20), r50: rt(a50, b50),
       wh: nh ? Math.round((wh / nh) * 10000) / 100 : null, wl: nh ? Math.round((wl / nh) * 10000) / 100 : null };
   };
@@ -1040,12 +1043,14 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   let prev = mbiDay(mbiStart - 1);
   for (let i = mbiStart; i <= last; i++) {
     const m = mbiDay(i);
-    const ch = (k) => (m[k] != null && prev[k] != null ? m[k] - prev[k] : null);
+    const ch = (k) => (Number.isFinite(m[k]) && Number.isFinite(prev[k]) ? m[k] - prev[k] : null); // no change across an infinite day
     const c45 = ch("r45"), c20 = ch("r20"), c50 = ch("r50");
     const boxes = [box(m.r45, MBI_T.r45), chBox(c45), box(m.r20, MBI_T.r20), chBox(c20), box(m.r50, MBI_T.r50), chBox(c50),
       m.wh == null || m.wl == null ? 0 : m.wh > m.wl ? 1 : m.wl > m.wh ? -1 : 0];
     const score = boxes.reduce((a, b) => a + b, 0);
-    mbiRows.push({ d: axis[i], i, ...m, c45, c20, c50, boxes, score, color: score >= 3 ? "GREEN" : score <= -3 ? "RED" : "NEUTRAL" });
+    const row = { d: axis[i], i, ...m, c45, c20, c50, boxes, score, color: score >= 3 ? "GREEN" : score <= -3 ? "RED" : "NEUTRAL" };
+    for (const k of ["r45", "r20", "r50"]) if (row[k] === Infinity) { row[k] = null; (row.inf ||= {})[k] = true; } // JSON-safe
+    mbiRows.push(row);
     prev = m;
   }
   const fwdAvg = (t) => { let sm = 0, cn = 0; for (const st of stocks) { const a = st.closes[t], z = st.closes[t + 10]; if (a != null && z != null) { sm += z / a - 1; cn++; } } return cn ? sm / cn : null; };
@@ -1062,9 +1067,12 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   //    EMeq = −15.1 + 0.30 × (% of the last 10 sessions' pocket pivots still above their pivot close)
   //           + 0.127 × (number of those pivots). Bands set the position-size multiplier.
   const ftAll = computeFollowThrough(axis, aligned, volumes, 10, 100000);
-  const emEq = (h) => (h.rate == null ? null : r1(Math.max(0, -15.12 + 0.30 * h.rate + 0.1268 * h.events)));
+  // events are scaled to a 500-stock universe so a partial download can't move the reading
+  const evScale = ftAll?.universe ? 500 / ftAll.universe : 1;
+  const emEq = (h) => (h.rate == null ? null : r1(Math.max(0, -15.12 + 0.30 * h.rate + 0.1268 * h.events * evScale)));
   const glBand = (v) => (v == null ? null : v >= 25 ? "FULL" : v >= 15 ? "NORMAL" : v >= 9 ? "HALF" : "SMALL");
-  const GL_MULT = { FULL: 1, NORMAL: 0.75, HALF: 0.5, SMALL: 0 }; // below 9 = stand down (watch only)
+  // Only "below 9" separated on the data (25+ and 15–25 both did fine), so 15+ is full size
+  const GL_MULT = { FULL: 1, NORMAL: 1, HALF: 0.5, SMALL: 0 }; // below 9 = stand down (watch only)
   let greenLight = null;
   if (ftAll?.history?.length) {
     const idxOf = Object.fromEntries(axis.map((d, i) => [d, i]));
@@ -1100,6 +1108,9 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   // ── scan backtests: what happened 10 sessions after each past signal ──
   const scanStats = scanBacktest(axis, stocks, volumes, last, 10, 250, { microcap: !!opts.microcap });
   scanStats.fundflow = ffBt;
+  if (scanStats.coil) scanStats.coil.approx = "Record tests the price pattern only — without the RS 80+ and volume dry-up filters of today's list.";
+  if (scanStats.ep) scanStats.ep.approx = "Record enters on the move day itself; today's list also keeps moves up to 5 sessions old.";
+  for (const v of Object.values(scanStats)) if (v) v.survivor = true; // tested on today's index members
 
   const asOf = axis[last];
   return {
@@ -1266,7 +1277,7 @@ export function upcomingResults(cal, sym, days = 7) {
 }
 
 // ─── wider universe: NSE Microcap 250 (loaded on demand, scans only) ─────────
-const MICRO_KEY = "td_mq_micro_v6"; // v6: + recent / gated scan records
+const MICRO_KEY = "td_mq_micro_v7"; // v7: accuracy fixes
 let _microInflight = null;
 export async function loadMicrocapScans({ force = false } = {}) {
   if (!force) {

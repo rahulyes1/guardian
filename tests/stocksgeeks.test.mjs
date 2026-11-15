@@ -55,7 +55,7 @@ test("green light maps follow-through to an EM-scale band and a size multiplier"
   if (g && g.em != null) {
     const band = g.em >= 25 ? "FULL" : g.em >= 15 ? "NORMAL" : g.em >= 9 ? "HALF" : "SMALL";
     assert.equal(g.band, band);
-    assert.equal(g.mult, { FULL: 1, NORMAL: 0.75, HALF: 0.5, SMALL: 0 }[band]);
+    assert.equal(g.mult, { FULL: 1, NORMAL: 1, HALF: 0.5, SMALL: 0 }[band]);
   }
   assert.ok(Array.isArray(r.scans.fundflow));
 });
@@ -68,4 +68,16 @@ test("IPO lifecycle: a 60-session-old listing above its 50-SMA with a 6% pop qua
   assert.equal(x.stage, "50–100d");
   assert.equal(x.ma, 50);
   assert.ok(x.pop && x.pop.chg >= 4.5);
+});
+
+test("green light doesn't depend on how many stocks downloaded; MBI infinities stay out of the maths", () => {
+  const { axis, aligned, volumes } = universe();
+  const full = computeFromAligned(axis, aligned, {}, Date.now(), null, volumes);
+  const part = Object.fromEntries(Object.entries(aligned).filter((_, k) => k % 10 !== 3));
+  const r = computeFromAligned(axis, part, {}, Date.now(), null, volumes);
+  if (full.green_light?.em != null && r.green_light?.em != null) assert.ok(Math.abs(full.green_light.em - r.green_light.em) <= 3);
+  for (const row of full.mbi.rows) {
+    for (const k of ["r45", "r20", "r50"]) assert.ok(row[k] == null || Number.isFinite(row[k]));
+    if (row.inf?.r45) assert.equal(row.c45, null);
+  }
 });
