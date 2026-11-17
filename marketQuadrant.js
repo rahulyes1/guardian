@@ -489,6 +489,106 @@ export function exitBacktest(stocks, last, from = 260) {
     .filter(Boolean).sort((x, y) => y.avgR - x.avgR);
 }
 
+// ─── the whole system as a portfolio ─────────────────────────────────────────
+/**
+ * Simulates a ₹10 lakh account trading only TRADESK's rules, closes only:
+ *   entries  high-tight flag / first 52-week high / 21-EMA pullback (RS stand-in: top 20% by 3-month
+ *            return that day) that pass the quality gate, strongest 3-month return first, at the close
+ *   size     equity × risk% ÷ ((entry − stop) × 1.25), max 25% of equity, max 2% of 20-day turnover,
+ *            total open risk ≤ heat cap, max 10 positions, no margin
+ *   risk%    rule(signal, environment, green light) — variants below
+ *   exits    a close at/below the stop, or a close under the 50-day; once up 2R the stop trails the 50-day
+ *   costs    0.15% per side (brokerage, STT, slippage)
+ */
+export function systemBacktest({ axis, stocks, volumes, last, sigAt, envAt, emAt, from = 260 }) {
+  const minTo = 10;
+  // candidates per day are the same for every variant: compute once
+  const cands = new Map();
+  for (let t = from; t <= last; t++) {
+    const r63 = []; for (const st of stocks) { const a = st.closes[t], b = st.closes[t - 63]; if (a != null && b != null) r63.push(a / b - 1); }
+    r63.sort((a, b) => a - b); const rsCut = r63.length ? r63[Math.floor(r63.length * 0.8)] : Infinity;
+    const list = [];
+    for (const st of stocks) {
+      const c = st.closes, x = c[t], b = c[t - 63]; if (x == null || b == null) continue;
+      const hits = setupHits(st, t, x / b - 1 >= rsCut); if (!hits.length) continue;
+      const v = volumes?.[st.ticker]; let to = 0, tn = 0, mv = 0, mn = 0;
+      for (let k = t - 59; k <= t; k++) { if (k < 1 || c[k] == null) continue; if (k > t - 20 && v?.[k] != null) { to += c[k] * v[k]; tn++; } if (c[k - 1] != null) { mv += Math.abs(c[k] / c[k - 1] - 1); mn++; } }
+      const turnover = tn >= 10 ? to / tn : null; // ₹ per day
+      const liq = turnover == null || turnover / 1e7 >= minTo, fast = mn < 20 || mv / mn >= 0.018;
+      if (!liq || (!fast && !hits.every(h => h === "pb21"))) continue;
+      const plan = tradePlan(c, t); if (!plan || !(x > plan.stop)) continue;
+      list.push({ st, entry: x, stop: Math.min(plan.stop, x * 0.995), turnover, mom: x / b - 1, setup: hits[0] });
+    }
+    list.sort((a, b) => b.mom - a.mom);
+    cands.set(t, list);
+  }
+  const COST = 0.0015, START = 1e6;
+  const run = (riskOf) => {
+    let cash = START; const open = []; const curve = []; const trades = [];
+    let peak = START, maxDD = 0, expSum = 0;
+    for (let t = from; t <= last; t++) {
+      // exits at today's close
+      for (let i = open.length - 1; i >= 0; i--) {
+        const p = open[i], c = p.st.closes[t]; if (c == null) continue;
+        const s50 = p.st.s50[t];
+        if (c - p.entry >= 2 * p.risk0 && s50 != null) p.stop = Math.max(p.stop, s50 * 0.995);
+        if (c <= p.stop || (s50 != null && c < s50)) {
+          cash += p.qty * c * (1 - COST);
+          trades.push({ R: (c - p.entry) / p.risk0, ret: c / p.entry - 1 - 2 * COST, days: t - p.t, setup: p.setup });
+          open.splice(i, 1);
+        }
+      }
+      const mark = () => cash + open.reduce((a, p) => a + p.qty * (p.st.closes[t] ?? p.last ?? p.entry), 0);
+      for (const p of open) if (p.st.closes[t] != null) p.last = p.st.closes[t];
+      let equity = mark();
+      const { pct, heat } = riskOf(t);
+      if (pct > 0) {
+        for (const cd of cands.get(t) || []) {
+          if (open.length >= 10) break;
+          if (open.some(p => p.st === cd.st)) continue;
+          const dist = cd.entry - cd.stop; if (!(dist > 0)) continue;
+          let qty = Math.floor((equity * pct / 100) / (dist * 1.25));
+          qty = Math.min(qty, Math.floor((equity * 0.25) / cd.entry));
+          if (cd.turnover) qty = Math.min(qty, Math.floor((cd.turnover * 0.02) / cd.entry));
+          const openRisk = open.reduce((a, p) => a + Math.max(0, (p.entry - p.stop)) * p.qty, 0);
+          qty = Math.min(qty, Math.floor(Math.max(0, equity * heat / 100 - openRisk) / dist));
+          qty = Math.min(qty, Math.floor(cash / (cd.entry * (1 + COST))));
+          if (qty < 1) continue;
+          cash -= qty * cd.entry * (1 + COST);
+          open.push({ st: cd.st, qty, entry: cd.entry, stop: cd.stop, risk0: dist, t, setup: cd.setup, last: cd.entry });
+        }
+        equity = mark();
+      }
+      const invested = equity - cash; expSum += equity > 0 ? invested / equity : 0;
+      peak = Math.max(peak, equity); maxDD = Math.min(maxDD, equity / peak - 1);
+      curve.push([axis[t], Math.round(equity)]);
+    }
+    const endEq = curve[curve.length - 1][1], years = (last - from) / 248;
+    const wins = trades.filter(x => x.ret > 0);
+    return {
+      end: endEq, ret: Math.round((endEq / START - 1) * 1000) / 10, cagr: Math.round((Math.pow(endEq / START, 1 / years) - 1) * 1000) / 10,
+      maxDD: Math.round(maxDD * 1000) / 10, trades: trades.length, win: trades.length ? Math.round((wins.length / trades.length) * 100) : null,
+      avgR: trades.length ? Math.round((trades.reduce((a, x) => a + x.R, 0) / trades.length) * 100) / 100 : null,
+      avgWin: wins.length ? Math.round((wins.reduce((a, x) => a + x.ret, 0) / wins.length) * 1000) / 10 : null,
+      avgLoss: trades.length > wins.length ? Math.round((trades.filter(x => x.ret <= 0).reduce((a, x) => a + x.ret, 0) / (trades.length - wins.length)) * 1000) / 10 : null,
+      days: trades.length ? Math.round(trades.reduce((a, x) => a + x.days, 0) / trades.length) : null,
+      exposure: Math.round((expSum / (last - from + 1)) * 100),
+      curve: curve.filter((_, i, a) => i % 5 === 0 || i === a.length - 1),
+    };
+  };
+  const glMult = (em) => (em == null ? 0.5 : em >= 15 ? 1 : 0.5);
+  const base = (env) => (env === "EASY MONEY" ? 1 : env === "HARD MONEY" ? 0.5 : 0);
+  const heatOf = (env) => (env === "EASY MONEY" ? 6 : env === "HARD MONEY" ? 3 : 0);
+  return {
+    from: axis[from], to: axis[last],
+    variants: {
+      rules: { label: "TRADESK rules (CASH = no new trades)", ...run(t => { const e = envAt(t), sg = sigAt(t); return { pct: sg === "CASH" ? 0 : base(e) * glMult(emAt(t)), heat: heatOf(e) }; }) },
+      cash_half: { label: "Same, but half size on CASH days", ...run(t => { const e = envAt(t), sg = sigAt(t); return { pct: base(e) * glMult(emAt(t)) * (sg === "CASH" ? 0.5 : 1), heat: heatOf(e) || 3 }; }) },
+      no_filter: { label: "No market filter (1% every day)", ...run(() => ({ pct: 1, heat: 6 })) },
+    },
+  };
+}
+
 // ─── series math ─────────────────────────────────────────────────────────────
 export function emaSeries(arr, period) {
   const out = new Array(arr.length).fill(null), k = 2 / (period + 1);
@@ -1294,6 +1394,10 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   const asOf = axis[last];
   return {
     exit_bt: opts.long ? exitBacktest(stocks, last) : undefined,
+    system_bt: opts.long ? (() => {
+      const emOn = Object.fromEntries((ftAll?.history || []).map(h => [h.d, emEq(h)]));
+      return systemBacktest({ axis, stocks, volumes, last, sigAt: signalAt, envAt, emAt: (t) => emOn[axis[t]] ?? null });
+    })() : undefined,
     picks, forward, srank_of: srankOf,
     bias, trend, swing, momentum,
     bias_turning: biasTurning, bias_days: biasDays, bias_needed: BIAS_DAYS,
@@ -1546,6 +1650,15 @@ export async function computeLongBacktest({ onProgress = () => {} } = {}) {
     return Object.fromEntries(Object.entries(g).map(([k, xs]) => [k, { days: xs.length, fwd: r1((xs.reduce((a, b) => a + b, 0) / xs.length) * 100), up: Math.round((xs.filter(v => v > 0).length / xs.length) * 100) }])); };
   return { from: axis[0], to: axis[axis.length - 1], sessions: axis.length, stocks: got,
     signal_bt: sbt, by_signal: buckets("sig"), by_env: buckets("e"), exit_bt: r.exit_bt || null,
+    system_bt: r.system_bt ? (() => {
+      const sb = r.system_bt; if (!idx) return sb;
+      const d0 = Object.keys(idx).filter(d => d >= sb.from).sort()[0], d1 = Object.keys(idx).filter(d => d <= sb.to).sort().pop();
+      let pk = 0, dd = 0; for (const d of Object.keys(idx).filter(x => x >= d0 && x <= d1).sort()) { pk = Math.max(pk, idx[d]); dd = Math.min(dd, idx[d] / pk - 1); }
+      const yrs = sb.variants.rules.curve.length * 5 / 248;
+      sb.index = { ret: r1((idx[d1] / idx[d0] - 1) * 100), cagr: r1((Math.pow(idx[d1] / idx[d0], 1 / yrs) - 1) * 100), maxDD: r1(dd * 100),
+        curve: sb.variants.rules.curve.map(([d]) => { const k = Object.keys(idx).filter(x => x <= d).sort().pop(); return [d, k ? Math.round(1e6 * idx[k] / idx[d0]) : null]; }) };
+      return sb;
+    })() : null,
     scan_stats: r.scan_stats, green_light_bt: r.green_light?.bt || null, green_light_from: r.green_light?.from || null,
     mbi_bt: r.mbi?.bt || null, dip: r.dip ? { bt: r.dip.bt, other: r.dip.other } : null, mm_bt: r.market_monitor?.bt || null };
 }

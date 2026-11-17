@@ -3358,6 +3358,7 @@ function MarketQuadrantPage({ onPickStock }) {
       <MqForward fw={data.forward} picks={data.picks} onPickStock={onPickStock} />
       <MqSignalBacktest bt={data.signal_backtest} />
       {data.long_bt?.signal_bt && <MqSignalBacktest bt={data.long_bt.signal_bt} title="DOES THE SIGNAL WORK? · 5 YEARS" />}
+      <MqSystem sys={data.long_bt?.system_bt} />
       <MqSignalBuckets long={data.long_bt} />
       <MqExitRules rows={data.long_bt?.exit_bt} from={data.long_bt?.from} />
       <MqWeeklyReport data={data} />
@@ -4797,6 +4798,69 @@ function DisciplineStats({ closed, portfolio }) {
 }
 
 // ─── PHASE 2: signal backtest · themes · index ETFs ──────────────────────────
+
+/** The whole system as a ₹10 lakh portfolio over ~4 years, vs the Nifty 500. */
+function MqSystem({ sys }) {
+  const [hover, setHover] = useState(null);
+  if (!sys?.variants?.rules?.curve?.length) return null;
+  const V = sys.variants, lines = [
+    { k: "rules", label: "TRADESK rules", color: "#3B82F6", pts: V.rules.curve },
+    ...(V.no_filter ? [{ k: "no_filter", label: "No market filter", color: C.lime, pts: V.no_filter.curve }] : []),
+    ...(sys.index ? [{ k: "index", label: "Nifty 500", color: "#D9632B", pts: sys.index.curve.filter(p => p[1] != null) }] : []),
+  ];
+  const W = 340, H = 120, padL = 4, padR = 38, padT = 6;
+  const all = lines.flatMap(l => l.pts.map(p => p[1]));
+  const lo = Math.min(...all), hi = Math.max(...all), sp = hi - lo || 1, n = V.rules.curve.length;
+  const x = (i) => padL + (i / Math.max(1, n - 1)) * (W - padL - padR), y = (v) => padT + (1 - (v - lo) / sp) * (H - padT - 4);
+  const path = (pts) => pts.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p[1]).toFixed(1)}`).join("");
+  const lakh = (v) => (v == null ? "—" : `₹${(v / 1e5).toFixed(1)}L`);
+  const rows = [["rules", V.rules], ["cash_half", V.cash_half], ["no_filter", V.no_filter]].filter(([, v]) => v);
+  const hp = hover != null ? V.rules.curve[hover] : null;
+  const cell = { borderTop: "1px solid var(--border)", padding: "3px 0" };
+  return (
+    <div style={mqCardStyle}>
+      <div style={{ ...mqHeadStyle, marginBottom: 4 }}>THE WHOLE SYSTEM · ₹10 LAKH ACCOUNT</div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8, lineHeight: 1.45 }}>
+        Only TRADESK's rules, {mqFmtDate(sys.from)} {sys.from.slice(0, 4)} – {mqFmtDate(sys.to)} {sys.to.slice(0, 4)}: high-tight flags, first 52-week highs and 21-EMA pullbacks that pass the quality gate; size from the day's risk with the gap buffer and caps; out at the stop or a close under the 50-day; 0.15% costs a side.
+      </div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 6 }}>
+        {lines.map(l => <span key={l.k} style={{ fontSize: 11, color: "var(--text2)", display: "inline-flex", alignItems: "center", gap: 5 }}><span style={{ width: 12, height: 2, background: l.color }} />{l.label} <b style={{ fontFamily: "var(--mono)" }}>{lakh(l.pts[l.pts.length - 1][1])}</b></span>)}
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: "block", touchAction: "pan-y" }} role="img" aria-label="Equity curves: TRADESK rules, no market filter and Nifty 500"
+        onMouseMove={(e) => { const r = e.currentTarget.getBoundingClientRect(); setHover(Math.max(0, Math.min(n - 1, Math.round((((e.clientX - r.left) / r.width) * W - padL) / (W - padL - padR) * (n - 1))))); }} onMouseLeave={() => setHover(null)}>
+        <line x1={padL} x2={W - padR} y1={y(1e6)} y2={y(1e6)} stroke="var(--border)" strokeDasharray="3 3" />
+        <text x={W - padR + 3} y={y(1e6) + 3} fontSize="9" fill="var(--text3)" fontFamily="var(--mono)">₹10L</text>
+        <text x={W - padR + 3} y={y(hi) + 6} fontSize="9" fill="var(--text3)" fontFamily="var(--mono)">{lakh(hi)}</text>
+        {lines.map(l => <path key={l.k} d={path(l.pts)} fill="none" stroke={l.color} strokeWidth={l.k === "rules" ? 2 : 1.4} />)}
+        {hp && <line x1={x(hover)} x2={x(hover)} y1={padT} y2={H} stroke="var(--text3)" />}
+      </svg>
+      {hp && <div style={{ fontSize: 10.5, color: "var(--text2)", fontFamily: "var(--mono)" }}>{mqFmtDate(hp[0])} {hp[0].slice(0, 4)} · rules {lakh(hp[1])}{V.no_filter ? ` · no filter ${lakh(V.no_filter.curve[hover]?.[1])}` : ""}{sys.index?.curve[hover]?.[1] ? ` · N500 ${lakh(sys.index.curve[hover][1])}` : ""}</div>}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", columnGap: 10, fontSize: 11, marginTop: 8 }}>
+        {["", "PER YEAR", "WORST DROP", "TRADES"].map((h, i) => <span key={i} style={{ fontSize: 9.5, color: "var(--text3)", textAlign: i ? "right" : "left" }}>{h}</span>)}
+        {rows.map(([k, v]) => (
+          <Fragment key={k}>
+            <span style={{ ...cell, color: "var(--text2)" }}>{v.label}</span>
+            <span style={{ ...cell, fontFamily: "var(--mono)", textAlign: "right", color: v.cagr >= 0 ? C.pos : C.neg }}>{v.cagr > 0 ? "+" : ""}{v.cagr}%</span>
+            <span style={{ ...cell, fontFamily: "var(--mono)", textAlign: "right", color: C.neg }}>{v.maxDD}%</span>
+            <span style={{ ...cell, fontFamily: "var(--mono)", textAlign: "right" }}>{v.trades}</span>
+          </Fragment>
+        ))}
+        {sys.index && <>
+          <span style={{ ...cell, color: "var(--text2)" }}>Nifty 500 buy & hold</span>
+          <span style={{ ...cell, fontFamily: "var(--mono)", textAlign: "right" }}>{sys.index.cagr > 0 ? "+" : ""}{sys.index.cagr}%</span>
+          <span style={{ ...cell, fontFamily: "var(--mono)", textAlign: "right", color: C.neg }}>{sys.index.maxDD}%</span>
+          <span style={cell} />
+        </>}
+      </div>
+      <div style={{ fontSize: 10.5, color: "var(--text2)", marginTop: 8, lineHeight: 1.5 }}>
+        Trades: {V.rules.win}% winners averaging +{V.rules.avgWin}%, losers averaging {V.rules.avgLoss}%, held about {V.rules.days} days — a few big winners pay for many small losses.
+      </div>
+      <div style={{ fontSize: 10, color: C.warn, marginTop: 6, lineHeight: 1.45 }}>
+        ⚠ Optimistic: it uses today's Nifty 500 members (stocks that later fell out are missing, which flatters momentum setups) and closing prices only. Treat it as "the rules hang together", not as the return to expect.
+      </div>
+    </div>
+  );
+}
 
 /** What followed each signal / environment over 5 years (average Nifty 500 stock, next 10 sessions). */
 function MqSignalBuckets({ long }) {
