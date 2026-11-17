@@ -162,7 +162,13 @@ async function fetchSectorMap() {
 // Returns { closes: { "RELIANCE.NS": { "2025-01-02": close } }, vols: { "RELIANCE.NS": { "2026-07-01": volume } } }
 async function fetchSparkBatch(nsTickers, { range = RANGE, vol = VOL_DAYS } = {}) {
   const url = `${API_BASE}/api/spark?symbols=${encodeURIComponent(nsTickers.join(","))}&range=${range}&interval=1d&vol=${vol}`;
-  const r = await fetch(url);
+  // Retry with backoff: Yahoo (via /api/spark) rate-limits bursts with 429s / 5xx
+  let r;
+  for (let attempt = 0; ; attempt++) {
+    r = await fetch(url);
+    if (r.ok || attempt >= 3 || ![429, 500, 502, 503, 504].includes(r.status)) break;
+    await new Promise(res => setTimeout(res, 1500 * 2 ** attempt));
+  }
   if (!r.ok) throw new Error(`Spark API HTTP ${r.status}`);
   const json = await r.json();
   const closes = {}, vols = {};
@@ -1516,7 +1522,8 @@ export async function computeLongBacktest({ onProgress = () => {} } = {}) {
   const allData = {}, allVol = {};
   const chunks = []; for (let i = 0; i < tickers.length; i += 20) chunks.push(tickers.slice(i, i + 20));
   let done = 0;
-  const run = async (list) => mapLimited(list, 2, async (b) => {
+  const run = async (list) => mapLimited(list, 1, async (b) => {
+    await new Promise(res => setTimeout(res, 400)); // gentle: this runs right after the main download
     const r = await fetchSparkBatch(b, { range: "5y", vol: 1300 }); Object.assign(allData, r.closes); Object.assign(allVol, r.vols);
     onProgress(`5-year history ${++done}/${chunks.length}`);
   });
