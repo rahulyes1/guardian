@@ -10,6 +10,10 @@ const LEGACY_KEYS = {
 
 const LOCAL_SNAPSHOT_KEY = "td_app_snapshot_v1";
 const CLOUD_SYNC_META_KEY = "td_cloud_sync_meta_v1";
+// Mutual fund holdings / tracked funds also live in their own keys, which the Funds screens read
+const MF_KEYS = { mfHoldings: "td_mf_holdings", mfWatch: "td_mf_watch" };
+// Set before an email sign-in: "push" = this device's data goes up, "pull" = take the account's data
+const SYNC_JOIN_KEY = "td_sync_join";
 const CLOUD_TABLE = "app_state";
 const SYNC_DEBOUNCE_MS = 1000;
 const SYNC_RETRY_INTERVAL_MS = 30000;
@@ -20,6 +24,8 @@ const DEFAULT_SNAPSHOT = {
   regime: "bull",
   regimeSince: null,
   watchlist: [],
+  mfHoldings: [],
+  mfWatch: [],
   updatedAt: null,
 };
 
@@ -85,6 +91,13 @@ function normalizeSnapshot(input, options = {}) {
         .slice(0, 100)
         .map((w) => ({ sym: w.sym.toUpperCase(), addedAt: typeof w.addedAt === "string" ? w.addedAt : null, level: Number.isFinite(w.level) && w.level > 0 ? w.level : null }))
       : [],
+    // [{ id, code, name, kind: "units"|"lump"|"sip", units?, invested?, amount?, date?, day?, end? }], max 200
+    mfHoldings: Array.isArray(source.mfHoldings)
+      ? source.mfHoldings.filter((h) => h && Number.isFinite(Number(h.code)) && typeof h.name === "string" && ["units", "lump", "sip"].includes(h.kind)).slice(0, 200)
+      : [],
+    mfWatch: Array.isArray(source.mfWatch)
+      ? [...new Set(source.mfWatch.map(Number).filter((c) => Number.isFinite(c) && c > 0))].slice(0, 200)
+      : [],
     updatedAt: typeof source.updatedAt === "string" && source.updatedAt
       ? source.updatedAt
       : null,
@@ -100,6 +113,8 @@ function normalizeSnapshot(input, options = {}) {
 function loadLocalSnapshot() {
   const snapshot = readJson(LOCAL_SNAPSHOT_KEY, null);
   if (snapshot && typeof snapshot === "object") {
+    // Funds data saved before it was part of the synced snapshot
+    for (const [field, key] of Object.entries(MF_KEYS)) if (!Array.isArray(snapshot[field])) snapshot[field] = readJson(key, []);
     return {
       snapshot: normalizeSnapshot(snapshot),
       hasLocalData: true,
@@ -131,6 +146,37 @@ function persistLocalSnapshot(snapshot) {
   writeJson(LEGACY_KEYS.regime, normalized.regime);
   writeJson(LEGACY_KEYS.regimeSince, normalized.regimeSince);
   writeJson(LOCAL_SNAPSHOT_KEY, normalized);
+  for (const [field, key] of Object.entries(MF_KEYS)) {
+    const before = readJson(key, null);
+    if (JSON.stringify(before) !== JSON.stringify(normalized[field])) {
+      writeJson(key, normalized[field]);
+      try { setTimeout(() => window.dispatchEvent(new Event(key)), 0); } catch { /* not in a browser */ }
+    }
+  }
+}
+
+// ── Email sign-in: the same account on every device ──
+export async function sendSyncLink(email, mode) {
+  const supabase = getSupabaseClient();
+  if (!supabase) throw new Error("Cloud sync isn't configured.");
+  writeJson(SYNC_JOIN_KEY, mode === "pull" ? "pull" : "push");
+  const { error } = await supabase.auth.signInWithOtp({
+    email,
+    options: { emailRedirectTo: typeof window !== "undefined" ? window.location.origin : undefined, shouldCreateUser: true },
+  });
+  if (error) throw error;
+}
+export async function verifySyncCode(email, code) {
+  const supabase = getSupabaseClient();
+  const { error } = await supabase.auth.verifyOtp({ email, token: String(code).trim(), type: "email" });
+  if (error) throw error;
+  window.location.reload();
+}
+export async function signOutSync() {
+  const supabase = getSupabaseClient();
+  if (supabase) await supabase.auth.signOut();
+  try { localStorage.removeItem(SYNC_JOIN_KEY); } catch { /* ignore */ }
+  window.location.reload(); // starts a fresh anonymous backup; this device keeps its data
 }
 
 function resolveUpdater(updater, currentValue) {
@@ -164,14 +210,14 @@ async function ensureAnonymousUserId(supabase) {
     session = data?.session ?? null;
   }
 
-  if (session?.user?.id) return session.user.id;
+  if (session?.user?.id) return { id: session.user.id, email: session.user.email || null };
 
   const { data: userData, error: userError } = await supabase.auth.getUser();
   if (userError) throw userError;
   if (!userData?.user?.id) {
     throw new Error("Supabase anonymous user unavailable.");
   }
-  return userData.user.id;
+  return { id: userData.user.id, email: userData.user.email || null };
 }
 
 export function useSyncedAppState() {
@@ -200,6 +246,10 @@ export function useSyncedAppState() {
   useEffect(() => {
     cloudSyncRef.current = cloudSync;
   }, [cloudSync]);
+
+  // A cloud copy saved before funds were synced has no funds fields: keep this device's funds then
+  const withLocalFunds = (payload) => (payload && typeof payload === "object" && !Array.isArray(payload.mfHoldings)
+    ? { ...payload, mfHoldings: snapshotRef.current.mfHoldings || [], mfWatch: snapshotRef.current.mfWatch || [] } : payload);
 
   const updateCloudSyncState = useCallback((patch) => {
     setCloudSync((prev) => ({ ...prev, ...patch }));
@@ -250,7 +300,7 @@ export function useSyncedAppState() {
       if (fetchError) throw fetchError;
 
       if (remoteRow) {
-        const remotePayload = normalizeSnapshot(remoteRow.payload, { ensureUpdatedAt: false });
+        const remotePayload = normalizeSnapshot(withLocalFunds(remoteRow.payload), { ensureUpdatedAt: false });
         const remoteUpdatedAt = remotePayload.updatedAt || remoteRow.updated_at || null;
         if (toTimestamp(remoteUpdatedAt) > toTimestamp(localSnapshot.updatedAt)) {
           applyRemoteSnapshot(remotePayload, remoteUpdatedAt);
@@ -321,6 +371,14 @@ export function useSyncedAppState() {
     }));
   }, [updateLocalSnapshot]);
 
+  const setMfHoldings = useCallback((updater) => {
+    updateLocalSnapshot((previous) => ({ ...previous, mfHoldings: resolveUpdater(updater, previous.mfHoldings || []) }));
+  }, [updateLocalSnapshot]);
+
+  const setMfWatch = useCallback((updater) => {
+    updateLocalSnapshot((previous) => ({ ...previous, mfWatch: resolveUpdater(updater, previous.mfWatch || []) }));
+  }, [updateLocalSnapshot]);
+
   const setRegimeSince = useCallback((updater) => {
     updateLocalSnapshot((previous) => {
       const value = resolveUpdater(updater, previous.regimeSince);
@@ -347,10 +405,11 @@ export function useSyncedAppState() {
 
     const bootstrap = async () => {
       try {
-        const userId = await ensureAnonymousUserId(supabase);
+        const { id: userId, email } = await ensureAnonymousUserId(supabase);
         if (cancelled) return;
 
         userIdRef.current = userId;
+        const join = readJson(SYNC_JOIN_KEY, null);
         const localSnapshot = snapshotRef.current;
         const localUpdatedAt = toTimestamp(localSnapshot.updatedAt);
 
@@ -362,10 +421,15 @@ export function useSyncedAppState() {
         if (fetchError) throw fetchError;
         if (cancelled) return;
 
-        if (!remoteRow && hasLocalDataRef.current) {
+        if (email && join) {
+          // First load after an email sign-in: do what the user chose
+          try { localStorage.removeItem(SYNC_JOIN_KEY); } catch { /* ignore */ }
+          if (join === "pull" && remoteRow) applyRemoteSnapshot(normalizeSnapshot(withLocalFunds(remoteRow.payload), { ensureUpdatedAt: false }), remoteRow.updated_at);
+          else await pushSnapshotToCloud(supabase, userId, { ...localSnapshot, updatedAt: nowIso() });
+        } else if (!remoteRow && hasLocalDataRef.current) {
           await pushSnapshotToCloud(supabase, userId, localSnapshot);
         } else if (remoteRow) {
-          const remotePayload = normalizeSnapshot(remoteRow.payload, { ensureUpdatedAt: false });
+          const remotePayload = normalizeSnapshot(withLocalFunds(remoteRow.payload), { ensureUpdatedAt: false });
           const remoteUpdatedAt = remotePayload.updatedAt || remoteRow.updated_at || null;
           if (toTimestamp(remoteUpdatedAt) > localUpdatedAt) {
             applyRemoteSnapshot(remotePayload, remoteUpdatedAt);
@@ -381,6 +445,7 @@ export function useSyncedAppState() {
           ready: true,
           error: null,
           lastSyncedAt: nowIso(),
+          email: email || null,
         });
       } catch (error) {
         if (cancelled) return;
@@ -437,6 +502,10 @@ export function useSyncedAppState() {
     setTrades,
     watchlist: snapshot.watchlist || [],
     setWatchlist,
+    mfHoldings: snapshot.mfHoldings || [],
+    setMfHoldings,
+    mfWatch: snapshot.mfWatch || [],
+    setMfWatch,
     cloudSync,
   };
 }

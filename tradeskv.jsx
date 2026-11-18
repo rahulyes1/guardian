@@ -7,7 +7,7 @@ import {
 } from "./marketQuadrant.js";
 import { INDEX_KEYS, reconcileIndex } from "./lib/marketChecks.js";
 import { parseTradebook, buildTrades } from "./lib/tradeImport.js";
-import { useSyncedAppState } from "./appStateSync.js";
+import { useSyncedAppState, sendSyncLink, verifySyncCode, signOutSync } from "./appStateSync.js";
 // ─── THEME & CONSTANTS ───────────────────────────────────────────────────────
 // Light/dark: accents are picked per theme for contrast (vivid on dark, deeper on light).
 // Switching theme reloads the page so every colour is recomputed.
@@ -3549,7 +3549,56 @@ function Tour({ onDone }) {
     </div>
   );
 }
-function AppSettings({ onTour }) {
+/** Sync across devices: sign in with an email so every device uses the same account. */
+function SyncCard({ cloudSync }) {
+  const [email, setEmail] = useState("");
+  const [mode, setMode] = useState("push");
+  const [sent, setSent] = useState(false);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  if (!cloudSync?.enabled) return null;
+  const run = async (fn) => { setBusy(true); setMsg(null); try { await fn(); } catch (e) { setMsg(e.message || String(e)); } finally { setBusy(false); } };
+  const signedIn = !!cloudSync.email;
+  return (
+    <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Sync across devices</div>
+      {signedIn ? (
+        <>
+          <div style={{ fontSize: 12, color: "var(--text2)", lineHeight: 1.5 }}>Signed in as <b>{cloudSync.email}</b>. Trades, portfolio value, watchlist, fund holdings and tracked funds sync to every device signed in with this email{cloudSync.lastSyncedAt ? ` · last synced ${new Date(cloudSync.lastSyncedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}` : ""}.</div>
+          {cloudSync.error && <div style={{ fontSize: 11, color: C.warn, marginTop: 4 }}>Last sync problem: {cloudSync.error}</div>}
+          <button className="chip chip-sm" style={{ marginTop: 8 }} disabled={busy} onClick={() => confirm("Sign out of sync on this device? Its data stays here; it just stops syncing.") && run(signOutSync)}>Sign out on this device</button>
+        </>
+      ) : !sent ? (
+        <>
+          <div style={{ fontSize: 11.5, color: "var(--text3)", lineHeight: 1.5, marginBottom: 8 }}>Right now this device backs up on its own. Sign in with an email — on the device that has your data first, then on your other devices — and they all share one copy.</div>
+          <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" aria-label="Email for sync" style={{ width: "100%", marginBottom: 8 }} />
+          <div style={{ display: "grid", gap: 6, marginBottom: 8 }}>
+            {[["push", "This device has the data I want to keep"], ["pull", "Bring my synced data to this device (replaces what's here)"]].map(([k, l]) => (
+              <label key={k} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, color: "var(--text2)", cursor: "pointer" }}>
+                <input type="radio" name="syncmode" checked={mode === k} onChange={() => setMode(k)} />{l}
+              </label>
+            ))}
+          </div>
+          <button className="btn-primary" style={{ width: "100%", padding: "10px", fontSize: 13 }} disabled={busy || !/^\S+@\S+\.\S+$/.test(email)}
+            onClick={() => run(async () => { await sendSyncLink(email.trim(), mode); setSent(true); })}>{busy ? "Sending…" : "Email me a sign-in link"}</button>
+        </>
+      ) : (
+        <>
+          <div style={{ fontSize: 12, color: "var(--text2)", lineHeight: 1.5 }}>Sent to <b>{email}</b>. Open the link <b>on this device</b> — it brings you back here signed in. If the email shows a 6-digit code instead, enter it:</div>
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <input value={code} onChange={e => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" placeholder="123456" aria-label="Sign-in code" style={{ flex: 1 }} />
+            <button className="btn-primary" style={{ padding: "8px 14px", fontSize: 13 }} disabled={busy || code.length !== 6} onClick={() => run(() => verifySyncCode(email.trim(), code))}>Verify</button>
+          </div>
+          <button className="chip chip-sm" style={{ marginTop: 8 }} onClick={() => { setSent(false); setCode(""); }}>Use a different email</button>
+        </>
+      )}
+      {msg && <div style={{ fontSize: 11, color: C.neg, marginTop: 6 }}>{msg}</div>}
+    </div>
+  );
+}
+
+function AppSettings({ onTour, cloudSync }) {
   const setTheme = (t) => { try { localStorage.setItem("td_theme", t); } catch (_) {} location.reload(); };
   return (
     <div className="card" style={{ marginTop: 14 }}>
@@ -3563,6 +3612,7 @@ function AppSettings({ onTour }) {
         <span style={{ flex: 1 }} />
         <button className="chip" onClick={onTour}>Show tour</button>
       </div>
+      <SyncCard cloudSync={cloudSync} />
     </div>
   );
 }
@@ -6679,9 +6729,18 @@ function useMfList() {
   useEffect(() => { let alive = true; loadMfList().then(d => alive && set({ data: d, error: null })).catch(e => alive && set({ data: null, error: e.message })); return () => { alive = false; }; }, []);
   return s;
 }
+// Set by App: writes funds data through the synced app snapshot (cloud sync)
+let _mfSync = null;
+const readMfWatch = () => { try { return JSON.parse(localStorage.getItem("td_mf_watch") || "[]"); } catch (_) { return []; } };
 function useMfWatch() {
-  const [w, setW] = useState(() => { try { return JSON.parse(localStorage.getItem("td_mf_watch") || "[]"); } catch (_) { return []; } });
-  const toggle = (code) => setW(prev => { const next = prev.includes(code) ? prev.filter(c => c !== code) : [...prev, code]; try { localStorage.setItem("td_mf_watch", JSON.stringify(next)); } catch (_) {} return next; });
+  const [w, setW] = useState(readMfWatch);
+  useEffect(() => { const on = () => setW(readMfWatch()); window.addEventListener("td_mf_watch", on); return () => window.removeEventListener("td_mf_watch", on); }, []);
+  const toggle = (code) => {
+    const prev = readMfWatch(), next = prev.includes(code) ? prev.filter(c => c !== code) : [...prev, code];
+    setW(next);
+    if (_mfSync) _mfSync.setWatch(next);
+    else { try { localStorage.setItem("td_mf_watch", JSON.stringify(next)); } catch (_) {} window.dispatchEvent(new Event("td_mf_watch")); }
+  };
   return [w, toggle];
 }
 const pctTxt = (v, d = 1) => (v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(d)}%`);
@@ -6943,13 +7002,17 @@ function FundPage({ code, onBack }) {
   );
 }
 
-// ─── MUTUAL FUND PORTFOLIO (holdings on this device) ─────────────────────────
+// ─── MUTUAL FUND PORTFOLIO (synced with the rest of your data) ───────────────
 const MF_HOLD_KEY = "td_mf_holdings";
 function readHoldings() { try { return JSON.parse(localStorage.getItem(MF_HOLD_KEY) || "[]"); } catch (_) { return []; } }
 function useMfHoldings() {
   const [h, setH] = useState(readHoldings);
   useEffect(() => { const on = () => setH(readHoldings()); window.addEventListener("td_mf_holdings", on); return () => window.removeEventListener("td_mf_holdings", on); }, []);
-  const save = (next) => { try { localStorage.setItem(MF_HOLD_KEY, JSON.stringify(next)); } catch (_) {} setH(next); window.dispatchEvent(new Event("td_mf_holdings")); };
+  const save = (next) => {
+    setH(next);
+    if (_mfSync) _mfSync.setHoldings(next); // synced snapshot → writes td_mf_holdings and notifies
+    else { try { localStorage.setItem(MF_HOLD_KEY, JSON.stringify(next)); } catch (_) {} window.dispatchEvent(new Event("td_mf_holdings")); }
+  };
   return [h, save];
 }
 const _mfFull = new Map();
@@ -7045,7 +7108,7 @@ function MfPortfolio({ list, onOpenFund }) {
         <button className="chip chip-sm" onClick={() => { setAdding(v => !v); setEditId(null); }}>{adding ? "Close" : "+ Add holding"}</button>
       </div>
       {adding && <MfHoldingForm list={list} onSave={(h) => { save([...holdings, h]); setAdding(false); }} />}
-      {!holdings.length && !adding && <div style={{ fontSize: 12, color: "var(--text3)", padding: "8px 0", lineHeight: 1.5 }}>Add the funds you own — units from your statement, a lump sum, or a monthly SIP — to see their value, returns, mix and overlap. Saved on this device only.</div>}
+      {!holdings.length && !adding && <div style={{ fontSize: 12, color: "var(--text3)", padding: "8px 0", lineHeight: 1.5 }}>Add the funds you own — units from your statement, a lump sum, or a monthly SIP — to see their value, returns, mix and overlap. Synced with the rest of your data.</div>}
       {holdings.length > 0 && (
         <>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, margin: "10px 0" }}>
@@ -7305,7 +7368,11 @@ export default function App() {
     setTrades,
     watchlist,
     setWatchlist,
+    setMfHoldings,
+    setMfWatch,
+    cloudSync,
   } = useSyncedAppState();
+  _mfSync = { setHoldings: setMfHoldings, setWatch: setMfWatch };
   const [prefill, setPrefill] = useState(null);
   const [calcSymbol, setCalcSymbol] = useState(null); // stock picked in QUAD → opens in CALC
   const [showTour, setShowTour] = useState(() => { try { return localStorage.getItem("td_tour_done") !== "1"; } catch (_) { return false; } });
@@ -7405,7 +7472,7 @@ export default function App() {
         <StockPage symbol={stockSym} onBack={() => setPage(stockBack || "scan")} onPlan={pickStock} watchlist={watchlist} setWatchlist={setWatchlist} trades={trades} />
       )}
 
-      {page === "today" && <div style={{ padding: "0 16px 120px", marginTop: -100 }}><AppSettings onTour={() => setShowTour(true)} /></div>}
+      {page === "today" && <div style={{ padding: "0 16px 120px", marginTop: -100 }}><AppSettings onTour={() => setShowTour(true)} cloudSync={cloudSync} /></div>}
       {showTour && <Tour onDone={() => { setShowTour(false); try { localStorage.setItem("td_tour_done", "1"); } catch (_) {} }} />}
 
       <BottomNav page={page} setPage={setPage} />
