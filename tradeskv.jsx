@@ -6779,15 +6779,19 @@ function MfCategory({ cat, onOpen }) {
           _mfCat.set(cat, s); if (alive) setSt(s);
           if (!j.more || !alive) break;
         }
+        // mfapi throttles bursts: fill the funds the category call missed, 3 at a time
         const gaps = rows.filter(r => r.missing);
-        for (const g of gaps) {
-          if (!alive) break;
-          try {
-            const d = await loadMfFund(g.code);
-            Object.assign(g, { missing: false, nav: d.nav, date: d.date, chg: d.chg, m1: d.ret.m1, m3: d.ret.m3, y1: d.ret.y1, y3: d.ret.y3, y5: d.ret.y5, vol: d.vol, dd: d.maxDD?.pct, since: d.since });
-            const s2 = { rows: [...rows], total, done: true }; _mfCat.set(cat, s2); setSt(s2);
-          } catch (_) {}
-        }
+        let gi = 0;
+        await Promise.all([0, 1, 2].map(async () => {
+          while (alive && gi < gaps.length) {
+            const g = gaps[gi++];
+            try {
+              const d = await loadMfFund(g.code);
+              Object.assign(g, { missing: false, nav: d.nav, date: d.date, chg: d.chg, m1: d.ret.m1, m3: d.ret.m3, y1: d.ret.y1, y3: d.ret.y3, y5: d.ret.y5, vol: d.vol, dd: d.maxDD?.pct, since: d.since });
+              const s2 = { rows: [...rows], total, done: true }; _mfCat.set(cat, s2); if (alive) setSt(s2);
+            } catch (_) {}
+          }
+        }));
       } catch (e) { if (alive) setSt(s0 => ({ ...(s0 || {}), rows, total, done: false, error: e.message })); }
     })();
     return () => { alive = false; };
