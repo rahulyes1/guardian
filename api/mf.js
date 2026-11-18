@@ -213,8 +213,9 @@ export default async function handler(req, res) {
       const all = lr.body.funds.filter(f => f[3] === ci);
       const LIMIT = 60, offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
       const picked = all.slice(offset, offset + LIMIT);
-      const rows = await mapLimited(picked, 12, async (f) => {
-        const r = await get(MFAPI + f[0], { json: true, timeout: 6000 });
+      const rows = await mapLimited(picked, 8, async (f) => {
+        let r = await get(MFAPI + f[0], { json: true, timeout: 5000 });
+        if (r.status !== 200 && Date.now() < started + 7000) { await new Promise(res => setTimeout(res, 400)); r = await get(MFAPI + f[0], { json: true, timeout: 4000 }); }
         const st = r.status === 200 ? fundStats(r.body?.data, [f[5], f[4]]) : null;
         return st ? { code: f[0], name: f[1], house: f[2], nav: st.nav, date: st.date, chg: st.chg, m1: st.ret.m1, m3: st.ret.m3, y1: st.ret.y1, y3: st.ret.y3, y5: st.ret.y5, vol: st.vol, dd: st.maxDD.pct, since: st.since }
           : { code: f[0], name: f[1], house: f[2], nav: f[4], date: f[5], missing: true };

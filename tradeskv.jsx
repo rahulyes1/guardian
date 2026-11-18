@@ -6779,6 +6779,15 @@ function MfCategory({ cat, onOpen }) {
           _mfCat.set(cat, s); if (alive) setSt(s);
           if (!j.more || !alive) break;
         }
+        const gaps = rows.filter(r => r.missing);
+        for (const g of gaps) {
+          if (!alive) break;
+          try {
+            const d = await loadMfFund(g.code);
+            Object.assign(g, { missing: false, nav: d.nav, date: d.date, chg: d.chg, m1: d.ret.m1, m3: d.ret.m3, y1: d.ret.y1, y3: d.ret.y3, y5: d.ret.y5, vol: d.vol, dd: d.maxDD?.pct, since: d.since });
+            const s2 = { rows: [...rows], total, done: true }; _mfCat.set(cat, s2); setSt(s2);
+          } catch (_) {}
+        }
       } catch (e) { if (alive) setSt(s0 => ({ ...(s0 || {}), rows, total, done: false, error: e.message })); }
     })();
     return () => { alive = false; };
@@ -6792,7 +6801,7 @@ function MfCategory({ cat, onOpen }) {
     <div className="card" style={{ paddingTop: 10 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
         <div className="label">{cat.split(" · ")[1]}</div>
-        <span style={{ fontSize: 10.5, color: "var(--text3)" }}>{st?.total != null ? (st.done ? `${rows.length} funds` : `loading ${st.rows.length} of ${st.total}…`) : "loading…"}</span>
+        <span style={{ fontSize: 10.5, color: "var(--text3)" }}>{st?.total != null ? (st.done ? `${rows.length} funds${st.rows.length > rows.length ? ` · ${st.rows.length - rows.length} couldn't load` : ""}` : `loading ${st.rows.length} of ${st.total}…`) : "loading…"}</span>
       </div>
       {st?.error && <div style={{ fontSize: 11, color: C.warn, marginBottom: 6 }}>{st.error} — showing what loaded.</div>}
       {!rows.length && !st?.error ? <Skeleton lines={6} /> : (
