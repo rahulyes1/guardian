@@ -6715,9 +6715,10 @@ function FundsPage({ onOpenFund }) {
           {hits.length ? hits.map(f => <MfRow key={f[0]} f={f} cat={data.cats[f[3]]} onOpen={onOpenFund} />) : <div style={{ fontSize: 12, color: "var(--text3)", padding: "10px 0" }}>No fund matches "{q}".</div>}
         </div>
       )}
+      {!ql && <MfPortfolio list={data} onOpenFund={onOpenFund} />}
       {watch.length > 0 && !ql && (
         <div className="card" style={{ marginBottom: 12, paddingTop: 10 }}>
-          <div className="label" style={{ marginBottom: 4 }}>Your funds</div>
+          <div className="label" style={{ marginBottom: 4 }}>Funds you track</div>
           {watch.map(code => { const f = data.funds.find(x => x[0] === code); return f ? <MfWatchRow key={code} f={f} onOpen={onOpenFund} /> : null; })}
         </div>
       )}
@@ -6942,18 +6943,300 @@ function FundPage({ code, onBack }) {
   );
 }
 
+// ─── MUTUAL FUND PORTFOLIO (holdings on this device) ─────────────────────────
+const MF_HOLD_KEY = "td_mf_holdings";
+function readHoldings() { try { return JSON.parse(localStorage.getItem(MF_HOLD_KEY) || "[]"); } catch (_) { return []; } }
+function useMfHoldings() {
+  const [h, setH] = useState(readHoldings);
+  useEffect(() => { const on = () => setH(readHoldings()); window.addEventListener("td_mf_holdings", on); return () => window.removeEventListener("td_mf_holdings", on); }, []);
+  const save = (next) => { try { localStorage.setItem(MF_HOLD_KEY, JSON.stringify(next)); } catch (_) {} setH(next); window.dispatchEvent(new Event("td_mf_holdings")); };
+  return [h, save];
+}
+const _mfFull = new Map();
+function loadMfFull(code) {
+  if (!_mfFull.has(code)) _mfFull.set(code, fetch(`/api/mf?type=fund&code=${code}&full=1`).then(r => (r.ok ? r.json() : Promise.reject(new Error("NAV history unavailable")))).catch(e => { _mfFull.delete(code); throw e; }));
+  return _mfFull.get(code);
+}
+/** First NAV on or after a date (purchases settle at that day's NAV). */
+function navOnOrAfter(navs, day) {
+  let lo = 0, hi = navs.length - 1, k = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (navs[m][0] >= day) { k = m; hi = m - 1; } else lo = m + 1; }
+  return k >= 0 ? navs[k] : null;
+}
+function xirr(flows) { // flows: [[ms, amount]] (investments negative, value positive)
+  if (flows.length < 2 || !flows.some(f => f[1] < 0) || !flows.some(f => f[1] > 0)) return null;
+  const t0 = Math.min(...flows.map(f => f[0]));
+  const npv = (r) => flows.reduce((a, [ms, cf]) => a + cf / Math.pow(1 + r, (ms - t0) / (365.25 * 864e5)), 0);
+  let lo = -0.99, hi = 10; if (npv(lo) * npv(hi) > 0) return null;
+  for (let i = 0; i < 120; i++) { const mid = (lo + hi) / 2; if (npv(mid) > 0) lo = mid; else hi = mid; }
+  return Math.round(((lo + hi) / 2) * 1000) / 10;
+}
+/** A holding's units, money in, cash flows — from its NAV history. */
+function evalHolding(h, f) {
+  const navs = f.navs || [], last = navs[navs.length - 1], prev = navs[navs.length - 2];
+  if (!last) return null;
+  let units = 0, invested = 0; const flows = [];
+  const ms = (d) => Date.parse(d + "T00:00:00Z");
+  if (h.kind === "units") {
+    units = +h.units || 0; invested = +h.invested || 0;
+    if (h.date && invested > 0) flows.push([ms(h.date), -invested]);
+  } else if (h.kind === "lump") {
+    const p = navOnOrAfter(navs, h.date); if (!p) return { error: "date is after the latest NAV" };
+    units = (+h.amount || 0) / p[1]; invested = +h.amount || 0; flows.push([ms(p[0]), -invested]);
+  } else if (h.kind === "sip") {
+    const day = Math.min(28, Math.max(1, +h.day || +String(h.date).slice(8, 10) || 1));
+    let [y, m] = [+h.date.slice(0, 4), +h.date.slice(5, 7)];
+    const end = h.end && h.end < last[0] ? h.end : last[0];
+    for (let guard = 0; guard < 600; guard++) {
+      const want = `${y}-${String(m).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+      if (want > end) break;
+      if (want >= h.date) {
+        const p = navOnOrAfter(navs, want);
+        if (!p || p[0] > last[0]) break;
+        units += (+h.amount || 0) / p[1]; invested += +h.amount || 0; flows.push([ms(p[0]), -(+h.amount || 0)]);
+      }
+      m++; if (m > 12) { m = 1; y++; }
+    }
+  }
+  const value = units * last[1];
+  return { units, invested, value, nav: last[1], date: last[0], dayChg: prev ? units * (last[1] - prev[1]) : 0, flows, xirr: xirr([...flows, [ms(last[0]), value]]) };
+}
+/** Correlation of daily NAV moves over the last year, on shared dates. */
+function navCorr(a, b) {
+  const cut = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10);
+  const mb = new Map(b.filter(x => x[0] >= cut).map(x => [x[0], x[1]]));
+  const ra = [], rb = []; let pa = null, pb = null;
+  for (const [d, v] of a) {
+    if (d < cut || !mb.has(d)) continue;
+    const w = mb.get(d);
+    if (pa != null) { ra.push(v / pa - 1); rb.push(w / pb - 1); }
+    pa = v; pb = w;
+  }
+  if (ra.length < 60) return null;
+  const n = ra.length, ma = ra.reduce((x, y) => x + y, 0) / n, mbm = rb.reduce((x, y) => x + y, 0) / n;
+  let s = 0, sa = 0, sb = 0; for (let i = 0; i < n; i++) { s += (ra[i] - ma) * (rb[i] - mbm); sa += (ra[i] - ma) ** 2; sb += (rb[i] - mbm) ** 2; }
+  return sa && sb ? s / Math.sqrt(sa * sb) : null;
+}
+
+function MfPortfolio({ list, onOpenFund }) {
+  const [holdings, save] = useMfHoldings();
+  const [full, setFull] = useState({});
+  const [adding, setAdding] = useState(false);
+  const [editId, setEditId] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    for (const h of holdings) if (!full[h.code]) loadMfFull(h.code).then(f => alive && setFull(x => ({ ...x, [h.code]: f }))).catch(e => alive && setFull(x => ({ ...x, [h.code]: { error: e.message } })));
+    return () => { alive = false; };
+  }, [holdings.map(h => h.code).join(",")]);
+  const evals = holdings.map(h => ({ h, f: full[h.code], e: full[h.code]?.navs ? evalHolding(h, full[h.code]) : null }));
+  const ready = evals.filter(x => x.e && !x.e.error);
+  const tot = ready.reduce((a, { e }) => ({ value: a.value + e.value, invested: a.invested + e.invested, day: a.day + e.dayChg }), { value: 0, invested: 0, day: 0 });
+  const allFlows = ready.flatMap(({ e }) => e.flows);
+  const lastDay = ready.map(({ e }) => e.date).sort().pop();
+  const totX = lastDay ? xirr([...allFlows, [Date.parse(lastDay + "T00:00:00Z"), tot.value]]) : null;
+  const catOf = (code) => { const f = list?.funds.find(x => x[0] === code); return f ? list.cats[f[3]] : null; };
+  const houseOf = (code) => list?.funds.find(x => x[0] === code)?.[2] || null;
+  const loading = holdings.length > ready.length && evals.some(x => !x.f);
+
+  return (
+    <div className="card" style={{ marginBottom: 12, paddingTop: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <div className="label">My fund portfolio</div>
+        <button className="chip chip-sm" onClick={() => { setAdding(v => !v); setEditId(null); }}>{adding ? "Close" : "+ Add holding"}</button>
+      </div>
+      {adding && <MfHoldingForm list={list} onSave={(h) => { save([...holdings, h]); setAdding(false); }} />}
+      {!holdings.length && !adding && <div style={{ fontSize: 12, color: "var(--text3)", padding: "8px 0", lineHeight: 1.5 }}>Add the funds you own — units from your statement, a lump sum, or a monthly SIP — to see their value, returns, mix and overlap. Saved on this device only.</div>}
+      {holdings.length > 0 && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, margin: "10px 0" }}>
+            <div><div style={{ fontSize: 10, color: "var(--text3)" }}>VALUE</div><div style={{ fontFamily: "var(--mono)", fontSize: 20, fontWeight: 700 }}>{formatINR(Math.round(tot.value))}</div>
+              <div style={{ fontSize: 11, color: pctCol(tot.day) }}>{tot.day >= 0 ? "+" : ""}{formatINR(Math.round(tot.day))} today{lastDay ? ` · NAV ${mqFmtDate(lastDay)}` : ""}</div></div>
+            <div><div style={{ fontSize: 10, color: "var(--text3)" }}>GAIN</div><div style={{ fontFamily: "var(--mono)", fontSize: 16, fontWeight: 700, color: pctCol(tot.value - tot.invested) }}>{tot.value - tot.invested >= 0 ? "+" : ""}{formatINR(Math.round(tot.value - tot.invested))}</div>
+              <div style={{ fontSize: 11, color: "var(--text2)" }}>on {formatINR(Math.round(tot.invested))}{tot.invested ? ` (${pctTxt(((tot.value / tot.invested) - 1) * 100)})` : ""}{totX != null ? ` · XIRR ${pctTxt(totX)}` : ""}</div></div>
+          </div>
+          {loading && <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 6 }}>Loading NAV histories…</div>}
+          {evals.map(({ h, f, e }) => (
+            <div key={h.id} style={{ borderTop: "1px solid var(--border)", padding: "8px 0" }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+                <button onClick={() => onOpenFund(h.code)} style={{ flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", padding: 0, color: "var(--text)", cursor: "pointer", fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{h.name}</button>
+                <span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{e && !e.error ? formatINR(Math.round(e.value)) : f?.error ? "—" : "…"}</span>
+              </div>
+              <div style={{ display: "flex", gap: 8, fontSize: 10.5, color: "var(--text3)", marginTop: 2, flexWrap: "wrap", alignItems: "center" }}>
+                <span>{h.kind === "sip" ? `SIP ₹${(+h.amount).toLocaleString("en-IN")}/mo since ${mqFmtDate(h.date)} ${h.date.slice(0, 4)}` : h.kind === "lump" ? `₹${(+h.amount).toLocaleString("en-IN")} on ${mqFmtDate(h.date)} ${h.date.slice(0, 4)}` : `${(+h.units).toLocaleString("en-IN", { maximumFractionDigits: 3 })} units`}</span>
+                {e && !e.error && <span style={{ color: pctCol(e.value - e.invested) }}>{e.invested ? pctTxt(((e.value / e.invested) - 1) * 100) : ""}{e.xirr != null ? ` · XIRR ${pctTxt(e.xirr)}` : ""}</span>}
+                {(e?.error || f?.error) && <span style={{ color: C.warn }}>{e?.error || f.error}</span>}
+                <span style={{ flex: 1 }} />
+                <button className="chip chip-sm" onClick={() => setEditId(editId === h.id ? null : h.id)}>{editId === h.id ? "Close" : "Edit"}</button>
+              </div>
+              {editId === h.id && <MfHoldingForm list={list} initial={h} onSave={(nh) => { save(holdings.map(x => (x.id === h.id ? { ...nh, id: h.id } : x))); setEditId(null); }}
+                onDelete={() => { if (confirm(`Remove ${h.name} from your portfolio?`)) { save(holdings.filter(x => x.id !== h.id)); setEditId(null); } }} />}
+            </div>
+          ))}
+          {ready.length > 0 && <MfAllocation ready={ready} catOf={catOf} houseOf={houseOf} total={tot.value} />}
+          {ready.length > 1 && <MfOverlap ready={ready} catOf={catOf} />}
+        </>
+      )}
+    </div>
+  );
+}
+
+function MfHoldingForm({ list, initial, onSave, onDelete }) {
+  const today = new Date(Date.now() + 19800000).toISOString().slice(0, 10);
+  const [fund, setFund] = useState(initial ? { code: initial.code, name: initial.name } : null);
+  const [q, setQ] = useState("");
+  const [kind, setKind] = useState(initial?.kind || "sip");
+  const [v, setV] = useState({ units: initial?.units ?? "", invested: initial?.invested ?? "", amount: initial?.amount ?? "", date: initial?.date ?? "", day: initial?.day ?? "", end: initial?.end ?? "" });
+  const set = (k) => (e) => setV(x => ({ ...x, [k]: e.target.value }));
+  const ql = q.trim().toLowerCase();
+  const hits = !fund && ql.length >= 2 && list ? list.funds.filter(f => f[1].toLowerCase().includes(ql) || f[2].toLowerCase().includes(ql)).slice(0, 8) : [];
+  const ok = fund && (kind === "units" ? +v.units > 0 : +v.amount > 0 && v.date && v.date <= today);
+  const field = (k, label, type = "number", extra = {}) => (
+    <label style={{ display: "block", fontSize: 10.5, color: "var(--text3)" }}>{label}
+      <input type={type} value={v[k]} onChange={set(k)} style={{ width: "100%", marginTop: 3 }} {...extra} />
+    </label>
+  );
+  return (
+    <div style={{ border: "1px dashed var(--border2)", borderRadius: 10, padding: 10, margin: "8px 0", display: "grid", gap: 8 }}>
+      {fund ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ flex: 1, fontSize: 12.5, fontWeight: 600 }}>{fund.name}</span>
+          {!initial && <button className="chip chip-sm" onClick={() => setFund(null)}>Change</button>}
+        </div>
+      ) : (
+        <div>
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search the fund you hold" aria-label="Search fund to add" style={{ width: "100%" }} />
+          {hits.map(f => <button key={f[0]} onClick={() => { setFund({ code: f[0], name: f[1] }); setQ(""); }} style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", borderTop: "1px solid var(--border)", padding: "7px 0", color: "var(--text)", cursor: "pointer", fontSize: 12 }}>{f[1]} <span style={{ color: "var(--text3)", fontSize: 10.5 }}>· {f[2].replace(/ Mutual Fund$/, "")}</span></button>)}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 6 }}>
+        {[["sip", "Monthly SIP"], ["lump", "Lump sum"], ["units", "Units I hold"]].map(([k, l]) => <button key={k} className="chip chip-sm" aria-pressed={kind === k} onClick={() => setKind(k)}>{l}</button>)}
+      </div>
+      {kind === "sip" && <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        {field("amount", "₹ per month")}{field("date", "Started on", "date", { max: today })}
+        {field("day", "Debit day (1–28)", "number", { min: 1, max: 28, placeholder: "same as start" })}{field("end", "Stopped on (optional)", "date", { max: today })}
+      </div>}
+      {kind === "lump" && <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>{field("amount", "₹ invested")}{field("date", "Invested on", "date", { max: today })}</div>}
+      {kind === "units" && <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        {field("units", "Units (from your statement)")}{field("invested", "Total ₹ invested (optional)")}
+        {field("date", "First investment date (optional, for XIRR)", "date", { max: today })}
+      </div>}
+      <div style={{ fontSize: 10, color: "var(--text3)" }}>{kind === "units" ? "Most accurate: copy units from your CAS / AMC statement." : "Units are worked out from the NAV on each purchase day (the first NAV on or after it). Stamp duty and exit loads are ignored."}</div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button className="btn-primary" disabled={!ok} style={{ flex: 1, padding: "10px", fontSize: 13, opacity: ok ? 1 : 0.5 }}
+          onClick={() => onSave({ id: initial?.id || Date.now(), code: fund.code, name: fund.name, kind, ...(kind === "units" ? { units: +v.units, invested: +v.invested || 0, date: v.date || null } : { amount: +v.amount, date: v.date, ...(kind === "sip" ? { day: +v.day || null, end: v.end || null } : {}) }) })}>{initial ? "Save" : "Add to portfolio"}</button>
+        {onDelete && <button className="btn-ghost" style={{ padding: "10px 14px", fontSize: 13, color: C.neg }} onClick={onDelete}>Remove</button>}
+      </div>
+    </div>
+  );
+}
+
+function MfAllocation({ ready, catOf, houseOf, total }) {
+  const by = (fn) => { const m = {}; for (const { h, e } of ready) { const k = fn(h.code) || "Unknown"; m[k] = (m[k] || 0) + e.value; } return Object.entries(m).sort((a, b) => b[1] - a[1]); };
+  const groups = by(c => catOf(c)?.split(" · ")[0]), cats = by(c => catOf(c)?.split(" · ")[1]), houses = by(c => houseOf(c)?.replace(/ Mutual Fund$/, ""));
+  const GC = { Equity: "#3B82F6", Hybrid: C.lime, Debt: "#A06CD5", Index: "#0EA5E9", ETF: "#D9632B", Solution: C.warn, Other: C.muted, Unknown: C.muted };
+  const pc = (v) => Math.round((v / (total || 1)) * 100);
+  const notes = [];
+  if (houses[0] && pc(houses[0][1]) >= 50 && houses.length > 1) notes.push(`${pc(houses[0][1])}% sits with one fund house (${houses[0][0]}).`);
+  const smid = cats.filter(([k]) => /small|mid/i.test(k)).reduce((a, [, v]) => a + v, 0);
+  if (pc(smid) >= 40) notes.push(`${pc(smid)}% is in small / mid-cap funds — expect bigger swings.`);
+  const sect = cats.find(([k]) => /sectoral/i.test(k));
+  if (sect && pc(sect[1]) >= 25) notes.push(`${pc(sect[1])}% is in sector / theme funds — concentrated bets.`);
+  return (
+    <div style={{ borderTop: "1px solid var(--border)", marginTop: 6, paddingTop: 10 }}>
+      <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.08em", marginBottom: 6 }}>MIX</div>
+      <div style={{ display: "flex", height: 12, borderRadius: 6, overflow: "hidden", marginBottom: 6 }}>
+        {groups.map(([k, v]) => <div key={k} title={`${k} ${pc(v)}%`} style={{ width: `${(v / total) * 100}%`, background: GC[k] || C.muted }} />)}
+      </div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 11, color: "var(--text2)", marginBottom: 8 }}>
+        {groups.map(([k, v]) => <span key={k}><span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: GC[k] || C.muted, marginRight: 4 }} />{k} {pc(v)}%</span>)}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, fontSize: 11 }}>
+        <div><div style={{ fontSize: 10, color: "var(--text3)", marginBottom: 3 }}>BY CATEGORY</div>{cats.slice(0, 6).map(([k, v]) => <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 6 }}><span style={{ color: "var(--text2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{k}</span><span style={{ fontFamily: "var(--mono)" }}>{pc(v)}%</span></div>)}</div>
+        <div><div style={{ fontSize: 10, color: "var(--text3)", marginBottom: 3 }}>BY FUND HOUSE</div>{houses.slice(0, 6).map(([k, v]) => <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 6 }}><span style={{ color: "var(--text2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{k}</span><span style={{ fontFamily: "var(--mono)" }}>{pc(v)}%</span></div>)}</div>
+      </div>
+      {notes.map((n, i) => <div key={i} style={{ fontSize: 11, color: C.warn, marginTop: 6 }}>⚠ {n}</div>)}
+    </div>
+  );
+}
+
+function MfOverlap({ ready, catOf }) {
+  const funds = ready.filter(x => x.f?.navs?.length);
+  const pairs = [];
+  for (let i = 0; i < funds.length; i++) for (let j = i + 1; j < funds.length; j++) {
+    const r = navCorr(funds[i].f.navs, funds[j].f.navs);
+    pairs.push({ a: funds[i].h, b: funds[j].h, r, sameCat: catOf(funds[i].h.code) && catOf(funds[i].h.code) === catOf(funds[j].h.code) });
+  }
+  const level = (r) => (r == null ? null : r >= 0.95 ? ["Moves almost the same", C.neg] : r >= 0.85 ? ["Very similar", C.warn] : r >= 0.6 ? ["Partly similar", "var(--text2)"] : ["Different", C.pos]);
+  const shown = pairs.filter(p => p.r != null).sort((x, y) => y.r - x.r);
+  const dup = shown.filter(p => p.r >= 0.95 || p.sameCat);
+  const short = (n) => n.replace(/\s+Fund$/i, "").replace(/\s+(Direct|Plan|Growth).*$/i, "");
+  const n = funds.length;
+  return (
+    <div style={{ borderTop: "1px solid var(--border)", marginTop: 10, paddingTop: 10 }}>
+      <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.08em", marginBottom: 4 }}>OVERLAP · HOW ALIKE YOUR FUNDS ARE</div>
+      <div style={{ fontSize: 10.5, color: "var(--text3)", marginBottom: 8, lineHeight: 1.45 }}>From how their daily NAVs moved together over the last year (1.00 = identical). Funds that move almost the same usually hold the same big stocks, so owning both adds little diversification. Holdings themselves aren't published daily, so this uses NAV moves.</div>
+      {n <= 6 && (
+        <div style={{ display: "grid", gridTemplateColumns: `90px repeat(${n}, minmax(0, 1fr))`, gap: 2, fontSize: 10, marginBottom: 8 }}>
+          <span />
+          {funds.map(x => <span key={x.h.id} title={x.h.name} style={{ color: "var(--text3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textAlign: "center" }}>{short(x.h.name).split(" ")[0]}</span>)}
+          {funds.map((x, i) => (
+            <Fragment key={x.h.id}>
+              <span title={x.h.name} style={{ color: "var(--text2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{short(x.h.name)}</span>
+              {funds.map((y, j) => {
+                const r = i === j ? 1 : pairs.find(p => (p.a === x.h && p.b === y.h) || (p.a === y.h && p.b === x.h))?.r;
+                const c = i === j ? "var(--bg3)" : r == null ? "var(--bg3)" : r >= 0.95 ? `${C.neg}55` : r >= 0.85 ? `${C.warn}44` : r >= 0.6 ? "var(--bg3)" : `${C.pos}33`;
+                return <span key={y.h.id} style={{ background: c, borderRadius: 4, textAlign: "center", padding: "4px 0", fontFamily: "var(--mono)", color: "var(--text)" }}>{i === j ? "—" : r == null ? "?" : r.toFixed(2)}</span>;
+              })}
+            </Fragment>
+          ))}
+        </div>
+      )}
+      {shown.slice(0, 8).map((p, i) => { const L = level(p.r); return (
+        <div key={i} style={{ display: "flex", gap: 8, fontSize: 11, padding: "3px 0", alignItems: "baseline" }}>
+          <span style={{ flex: 1, minWidth: 0, color: "var(--text2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{short(p.a.name)} ↔ {short(p.b.name)}</span>
+          <span style={{ color: L[1], whiteSpace: "nowrap" }}>{L[0]}{p.sameCat ? " · same category" : ""}</span>
+          <span style={{ fontFamily: "var(--mono)" }}>{p.r.toFixed(2)}</span>
+        </div>
+      ); })}
+      {dup.length > 0
+        ? <div style={{ fontSize: 11, color: C.warn, marginTop: 6, lineHeight: 1.45 }}>⚠ {dup.length === 1 ? "One pair is" : `${dup.length} pairs are`} close to duplicates — consider keeping the better of each pair (lower cost, steadier record) instead of both.</div>
+        : <div style={{ fontSize: 11, color: C.pos, marginTop: 6 }}>No near-duplicates — your funds behave differently enough to diversify each other.</div>}
+    </div>
+  );
+}
+
 /** TODAY: your tracked funds at a glance, or a door into Funds. */
 function FundsTodayCard({ onOpen, onOpenFund }) {
   const [watch] = useMfWatch();
   const { data } = useMfList();
+  const [holdings] = useMfHoldings();
+  const [port, setPort] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    if (!holdings.length) { setPort(null); return; }
+    Promise.all(holdings.map(h => loadMfFull(h.code).then(f => evalHolding(h, f)).catch(() => null))).then(es => {
+      if (!alive) return;
+      const ok = es.filter(e => e && !e.error);
+      if (!ok.length) return;
+      setPort({ value: ok.reduce((a, e) => a + e.value, 0), invested: ok.reduce((a, e) => a + e.invested, 0), day: ok.reduce((a, e) => a + e.dayChg, 0), n: ok.length, date: ok.map(e => e.date).sort().pop() });
+    });
+    return () => { alive = false; };
+  }, [JSON.stringify(holdings)]);
   return (
     <div className="card" style={{ marginBottom: 14, paddingTop: 12 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 2 }}>
         <div className="label">Mutual funds</div>
         <button className="chip chip-sm" onClick={onOpen}>All funds ›</button>
       </div>
+      {port && (
+        <button onClick={onOpen} style={{ display: "flex", width: "100%", alignItems: "baseline", gap: 10, background: "none", border: "none", padding: "6px 0", color: "var(--text)", cursor: "pointer", textAlign: "left" }}>
+          <span style={{ fontFamily: "var(--mono)", fontSize: 18, fontWeight: 700 }}>{formatINR(Math.round(port.value))}</span>
+          <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: pctCol(port.day) }}>{port.day >= 0 ? "+" : ""}{formatINR(Math.round(port.day))} today</span>
+          <span style={{ fontSize: 11, color: pctCol(port.value - port.invested), marginLeft: "auto" }}>{port.invested ? pctTxt(((port.value / port.invested) - 1) * 100) : ""} overall</span>
+        </button>
+      )}
       {watch.length && data ? watch.slice(0, 6).map(c => { const f = data.funds.find(x => x[0] === c); return f ? <MfWatchRow key={c} f={f} onOpen={onOpenFund} /> : null; })
-        : <div style={{ fontSize: 12, color: "var(--text3)", padding: "6px 0" }}>{data ? `${data.funds.length.toLocaleString("en-IN")} funds, NAVs as of ${mqFmtDate(data.date)}. Find yours and tap ☆ to track it here.` : "Loading AMFI NAVs…"}</div>}
+        : !port && <div style={{ fontSize: 12, color: "var(--text3)", padding: "6px 0" }}>{data ? `${data.funds.length.toLocaleString("en-IN")} funds, NAVs as of ${mqFmtDate(data.date)}. Add your holdings in Funds, or tap ☆ on any fund to track it here.` : "Loading AMFI NAVs…"}</div>}
     </div>
   );
 }

@@ -199,7 +199,13 @@ export default async function handler(req, res) {
       const st = fundStats(r.body.data, row ? [row[5], row[4]] : null);
       if (!st) return fail(404, "Not enough NAV history");
       res.setHeader("Cache-Control", "public, max-age=1800, s-maxage=10800, stale-while-revalidate=86400");
-      return res.json({ source: "mfapi.in (AMFI NAVs)", code: Number(code), meta: r.body.meta, cat: row ? lr.body.cats[row[3]] : null, ...st });
+      // ?full=1 → every daily NAV (for exact SIP / purchase NAVs in the portfolio)
+      const navs = req.query.full === "1" ? (() => {
+        const all = r.body.data.map(x => [dmyDate(x.date), parseFloat(x.nav)]).filter(([d, v]) => d && v > 0).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+        if (row && row[5] > (all[all.length - 1]?.[0] || "")) all.push([row[5], row[4]]);
+        return all;
+      })() : undefined;
+      return res.json({ source: "mfapi.in (AMFI NAVs)", code: Number(code), meta: r.body.meta, cat: row ? lr.body.cats[row[3]] : null, ...st, navs });
     }
 
     if (type === "cat") {
