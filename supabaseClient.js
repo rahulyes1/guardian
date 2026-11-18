@@ -10,7 +10,7 @@ if (supabaseUrl && supabaseAnonKey) {
     auth: {
       autoRefreshToken: true,
       persistSession: true,
-      detectSessionInUrl: true, // email sign-in links ("sync across devices") land back here with the session
+      detectSessionInUrl: false,
     },
   });
 }

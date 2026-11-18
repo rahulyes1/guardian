@@ -12,8 +12,6 @@ const LOCAL_SNAPSHOT_KEY = "td_app_snapshot_v1";
 const CLOUD_SYNC_META_KEY = "td_cloud_sync_meta_v1";
 // Mutual fund holdings / tracked funds also live in their own keys, which the Funds screens read
 const MF_KEYS = { mfHoldings: "td_mf_holdings", mfWatch: "td_mf_watch" };
-// Set before an email sign-in: "push" = this device's data goes up, "pull" = take the account's data
-const SYNC_JOIN_KEY = "td_sync_join";
 const CLOUD_TABLE = "app_state";
 const SYNC_DEBOUNCE_MS = 1000;
 const SYNC_RETRY_INTERVAL_MS = 30000;
@@ -153,30 +151,6 @@ function persistLocalSnapshot(snapshot) {
       try { setTimeout(() => window.dispatchEvent(new Event(key)), 0); } catch { /* not in a browser */ }
     }
   }
-}
-
-// ── Email sign-in: the same account on every device ──
-export async function sendSyncLink(email, mode) {
-  const supabase = getSupabaseClient();
-  if (!supabase) throw new Error("Cloud sync isn't configured.");
-  writeJson(SYNC_JOIN_KEY, mode === "pull" ? "pull" : "push");
-  const { error } = await supabase.auth.signInWithOtp({
-    email,
-    options: { emailRedirectTo: typeof window !== "undefined" ? window.location.origin : undefined, shouldCreateUser: true },
-  });
-  if (error) throw error;
-}
-export async function verifySyncCode(email, code) {
-  const supabase = getSupabaseClient();
-  const { error } = await supabase.auth.verifyOtp({ email, token: String(code).trim(), type: "email" });
-  if (error) throw error;
-  window.location.reload();
-}
-export async function signOutSync() {
-  const supabase = getSupabaseClient();
-  if (supabase) await supabase.auth.signOut();
-  try { localStorage.removeItem(SYNC_JOIN_KEY); } catch { /* ignore */ }
-  window.location.reload(); // starts a fresh anonymous backup; this device keeps its data
 }
 
 function resolveUpdater(updater, currentValue) {
@@ -405,11 +379,10 @@ export function useSyncedAppState() {
 
     const bootstrap = async () => {
       try {
-        const { id: userId, email } = await ensureAnonymousUserId(supabase);
+        const { id: userId } = await ensureAnonymousUserId(supabase);
         if (cancelled) return;
 
         userIdRef.current = userId;
-        const join = readJson(SYNC_JOIN_KEY, null);
         const localSnapshot = snapshotRef.current;
         const localUpdatedAt = toTimestamp(localSnapshot.updatedAt);
 
@@ -421,12 +394,7 @@ export function useSyncedAppState() {
         if (fetchError) throw fetchError;
         if (cancelled) return;
 
-        if (email && join) {
-          // First load after an email sign-in: do what the user chose
-          try { localStorage.removeItem(SYNC_JOIN_KEY); } catch { /* ignore */ }
-          if (join === "pull" && remoteRow) applyRemoteSnapshot(normalizeSnapshot(withLocalFunds(remoteRow.payload), { ensureUpdatedAt: false }), remoteRow.updated_at);
-          else await pushSnapshotToCloud(supabase, userId, { ...localSnapshot, updatedAt: nowIso() });
-        } else if (!remoteRow && hasLocalDataRef.current) {
+        if (!remoteRow && hasLocalDataRef.current) {
           await pushSnapshotToCloud(supabase, userId, localSnapshot);
         } else if (remoteRow) {
           const remotePayload = normalizeSnapshot(withLocalFunds(remoteRow.payload), { ensureUpdatedAt: false });
@@ -445,7 +413,6 @@ export function useSyncedAppState() {
           ready: true,
           error: null,
           lastSyncedAt: nowIso(),
-          email: email || null,
         });
       } catch (error) {
         if (cancelled) return;
