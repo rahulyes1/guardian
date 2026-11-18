@@ -1315,7 +1315,7 @@ function TopBar({ regime, portfolio, page, indicesData }) {
 }
 
 // ─── TODAY PAGE ─────────────────────────────────────────────────────────────
-function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, trades, setPage, watchlist, onOpenStock, onPlan }) {
+function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, trades, setPage, watchlist, onOpenStock, onPlan, onOpenFund }) {
   const cfg = REGIME_CONFIG[regime];
   const openTrades = trades.filter(t => t.status === "open" || t.status === "partial").map(normalizeTrade);
   const totalRisk = openTrades.reduce((s, t) => s + (t.riskAmount || 0), 0);
@@ -1449,6 +1449,7 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
       {/* 4 · Watchlist and global cues */}
       <SectionBoundary name="Watchlist alerts"><WatchAlertsCard watchlist={watchlist} onOpen={onOpenStock} /></SectionBoundary>
       <SectionBoundary name="Global markets"><GlobalBrief /></SectionBoundary>
+      <SectionBoundary name="Mutual funds"><FundsTodayCard onOpen={() => { setPage("funds"); window.scrollTo(0, 0); }} onOpenFund={onOpenFund} /></SectionBoundary>
     </div>
   );
 }
@@ -3354,14 +3355,16 @@ function MarketQuadrantPage({ onPickStock }) {
         </div>
       )}
 
-      <QuadSection id="record" title="Track record" d={data} />
-      <MqForward fw={data.forward} picks={data.picks} onPickStock={onPickStock} />
-      <MqSignalBacktest bt={data.signal_backtest} />
-      {data.long_bt?.signal_bt && <MqSignalBacktest bt={data.long_bt.signal_bt} title="DOES THE SIGNAL WORK? · 5 YEARS" />}
-      <MqSystem sys={data.long_bt?.system_bt} />
-      <MqSignalBuckets long={data.long_bt} />
-      <MqExitRules rows={data.long_bt?.exit_bt} from={data.long_bt?.from} />
       <MqWeeklyReport data={data} />
+      <QuadSection id="record" title="Track record" d={data} />
+      <Fold id="records" title="Backtests behind the rules" sub="How each gauge, scan and exit rule did in the past — open only if you want the evidence.">
+        <MqForward fw={data.forward} picks={data.picks} onPickStock={onPickStock} />
+        <MqSignalBacktest bt={data.signal_backtest} />
+        {data.long_bt?.signal_bt && <MqSignalBacktest bt={data.long_bt.signal_bt} title="DOES THE SIGNAL WORK? · 5 YEARS" />}
+        <MqSystem sys={data.long_bt?.system_bt} />
+        <MqSignalBuckets long={data.long_bt} />
+        <MqExitRules rows={data.long_bt?.exit_bt} from={data.long_bt?.from} />
+      </Fold>
 
       {/* ── Footer: refresh + timestamp ── */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
@@ -6290,6 +6293,22 @@ function Guide({ id, d, compact }) {
     </div>
   );
 }
+/** A collapsed section (closed by default, remembered). */
+function Fold({ id, title, sub, children }) {
+  const key = `td_fold_${id}`;
+  const [open, setOpen] = useState(() => { try { return localStorage.getItem(key) === "1"; } catch (_) { return false; } });
+  const toggle = () => setOpen(v => { try { localStorage.setItem(key, v ? "0" : "1"); } catch (_) {} return !v; });
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <button onClick={toggle} aria-expanded={open} className="card" style={{ display: "flex", width: "100%", alignItems: "center", gap: 10, textAlign: "left", cursor: "pointer", color: "var(--text)", marginBottom: open ? 10 : 0 }}>
+        <span style={{ flex: 1 }}><span style={{ display: "block", fontSize: 13, fontWeight: 700 }}>{title}</span>{sub && <span style={{ display: "block", fontSize: 11, color: "var(--text3)", marginTop: 2 }}>{sub}</span>}</span>
+        <span aria-hidden="true" style={{ color: "var(--text3)" }}>{open ? "▴" : "▾"}</span>
+      </button>
+      {open && children}
+    </div>
+  );
+}
+
 /** QUAD section header with an anchor and its guide. */
 function QuadSection({ id, title, d }) {
   return (
@@ -6644,6 +6663,288 @@ function tradeMarks(trades, symbol) {
 }
 
 // ─── BOTTOM NAV ──────────────────────────────────────────────────────────────
+// ─── MUTUAL FUNDS (AMFI daily NAVs + mfapi.in history) ───────────────────────
+let _mfListP = null;
+function loadMfList() {
+  return (_mfListP ||= fetch("/api/mf?type=list").then(r => (r.ok ? r.json() : Promise.reject(new Error("Fund list unavailable")))).catch(e => { _mfListP = null; throw e; }));
+}
+const _mfFund = new Map();
+function loadMfFund(code) {
+  if (!_mfFund.has(code)) _mfFund.set(code, fetch(`/api/mf?type=fund&code=${code}`).then(r => (r.ok ? r.json() : Promise.reject(new Error("Fund data unavailable")))).catch(e => { _mfFund.delete(code); throw e; }));
+  return _mfFund.get(code);
+}
+const _mfCat = new Map(); // cat → { rows, total, done }
+function useMfList() {
+  const [s, set] = useState({ data: null, error: null });
+  useEffect(() => { let alive = true; loadMfList().then(d => alive && set({ data: d, error: null })).catch(e => alive && set({ data: null, error: e.message })); return () => { alive = false; }; }, []);
+  return s;
+}
+function useMfWatch() {
+  const [w, setW] = useState(() => { try { return JSON.parse(localStorage.getItem("td_mf_watch") || "[]"); } catch (_) { return []; } });
+  const toggle = (code) => setW(prev => { const next = prev.includes(code) ? prev.filter(c => c !== code) : [...prev, code]; try { localStorage.setItem("td_mf_watch", JSON.stringify(next)); } catch (_) {} return next; });
+  return [w, toggle];
+}
+const pctTxt = (v, d = 1) => (v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(d)}%`);
+const pctCol = (v) => (v == null ? "var(--text3)" : v > 0 ? C.pos : v < 0 ? C.neg : "var(--text2)");
+const MF_GROUPS = ["Equity", "Hybrid", "Index", "Debt", "ETF", "Solution", "Other"];
+
+function FundsPage({ onOpenFund }) {
+  const { data, error } = useMfList();
+  const [watch] = useMfWatch();
+  const [q, setQ] = useState("");
+  const [cat, setCat] = useState(() => { try { return localStorage.getItem("td_mf_cat") || "Equity · Flexi Cap"; } catch (_) { return "Equity · Flexi Cap"; } });
+  const [group, setGroup] = useState(() => (cat.split(" · ")[0] || "Equity"));
+  const pickCat = (c) => { setCat(c); try { localStorage.setItem("td_mf_cat", c); } catch (_) {} };
+  const head = (
+    <div style={{ marginBottom: 12 }}>
+      <div className="section-title">Funds</div>
+      <div style={{ fontSize: 13, color: "var(--text3)", marginTop: 4 }}>Every Direct-Growth mutual fund, updated each evening from AMFI's official NAVs.</div>
+    </div>
+  );
+  if (!data) return <div className="fade-in" style={{ padding: "16px 16px 120px" }}>{head}<div className="card" style={{ fontSize: 12, color: error ? "var(--red)" : "var(--text3)" }}>{error || <><div style={{ marginBottom: 10 }}>Loading AMFI's NAV file…</div><Skeleton lines={5} /></>}</div></div>;
+  const ql = q.trim().toLowerCase();
+  const hits = ql.length >= 2 ? data.funds.filter(f => f[1].toLowerCase().includes(ql) || f[2].toLowerCase().includes(ql)).slice(0, 25) : [];
+  const catsInGroup = data.cats.map((c, i) => [c, data.funds.filter(f => f[3] === i).length]).filter(([c]) => c.startsWith(group + " · ")).sort((a, b) => b[1] - a[1]);
+  return (
+    <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
+      {head}
+      <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search a fund or AMC — e.g. parag parikh, nifty 50 index" aria-label="Search mutual funds"
+        style={{ width: "100%", marginBottom: 12 }} />
+      {ql.length >= 2 && (
+        <div className="card" style={{ marginBottom: 12, paddingTop: 6 }}>
+          {hits.length ? hits.map(f => <MfRow key={f[0]} f={f} cat={data.cats[f[3]]} onOpen={onOpenFund} />) : <div style={{ fontSize: 12, color: "var(--text3)", padding: "10px 0" }}>No fund matches "{q}".</div>}
+        </div>
+      )}
+      {watch.length > 0 && !ql && (
+        <div className="card" style={{ marginBottom: 12, paddingTop: 10 }}>
+          <div className="label" style={{ marginBottom: 4 }}>Your funds</div>
+          {watch.map(code => { const f = data.funds.find(x => x[0] === code); return f ? <MfWatchRow key={code} f={f} onOpen={onOpenFund} /> : null; })}
+        </div>
+      )}
+      {!ql && <>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+          {MF_GROUPS.map(g => <button key={g} className="chip chip-sm" aria-pressed={group === g} onClick={() => setGroup(g)}>{g}</button>)}
+        </div>
+        <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4, marginBottom: 10, scrollbarWidth: "thin" }}>
+          {catsInGroup.map(([c, n]) => <button key={c} className="chip chip-sm" aria-pressed={cat === c} onClick={() => pickCat(c)} style={{ whiteSpace: "nowrap" }}>{c.split(" · ")[1]} <span style={{ opacity: 0.6, fontFamily: "var(--mono)" }}>{n}</span></button>)}
+        </div>
+        <MfCategory cat={cat} onOpen={onOpenFund} />
+      </>}
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 10, lineHeight: 1.5 }}>
+        NAVs as of {mqFmtDate(data.date)} from AMFI (published ~9–11 pm IST); history from mfapi.in. Direct-Growth plans only. 3Y / 5Y are yearly (CAGR) returns. Past returns don't predict future returns — this is information, not advice.
+      </div>
+    </div>
+  );
+}
+
+function MfRow({ f, cat, onOpen }) {
+  return (
+    <button onClick={() => onOpen(f[0])} style={{ display: "flex", width: "100%", textAlign: "left", gap: 8, alignItems: "center", background: "none", border: "none", borderTop: "1px solid var(--border)", padding: "8px 0", color: "var(--text)", cursor: "pointer", minHeight: 44 }}>
+      <span style={{ flex: 1, minWidth: 0 }}>
+        <span style={{ display: "block", fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f[1]}</span>
+        <span style={{ display: "block", fontSize: 10.5, color: "var(--text3)" }}>{f[2].replace(/ Mutual Fund$/, "")} · {cat?.split(" · ")[1]}</span>
+      </span>
+      <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text2)" }}>₹{f[4].toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span>
+    </button>
+  );
+}
+
+function MfWatchRow({ f, onOpen }) {
+  const [d, setD] = useState(null);
+  useEffect(() => { let alive = true; loadMfFund(f[0]).then(x => alive && setD(x)).catch(() => {}); return () => { alive = false; }; }, [f[0]]);
+  return (
+    <button onClick={() => onOpen(f[0])} style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: 10, width: "100%", textAlign: "left", alignItems: "center", background: "none", border: "none", borderTop: "1px solid var(--border)", padding: "8px 0", color: "var(--text)", cursor: "pointer", minHeight: 44 }}>
+      <span style={{ minWidth: 0, fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f[1]}</span>
+      <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: pctCol(d?.chg) }}>{d ? pctTxt(d.chg, 2) : "…"}</span>
+      <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: pctCol(d?.ret?.y1), minWidth: 52, textAlign: "right" }}>{d ? `1Y ${pctTxt(d.ret.y1)}` : ""}</span>
+    </button>
+  );
+}
+
+function MfCategory({ cat, onOpen }) {
+  const [st, setSt] = useState(() => _mfCat.get(cat) || null);
+  const [sort, setSort] = useState("y3");
+  useEffect(() => {
+    let alive = true;
+    const cached = _mfCat.get(cat);
+    setSt(cached || { rows: [], total: null, done: false, error: null });
+    if (cached?.done) return;
+    (async () => {
+      let rows = cached?.rows || [], offset = rows.length, total = cached?.total ?? null;
+      try {
+        for (;;) {
+          const j = await fetch(`/api/mf?type=cat&cat=${encodeURIComponent(cat)}&offset=${offset}`).then(r => (r.ok ? r.json() : Promise.reject(new Error("Category data unavailable"))));
+          rows = [...rows, ...j.funds]; total = j.total; offset += j.shown;
+          const s = { rows, total, done: !j.more };
+          _mfCat.set(cat, s); if (alive) setSt(s);
+          if (!j.more || !alive) break;
+        }
+      } catch (e) { if (alive) setSt(s0 => ({ ...(s0 || {}), rows, total, done: false, error: e.message })); }
+    })();
+    return () => { alive = false; };
+  }, [cat]);
+  const rows = (st?.rows || []).filter(r => !r.missing);
+  const key = (r) => r[sort] ?? -999;
+  const sorted = [...rows].sort((a, b) => (sort === "dd" || sort === "vol" ? (sort === "dd" ? key(b) - key(a) : (a.vol ?? 999) - (b.vol ?? 999)) : key(b) - key(a)));
+  const avg = (k) => { const xs = rows.map(r => r[k]).filter(v => v != null); return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null; };
+  const COLS = [["y1", "1Y"], ["y3", "3Y"], ["y5", "5Y"], ["dd", "FALL"]];
+  return (
+    <div className="card" style={{ paddingTop: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+        <div className="label">{cat.split(" · ")[1]}</div>
+        <span style={{ fontSize: 10.5, color: "var(--text3)" }}>{st?.total != null ? (st.done ? `${rows.length} funds` : `loading ${st.rows.length} of ${st.total}…`) : "loading…"}</span>
+      </div>
+      {st?.error && <div style={{ fontSize: 11, color: C.warn, marginBottom: 6 }}>{st.error} — showing what loaded.</div>}
+      {!rows.length && !st?.error ? <Skeleton lines={6} /> : (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr repeat(4, auto)", columnGap: 10, fontSize: 12 }}>
+          <span style={{ fontSize: 10, color: "var(--text3)", paddingBottom: 4 }}>FUND · tap a column to sort</span>
+          {COLS.map(([k, l]) => <button key={k} onClick={() => setSort(k)} title={k === "dd" ? "Worst fall in the last 3 years" : `${l} return${k === "y1" ? "" : " per year"}`} style={{ background: "none", border: "none", padding: "0 0 4px", fontSize: 10, color: sort === k ? "var(--violet)" : "var(--text3)", fontWeight: sort === k ? 800 : 400, cursor: "pointer", textAlign: "right", minHeight: 28 }}>{l}{sort === k ? " ▾" : ""}</button>)}
+          <span style={{ fontSize: 10.5, color: "var(--text3)", borderTop: "1px solid var(--border)", padding: "5px 0" }}>Category average</span>
+          {COLS.map(([k]) => <span key={k} style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text3)", textAlign: "right", borderTop: "1px solid var(--border)", padding: "5px 0" }}>{avg(k) != null ? pctTxt(avg(k)) : "—"}</span>)}
+          {sorted.slice(0, 80).map((r, i) => (
+            <Fragment key={r.code}>
+              <button onClick={() => onOpen(r.code)} style={{ textAlign: "left", background: "none", border: "none", borderTop: "1px solid var(--border)", padding: "6px 0", color: "var(--text)", cursor: "pointer", minWidth: 0 }}>
+                <span style={{ display: "block", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}><span style={{ color: "var(--text3)", fontFamily: "var(--mono)", marginRight: 4 }}>{i + 1}</span>{r.name}</span>
+                <span style={{ display: "block", fontSize: 10, color: "var(--text3)" }}>{r.house.replace(/ Mutual Fund$/, "")}{r.y5 == null && r.since ? ` · since ${r.since.slice(0, 4)}` : ""}</span>
+              </button>
+              {COLS.map(([k]) => <span key={k} style={{ fontFamily: "var(--mono)", fontSize: 11.5, textAlign: "right", color: k === "dd" ? C.neg : pctCol(r[k]), borderTop: "1px solid var(--border)", padding: "6px 0", alignSelf: "center" }}>{r[k] != null ? (k === "dd" ? `${r[k]}%` : pctTxt(r[k])) : "—"}</span>)}
+            </Fragment>
+          ))}
+        </div>
+      )}
+      {sorted.length > 80 && <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>Top 80 of {sorted.length} by the chosen column — search to find any other.</div>}
+    </div>
+  );
+}
+
+function FundPage({ code, onBack }) {
+  const [d, setD] = useState(null), [err, setErr] = useState(null);
+  const [range, setRange] = useState(3);
+  const [watch, toggleWatch] = useMfWatch();
+  useEffect(() => { let alive = true; setD(null); setErr(null); loadMfFund(code).then(x => alive && setD(x)).catch(e => alive && setErr(e.message)); return () => { alive = false; }; }, [code]);
+  const back = <button onClick={onBack} className="btn-ghost" style={{ padding: "6px 10px", fontSize: 12, marginBottom: 12 }}>‹ Back</button>;
+  if (err) return <div className="fade-in" style={{ padding: "16px 16px 120px" }}>{back}<div className="card" style={{ color: "var(--red)", fontSize: 13 }}>{err}</div></div>;
+  if (!d) return <div className="fade-in" style={{ padding: "16px 16px 120px" }}>{back}<div className="card"><Skeleton lines={8} /></div></div>;
+  const name = (d.meta?.scheme_name || "").replace(/\s*-\s*direct.*$/i, "") || `Fund ${code}`;
+  const catAvg = (() => { const c = d.cat && _mfCat.get(d.cat); if (!c?.rows?.length) return null; const a = (k) => { const xs = c.rows.map(r => r[k]).filter(v => v != null); return xs.length ? xs.reduce((x, y) => x + y, 0) / xs.length : null; }; const rk = (k) => { const xs = c.rows.filter(r => r[k] != null).sort((x, y) => y[k] - x[k]); const i = xs.findIndex(r => r.code === code); return i >= 0 ? [i + 1, xs.length] : null; }; return { y1: a("y1"), y3: a("y3"), y5: a("y5"), r3: rk("y3"), r1: rk("y1") }; })();
+  const R = d.ret;
+  const grid = [["1W", R.w1], ["1M", R.m1], ["3M", R.m3], ["6M", R.m6], ["YTD", R.ytd], ["1Y", R.y1], ["3Y/yr", R.y3], ["5Y/yr", R.y5], ["10Y/yr", R.y10], ["Since start/yr", R.inception]];
+  // chart
+  const cut = new Date(Date.parse(d.date) - range * 365.25 * 864e5).toISOString().slice(0, 10);
+  const pts = d.series.filter(p => p[0] >= cut);
+  const W = 340, H = 130, padL = 4, padR = 40, padT = 6;
+  const lo = Math.min(...pts.map(p => p[1])), hi = Math.max(...pts.map(p => p[1])), sp = hi - lo || 1;
+  const x = (i) => padL + (i / Math.max(1, pts.length - 1)) * (W - padL - padR), y = (v) => padT + (1 - (v - lo) / sp) * (H - padT - 4);
+  const path = pts.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p[1]).toFixed(1)}`).join("");
+  const chgRange = pts.length > 1 ? (pts[pts.length - 1][1] / pts[0][1] - 1) * 100 : null;
+  const lineCol = chgRange == null ? "var(--text)" : chgRange >= 0 ? C.pos : C.neg;
+  const watching = watch.includes(code);
+  const box = (k, v, sub) => (
+    <div style={{ background: "var(--bg3)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 8px", minWidth: 0 }}>
+      <div style={{ fontSize: 9.5, color: "var(--text3)", letterSpacing: "0.06em" }}>{k}</div>
+      <div style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: pctCol(v) }}>{pctTxt(v)}</div>
+      {sub && <div style={{ fontSize: 9.5, color: "var(--text3)" }}>{sub}</div>}
+    </div>
+  );
+  const yrs = Math.max(1, ...d.years.map(([, v]) => Math.abs(v ?? 0)));
+  return (
+    <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
+      {back}
+      <div className="card" style={{ marginBottom: 12 }}>
+        <div style={{ fontFamily: "var(--display)", fontSize: 20, lineHeight: 1.2 }}>{name}</div>
+        <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 3 }}>{d.meta?.fund_house} · {d.cat?.split(" · ")[1] || d.meta?.scheme_category} · Direct · Growth</div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+          <span style={{ fontFamily: "var(--mono)", fontSize: 24, fontWeight: 700 }}>₹{d.nav.toLocaleString("en-IN", { maximumFractionDigits: 4 })}</span>
+          <span style={{ fontFamily: "var(--mono)", fontSize: 13, color: pctCol(d.chg) }}>{pctTxt(d.chg, 2)}</span>
+          <span style={{ fontSize: 11, color: "var(--text3)" }}>NAV {mqFmtDate(d.date)} (prev {mqFmtDate(d.prevDate)})</span>
+        </div>
+        <button className="chip" aria-pressed={watching} onClick={() => toggleWatch(code)} style={{ marginTop: 10 }}>{watching ? "★ Tracking" : "☆ Track this fund"}</button>
+
+        <div style={{ display: "flex", gap: 6, margin: "14px 0 6px" }}>
+          {[1, 3, 5, 10].map(n => <button key={n} className="chip chip-sm" aria-pressed={range === n} onClick={() => setRange(n)}>{n}Y</button>)}
+          <span style={{ flex: 1 }} />
+          <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: pctCol(chgRange), alignSelf: "center" }}>{pctTxt(chgRange)}</span>
+        </div>
+        {pts.length > 1 && (
+          <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: "block" }} role="img" aria-label={`${name} NAV over ${range} years`}>
+            {[lo, (lo + hi) / 2, hi].map((t, k) => <g key={k}><line x1={padL} x2={W - padR} y1={y(t)} y2={y(t)} stroke="var(--border)" /><text x={W - padR + 4} y={y(t) + 3} fontSize="9" fill="var(--text3)" fontFamily="var(--mono)">{t >= 1000 ? t.toFixed(0) : t.toFixed(1)}</text></g>)}
+            <path d={path} fill="none" stroke={lineCol} strokeWidth="1.8" strokeLinejoin="round" />
+          </svg>
+        )}
+      </div>
+
+      <div className="card" style={{ marginBottom: 12 }}>
+        <div className="label" style={{ marginBottom: 8 }}>Returns</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(72px, 1fr))", gap: 6 }}>
+          {grid.map(([k, v]) => box(k, v))}
+        </div>
+        {catAvg && (
+          <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 8, lineHeight: 1.5 }}>
+            Category average: 1Y {pctTxt(catAvg.y1)} · 3Y {pctTxt(catAvg.y3)}/yr · 5Y {pctTxt(catAvg.y5)}/yr
+            {catAvg.r3 && <> · ranks <b>#{catAvg.r3[0]} of {catAvg.r3[1]}</b> on 3-year return</>}
+          </div>
+        )}
+        {!catAvg && d.cat && <div style={{ fontSize: 10.5, color: "var(--text3)", marginTop: 8 }}>Open its category in Funds to see how it ranks against peers.</div>}
+      </div>
+
+      <div className="card" style={{ marginBottom: 12 }}>
+        <div className="label" style={{ marginBottom: 8 }}>Risk & consistency</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: 12 }}>
+          <div><div style={{ fontSize: 10, color: "var(--text3)" }}>WORST FALL · 3 YEARS</div><div style={{ fontFamily: "var(--mono)", fontWeight: 700, color: C.neg }}>{d.maxDD?.pct != null ? `${d.maxDD.pct}%` : "—"}</div>{d.maxDD?.from && <div style={{ fontSize: 10, color: "var(--text3)" }}>{mqFmtDate(d.maxDD.from)} {d.maxDD.from.slice(0, 4)} → {mqFmtDate(d.maxDD.to)} {d.maxDD.to.slice(0, 4)}</div>}</div>
+          <div><div style={{ fontSize: 10, color: "var(--text3)" }}>VOLATILITY · 1 YEAR</div><div style={{ fontFamily: "var(--mono)", fontWeight: 700 }}>{d.vol != null ? `${d.vol}%` : "—"}</div><div style={{ fontSize: 10, color: "var(--text3)" }}>{d.vol == null ? "" : d.vol < 8 ? "low" : d.vol < 16 ? "moderate" : "high"} — how much it swings</div></div>
+        </div>
+        {d.rolling && (
+          <div style={{ marginTop: 10, fontSize: 11.5, color: "var(--text2)", lineHeight: 1.5 }}>
+            Every 1-year holding period in the last 3 years: worst <b style={{ color: pctCol(d.rolling.min) }}>{pctTxt(d.rolling.min)}</b>, typical <b>{pctTxt(d.rolling.median)}</b>, best <b style={{ color: pctCol(d.rolling.max) }}>{pctTxt(d.rolling.max)}</b> — positive {d.rolling.pos}% of the time.
+          </div>
+        )}
+        {d.years?.length > 0 && (
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 10, color: "var(--text3)", marginBottom: 4 }}>CALENDAR YEARS</div>
+            {d.years.map(([yr, v]) => (
+              <div key={yr} style={{ display: "grid", gridTemplateColumns: "40px 1fr 1fr 52px", alignItems: "center", gap: 4, fontSize: 11, margin: "2px 0" }}>
+                <span style={{ color: "var(--text2)", fontFamily: "var(--mono)" }}>{yr}</span>
+                <div style={{ display: "flex", justifyContent: "flex-end" }}>{v < 0 && <div style={{ width: `${(Math.abs(v) / yrs) * 100}%`, height: 9, background: C.neg, borderRadius: "5px 0 0 5px" }} />}</div>
+                <div style={{ borderLeft: "1px solid var(--text3)" }}>{v > 0 && <div style={{ width: `${(v / yrs) * 100}%`, height: 9, background: C.pos, borderRadius: "0 5px 5px 0" }} />}</div>
+                <span style={{ fontFamily: "var(--mono)", textAlign: "right", color: pctCol(v) }}>{pctTxt(v)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="card" style={{ marginBottom: 12 }}>
+        <div className="label" style={{ marginBottom: 8 }}>SIP of ₹10,000 a month</div>
+        {[["1 year", d.sip?.y1], ["3 years", d.sip?.y3], ["5 years", d.sip?.y5]].filter(([, s]) => s).map(([l, s]) => (
+          <div key={l} style={{ display: "grid", gridTemplateColumns: "64px 1fr auto", gap: 8, alignItems: "baseline", fontSize: 12, borderTop: "1px solid var(--border)", padding: "6px 0" }}>
+            <span style={{ color: "var(--text2)" }}>{l}</span>
+            <span style={{ fontFamily: "var(--mono)" }}>{formatINR(s.invested)} → <b style={{ color: s.value >= s.invested ? C.pos : C.neg }}>{formatINR(s.value)}</b></span>
+            <span style={{ fontFamily: "var(--mono)", color: pctCol(s.xirr) }}>{pctTxt(s.xirr)}/yr</span>
+          </div>
+        ))}
+        <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 4 }}>Invested on the first NAV day of each month; /yr is the XIRR (annual return on a SIP).</div>
+      </div>
+      <div style={{ fontSize: 10, color: "var(--text3)", lineHeight: 1.5 }}>NAV from AMFI; history since {mqFmtDate(d.since)} {d.since?.slice(0, 4)} from mfapi.in. Returns exclude exit loads and taxes. Information, not advice.</div>
+    </div>
+  );
+}
+
+/** TODAY: your tracked funds at a glance, or a door into Funds. */
+function FundsTodayCard({ onOpen, onOpenFund }) {
+  const [watch] = useMfWatch();
+  const { data } = useMfList();
+  return (
+    <div className="card" style={{ marginBottom: 14, paddingTop: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 2 }}>
+        <div className="label">Mutual funds</div>
+        <button className="chip chip-sm" onClick={onOpen}>All funds ›</button>
+      </div>
+      {watch.length && data ? watch.slice(0, 6).map(c => { const f = data.funds.find(x => x[0] === c); return f ? <MfWatchRow key={c} f={f} onOpen={onOpenFund} /> : null; })
+        : <div style={{ fontSize: 12, color: "var(--text3)", padding: "6px 0" }}>{data ? `${data.funds.length.toLocaleString("en-IN")} funds, NAVs as of ${mqFmtDate(data.date)}. Find yours and tap ☆ to track it here.` : "Loading AMFI NAVs…"}</div>}
+    </div>
+  );
+}
+
 function BottomNav({ page, setPage }) {
   const tabs = [
     { id: "today", label: "TODAY", icon: (
@@ -6713,6 +7014,8 @@ export default function App() {
   const [calcSymbol, setCalcSymbol] = useState(null); // stock picked in QUAD → opens in CALC
   const [showTour, setShowTour] = useState(() => { try { return localStorage.getItem("td_tour_done") !== "1"; } catch (_) { return false; } });
   const [stockSym, setStockSym] = useState(null);     // stock detail page
+  const [fundCode, setFundCode] = useState(null);     // mutual fund detail page
+  const openFund = (code) => { setFundCode(code); setPage("fund"); window.scrollTo(0, 0); };
   const [stockBack, setStockBack] = useState("scan");
   const [pbSub, setPbSub] = useState(() => { try { return localStorage.getItem("td_playbook_sub") || "setups"; } catch (_) { return "setups"; } });
   const choosePbSub = (v) => { setPbSub(v); try { localStorage.setItem("td_playbook_sub", v); } catch (_) {} };
@@ -6770,7 +7073,7 @@ export default function App() {
 
       {page === "today" && (
         <TodayPage regime={regime} setRegime={handleRegimeChange} regimeSince={regimeSince} portfolio={portfolio} setPortfolio={setPortfolio} trades={realTrades} setPage={setPage}
-          watchlist={watchlist} onOpenStock={openStock} onPlan={pickStock} />
+          watchlist={watchlist} onOpenStock={openStock} onPlan={pickStock} onOpenFund={openFund} />
       )}
       {page === "ideas" && (
         <IdeasPage watchlist={watchlist} portfolio={portfolio} onOpenStock={openStock} onPlan={pickStock} />
@@ -6800,6 +7103,8 @@ export default function App() {
       {page === "quadrant" && (
         <MarketQuadrantPage onPickStock={openStock} />
       )}
+      {page === "funds" && <FundsPage onOpenFund={openFund} />}
+      {page === "fund" && fundCode && <FundPage code={fundCode} onBack={() => { setPage("funds"); window.scrollTo(0, 0); }} />}
       {page === "stock" && stockSym && (
         <StockPage symbol={stockSym} onBack={() => setPage(stockBack || "scan")} onPlan={pickStock} watchlist={watchlist} setWatchlist={setWatchlist} trades={trades} />
       )}
