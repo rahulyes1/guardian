@@ -166,6 +166,19 @@ export function fundStats(hist, latest = null) {
   };
 }
 
+// Which index each active equity category should beat, and which long-running index fund stands in for it
+const BENCH = {
+  n50: { index: "Nifty 50", prefer: [/^UTI Nifty 50 Index/i, /^HDFC (NIFTY 50 Index|Index Fund.*NIFTY 50)/i, /^ICICI Prudential Nifty 50 Index/i, /nifty 50 index/i] },
+  n500: { index: "Nifty 500", prefer: [/^Motilal Oswal Nifty 500 Index/i, /nifty 500 index/i] },
+  lm250: { index: "Nifty LargeMidcap 250", prefer: [/^Edelweiss NIFTY Large Midcap 250 Index/i, /large ?mid ?cap 250 index/i] },
+  mid150: { index: "Nifty Midcap 150", prefer: [/^Motilal Oswal Nifty Midcap 150 Index/i, /midcap 150 index/i] },
+  small250: { index: "Nifty Smallcap 250", prefer: [/^Motilal Oswal Nifty Smallcap 250 Index/i, /smallcap 250 index/i] },
+};
+const BENCH_OF = {
+  "Large Cap": "n50", "Large & Mid Cap": "lm250", "Mid Cap": "mid150", "Small Cap": "small250",
+  "Flexi Cap": "n500", "Multi Cap": "n500", "Focused": "n500", "Value": "n500", "Contra": "n500", "ELSS (tax saver)": "n500",
+};
+
 async function mapLimited(items, limit, fn, deadline) {
   const out = new Array(items.length).fill(null); let next = 0;
   const worker = async () => { while (next < items.length && Date.now() < deadline) { const i = next++; out[i] = await fn(items[i]); } };
@@ -232,7 +245,27 @@ export default async function handler(req, res) {
       return res.json({ source: "AMFI + mfapi.in", cat, total: all.length, offset, shown: out.length, complete, more: offset + LIMIT < all.length, funds: out });
     }
 
-    return fail(400, "type must be list, fund or cat");
+    // The cheap index-fund alternative for an active category: its returns are the bar to beat
+    if (type === "bench") {
+      const cat = String(req.query.cat || "");
+      const B = BENCH_OF[cat.split(" · ")[1]];
+      if (!B) return fail(404, "No benchmark for this category");
+      const host = req.headers["x-forwarded-host"] || req.headers.host;
+      const lr = await get(`https://${host}/api/mf?type=list`, { json: true, timeout: 8000 });
+      if (lr.status !== 200) return fail(502, "Fund list unavailable");
+      const ci = lr.body.cats.indexOf("Index · Equity");
+      const pool = lr.body.funds.filter(f => f[3] === ci && !/elss|etf|fof|equal|momentum|quality|value|low vol|alpha|next/i.test(f[1]));
+      let pick = null;
+      for (const re of BENCH[B].prefer) { pick = pool.find(f => re.test(f[1])); if (pick) break; }
+      if (!pick) return fail(404, "Benchmark fund not found");
+      const r = await get(MFAPI + pick[0], { json: true, timeout: 8000 });
+      const st = r.status === 200 ? fundStats(r.body?.data, [pick[5], pick[4]]) : null;
+      if (!st) return fail(502, "Benchmark history unavailable");
+      res.setHeader("Cache-Control", "public, max-age=3600, s-maxage=21600, stale-while-revalidate=86400");
+      return res.json({ cat, index: BENCH[B].index, code: pick[0], name: pick[1], date: st.date, ret: st.ret, since: st.since, dd: st.maxDD.pct });
+    }
+
+    return fail(400, "type must be list, fund, cat or bench");
   } catch (e) {
     return fail(500, e.message || String(e));
   }

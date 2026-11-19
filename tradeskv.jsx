@@ -3319,6 +3319,7 @@ function MarketQuadrantPage({ onPickStock }) {
       <MqMbi mbi={data.mbi} dip={data.dip} long={data.long_bt} />
       <MqMarketMonitor mm={data.market_monitor} />
       <QuadSection id="sectors" title="Sectors & themes" d={data} />
+      <SectionBoundary name="Sector funds"><MqSectorFunds sectors={data.sectors} /></SectionBoundary>
       <MqSectorGrid sectors={data.sectors} sectorStocks={data.sector_stocks} selected={sector} onSelect={setSector} onPickStock={onPickStock} />
       <MqRotationMap data={data} onSelect={(n) => { setSector(n); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
       <MqSectorRotation data={data} onSelect={setSector} />
@@ -6674,6 +6675,16 @@ function loadMfFund(code) {
   return _mfFund.get(code);
 }
 const _mfCat = new Map(); // cat → { rows, total, done }
+const _mfBench = new Map();
+function loadMfBench(cat) {
+  if (!_mfBench.has(cat)) _mfBench.set(cat, fetch(`/api/mf?type=bench&cat=${encodeURIComponent(cat)}`).then(r => (r.ok ? r.json() : null)).catch(() => null));
+  return _mfBench.get(cat);
+}
+function useMfBench(cat) {
+  const [b, setB] = useState(null);
+  useEffect(() => { let alive = true; setB(null); if (cat) loadMfBench(cat).then(x => alive && setB(x)); return () => { alive = false; }; }, [cat]);
+  return b;
+}
 function useMfList() {
   const [s, set] = useState({ data: null, error: null });
   useEffect(() => { let alive = true; loadMfList().then(d => alive && set({ data: d, error: null })).catch(e => alive && set({ data: null, error: e.message })); return () => { alive = false; }; }, []);
@@ -6807,6 +6818,9 @@ function MfCategory({ cat, onOpen }) {
     return () => { alive = false; };
   }, [cat]);
   const rows = (st?.rows || []).filter(r => !r.missing);
+  const bench = useMfBench(cat);
+  const beatCol = (r, k) => (bench?.ret?.[k] == null || r[k] == null || !["y1", "y3", "y5"].includes(k) ? null : r[k] >= bench.ret[k] ? C.pos : C.neg);
+  const tally = (k) => { const xs = rows.filter(r => r[k] != null); return bench?.ret?.[k] != null && xs.length ? [xs.filter(r => r[k] >= bench.ret[k]).length, xs.length] : null; };
   const key = (r) => r[sort] ?? -999;
   const sorted = [...rows].sort((a, b) => (sort === "dd" || sort === "vol" ? (sort === "dd" ? key(b) - key(a) : (a.vol ?? 999) - (b.vol ?? 999)) : key(b) - key(a)));
   const avg = (k) => { const xs = rows.map(r => r[k]).filter(v => v != null); return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null; };
@@ -6824,18 +6838,53 @@ function MfCategory({ cat, onOpen }) {
           {COLS.map(([k, l]) => <button key={k} onClick={() => setSort(k)} title={k === "dd" ? "Worst fall in the last 3 years" : `${l} return${k === "y1" ? "" : " per year"}`} style={{ background: "none", border: "none", padding: "0 0 4px", fontSize: 10, color: sort === k ? "var(--violet)" : "var(--text3)", fontWeight: sort === k ? 800 : 400, cursor: "pointer", textAlign: "right", minHeight: 28 }}>{l}{sort === k ? " ▾" : ""}</button>)}
           <span style={{ fontSize: 10.5, color: "var(--text3)", borderTop: "1px solid var(--border)", padding: "5px 0" }}>Category average</span>
           {COLS.map(([k]) => <span key={k} style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text3)", textAlign: "right", borderTop: "1px solid var(--border)", padding: "5px 0" }}>{avg(k) != null ? pctTxt(avg(k)) : "—"}</span>)}
+          {bench && <>
+            <button onClick={() => onOpen(bench.code)} style={{ textAlign: "left", background: "none", border: "none", borderTop: "1px solid var(--border)", padding: "5px 0", color: "var(--violet)", cursor: "pointer", fontSize: 10.5, fontWeight: 700 }} title={bench.name}>{bench.index} index fund — the bar to beat</button>
+            {COLS.map(([k]) => <span key={k} style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--violet)", fontWeight: 700, textAlign: "right", borderTop: "1px solid var(--border)", padding: "5px 0" }}>{k === "dd" ? (bench.dd != null ? `${bench.dd}%` : "—") : bench.ret?.[k] != null ? pctTxt(bench.ret[k]) : "—"}</span>)}
+          </>}
           {sorted.slice(0, 80).map((r, i) => (
             <Fragment key={r.code}>
               <button onClick={() => onOpen(r.code)} style={{ textAlign: "left", background: "none", border: "none", borderTop: "1px solid var(--border)", padding: "6px 0", color: "var(--text)", cursor: "pointer", minWidth: 0 }}>
                 <span style={{ display: "block", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}><span style={{ color: "var(--text3)", fontFamily: "var(--mono)", marginRight: 4 }}>{i + 1}</span>{r.name}</span>
                 <span style={{ display: "block", fontSize: 10, color: "var(--text3)" }}>{r.house.replace(/ Mutual Fund$/, "")}{r.y5 == null && r.since ? ` · since ${r.since.slice(0, 4)}` : ""}</span>
               </button>
-              {COLS.map(([k]) => <span key={k} style={{ fontFamily: "var(--mono)", fontSize: 11.5, textAlign: "right", color: k === "dd" ? C.neg : pctCol(r[k]), borderTop: "1px solid var(--border)", padding: "6px 0", alignSelf: "center" }}>{r[k] != null ? (k === "dd" ? `${r[k]}%` : pctTxt(r[k])) : "—"}</span>)}
+              {COLS.map(([k]) => <span key={k} style={{ fontFamily: "var(--mono)", fontSize: 11.5, textAlign: "right", color: k === "dd" ? C.neg : beatCol(r, k) || pctCol(r[k]), fontWeight: beatCol(r, k) ? 700 : 400, borderTop: "1px solid var(--border)", padding: "6px 0", alignSelf: "center" }}>{r[k] != null ? (k === "dd" ? `${r[k]}%` : pctTxt(r[k])) : "—"}</span>)}
             </Fragment>
           ))}
         </div>
       )}
       {sorted.length > 80 && <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>Top 80 of {sorted.length} by the chosen column — search to find any other.</div>}
+      {bench && (tally("y3") || tally("y5")) && (
+        <div style={{ fontSize: 11.5, color: "var(--text2)", marginTop: 8, lineHeight: 1.5, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+          vs the {bench.index} index fund — {tally("y3") && <><b>{tally("y3")[0]} of {tally("y3")[1]}</b> beat it over 3 years</>}{tally("y3") && tally("y5") ? ", " : ""}{tally("y5") && <><b>{tally("y5")[0]} of {tally("y5")[1]}</b> over 5 years</>}. Green = beat the index fund, red = lagged it.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Did this fund beat the cheap index fund for its category? */
+function FundVsIndex({ d, code }) {
+  const b = useMfBench(d.cat);
+  if (!b || b.code === code) return null;
+  const rows = [["1Y", "y1"], ["3Y/yr", "y3"], ["5Y/yr", "y5"]].filter(([, k]) => d.ret[k] != null && b.ret[k] != null);
+  if (!rows.length) return null;
+  const main = rows.find(([, k]) => k === "y5") || rows.find(([, k]) => k === "y3") || rows[0];
+  const gap = d.ret[main[1]] - b.ret[main[1]];
+  return (
+    <div style={{ marginTop: 10, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+      <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.08em", marginBottom: 4 }}>VS THE {b.index.toUpperCase()} INDEX FUND</div>
+      <div style={{ display: "grid", gridTemplateColumns: "60px 1fr 1fr 1fr", gap: 6, fontSize: 11.5, fontFamily: "var(--mono)" }}>
+        <span /><span style={{ fontSize: 9.5, color: "var(--text3)" }}>THIS FUND</span><span style={{ fontSize: 9.5, color: "var(--text3)" }}>INDEX FUND</span><span style={{ fontSize: 9.5, color: "var(--text3)" }}>DIFFERENCE</span>
+        {rows.map(([l, k]) => { const g = d.ret[k] - b.ret[k]; return (
+          <Fragment key={k}><span style={{ color: "var(--text2)", fontFamily: "var(--body)" }}>{l}</span><span style={{ color: pctCol(d.ret[k]) }}>{pctTxt(d.ret[k])}</span><span style={{ color: "var(--text2)" }}>{pctTxt(b.ret[k])}</span><span style={{ color: g >= 0 ? C.pos : C.neg, fontWeight: 700 }}>{g >= 0 ? "+" : ""}{g.toFixed(1)} pts</span></Fragment>
+        ); })}
+      </div>
+      <div style={{ fontSize: 11, color: gap >= 0 ? C.pos : C.warn, marginTop: 6, lineHeight: 1.45 }}>
+        {gap >= 0 ? `Beat a plain ${b.index} index fund by ${gap.toFixed(1)} pts a year over ${main[0].replace("/yr", "")} — the active management earned its fee.`
+          : `Trailed a plain ${b.index} index fund by ${Math.abs(gap).toFixed(1)} pts a year over ${main[0].replace("/yr", "")} — an index fund would have done better.`}
+        <span style={{ color: "var(--text3)" }}> (index fund: {b.name})</span>
+      </div>
     </div>
   );
 }
@@ -6908,6 +6957,7 @@ function FundPage({ code, onBack }) {
           </div>
         )}
         {!catAvg && d.cat && <div style={{ fontSize: 10.5, color: "var(--text3)", marginTop: 8 }}>Open its category in Funds to see how it ranks against peers.</div>}
+        <FundVsIndex d={d} code={code} />
       </div>
 
       <div className="card" style={{ marginBottom: 12 }}>
@@ -7214,6 +7264,56 @@ function MfOverlap({ ready, catOf }) {
       {dup.length > 0
         ? <div style={{ fontSize: 11, color: C.warn, marginTop: 6, lineHeight: 1.45 }}>⚠ {dup.length === 1 ? "One pair is" : `${dup.length} pairs are`} close to duplicates — consider keeping the better of each pair (lower cost, steadier record) instead of both.</div>
         : <div style={{ fontSize: 11, color: C.pos, marginTop: 6 }}>No near-duplicates — your funds behave differently enough to diversify each other.</div>}
+    </div>
+  );
+}
+
+// QUAD sector → words in fund names (sector / thematic funds and sector index funds)
+const SECTOR_FUND_RE = {
+  Financials: /bank|financial|bfsi|psu bank/i, IT: /technology|digital|\bit\b|tech\b/i, Healthcare: /pharma|health/i,
+  Auto: /\bauto|transport|mobility|\bev\b/i, FMCG: /fmcg|consumption/i, "Consumer Services": /consumption|consumer/i, "Consumer Durables": /consumption|consumer/i,
+  "Capital Goods": /manufactur|infra|capital goods|industr/i, Construction: /infra|construction/i, Power: /power|energy|utilit/i, Utilities: /power|energy|utilit/i,
+  "Oil & Gas": /energy|oil/i, Metals: /commodit|metal|mining/i, Realty: /realty|housing|real estate/i, Chemicals: /chemical/i,
+  Telecommunication: /telecom|digital/i, Media: /media|entertain/i, "Cement & Materials": /infra|commodit|material/i,
+};
+/** QUAD: sector / thematic funds for the sectors leading right now. */
+function MqSectorFunds({ sectors }) {
+  const { data: list } = useMfList();
+  const [stats, setStats] = useState({});
+  const leading = (sectors || []).filter(x => ["HOT", "WARM"].includes(x.status) && SECTOR_FUND_RE[x.name]).slice(0, 3);
+  const pick = (sec) => {
+    if (!list) return [];
+    const ok = new Set(["Equity · Sectoral / Thematic", "Index · Equity"].map(c => list.cats.indexOf(c)));
+    return list.funds.filter(f => ok.has(f[3]) && SECTOR_FUND_RE[sec].test(f[1]) && !/etf|fof|elss/i.test(f[1])).slice(0, 12);
+  };
+  const want = leading.flatMap(x => pick(x.name).map(f => f[0]));
+  useEffect(() => {
+    let alive = true, i = 0;
+    const todo = want.filter(c => !stats[c]);
+    Promise.all([0, 1, 2].map(async () => { while (alive && i < todo.length) { const c = todo[i++]; try { const d = await loadMfFund(c); if (alive) setStats(s => ({ ...s, [c]: d })); } catch (_) {} } }));
+    return () => { alive = false; };
+  }, [want.join(",")]);
+  if (!leading.length) return null;
+  return (
+    <div style={mqCardStyle}>
+      <div style={{ ...mqHeadStyle, marginBottom: 4 }}>FUNDS FOR THE LEADING SECTORS</div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8, lineHeight: 1.45 }}>If you'd rather own the whole theme than pick one stock: sector and thematic funds (and sector index funds) matching today's strongest sectors, by 1-year return. Sector funds swing much more than diversified ones — size them as a satellite, not the core.</div>
+      {!list ? <Skeleton lines={4} /> : leading.map(sec => {
+        const funds = pick(sec.name).map(f => ({ f, st: stats[f[0]] })).filter(x => x.st).sort((a, b) => (b.st.ret.y1 ?? -99) - (a.st.ret.y1 ?? -99)).slice(0, 4);
+        return (
+          <div key={sec.name} style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 2 }}>{sec.name} <span style={{ color: MQ_DIM_COLOR[sec.status], fontSize: 10.5 }}>· {sec.status} · {sec.p50}% above 50-day</span></div>
+            {!funds.length ? <div style={{ fontSize: 11, color: "var(--text3)" }}>{pick(sec.name).length ? "Loading funds…" : "No matching sector funds."}</div> : funds.map(({ f, st }) => (
+              <div key={f[0]} style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: 10, fontSize: 11.5, borderTop: "1px solid var(--border)", padding: "5px 0", alignItems: "baseline" }}>
+                <span style={{ minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "var(--text2)" }}>{f[1]}</span>
+                <span style={{ fontFamily: "var(--mono)", color: pctCol(st.ret.y1) }}>1Y {pctTxt(st.ret.y1)}</span>
+                <span style={{ fontFamily: "var(--mono)", color: pctCol(st.ret.y3), minWidth: 62, textAlign: "right" }}>{st.ret.y3 != null ? `3Y ${pctTxt(st.ret.y3)}` : `since ${st.since.slice(0, 4)}`}</span>
+              </div>
+            ))}
+          </div>
+        );
+      })}
+      <div style={{ fontSize: 10, color: "var(--text3)" }}>Open Funds to see any of these in detail. Information, not advice.</div>
     </div>
   );
 }
