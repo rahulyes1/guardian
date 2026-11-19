@@ -3929,9 +3929,10 @@ function isIntradayBar(day, verified) {
 async function fetchStockDetail(sym) {
   const tk = `${sym}.NS`;
   const url = `/api/spark?symbols=${encodeURIComponent(`${tk},${IDX_TICKER}`)}&range=2y&interval=1d&vol=260&ohlc=260`;
-  const [sparkRes, bhavRes] = await Promise.all([
+  const [sparkRes, bhavRes, nseIdx] = await Promise.all([
     fetch(url).then(r => (r.ok ? r.json() : null)).catch(() => null),
     fetch("/api/nse?type=bhav&v=4").then(r => (r.ok ? r.json() : null)).catch(() => null),
+    fetch("/api/nse?type=indices").then(r => (r.ok ? r.json() : null)).catch(() => null),
   ]);
   const items = Object.fromEntries((sparkRes?.spark?.result || []).map(it => [it.symbol, it]));
   const s = items[tk], ix = items[IDX_TICKER];
@@ -3962,6 +3963,9 @@ async function fetchStockDetail(sym) {
     }
   }
   const idx = dates.map(d => id[d]?.c ?? null);
+  // A day NSE has published but Yahoo's index series hasn't yet: use NSE's official Nifty 500 close for it
+  const n500 = nseIdx?.indices?.["Nifty 500"]?.close;
+  if (n500 && nseIdx.date) { const k = dates.indexOf(nseIdx.date); if (k >= 0 && idx[k] == null) idx[k] = n500; }
   const delivery = b && b[3] != null && bhavRes?.date ? { pct: b[3], date: bhavRes.date } : null;
   const intraday = isIntradayBar(dates[dates.length - 1], verified);
   return {
