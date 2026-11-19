@@ -7580,7 +7580,7 @@ function IposPage({ onBack, onOpenStock }) {
         </div>
       </div>
       <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 10, lineHeight: 1.5 }}>
-        Listing = first-day close vs issue price; since issue = latest close vs issue price; from high = vs the highest price since listing. ● = holding the average that fits its age (20-day under 50 sessions, 50-day under 100, else 100-day). SME prices are NSE's latest close (listing-day and trend need daily history that isn't available for SME); SME stocks trade in large lots with thin volume. Very large gains can include bonus issues or splits. Information, not advice.
+        Listing = first-day close vs issue price; since issue = latest close vs issue price; from high = vs the highest price since listing. ● = holding the average that fits its age (20-day under 50 sessions, 50-day under 100, else 100-day). SME prices are NSE's latest close (listing-day and trend need daily history that isn't available for SME), and — means it didn't trade in the latest session; SME stocks trade in large lots with thin volume. Very large gains can include bonus issues or splits. Information, not advice.
       </div>
     </div>
   );
