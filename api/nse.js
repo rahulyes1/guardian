@@ -188,8 +188,25 @@ export default async function handler(req, res) {
         get("https://www.nseindia.com/api/all-upcoming-issues?category=ipo", { json: true, timeout: 6000 }),
       ]);
       const rowsOf = (r) => (r.status === 200 ? (Array.isArray(r.body) ? r.body : r.body?.data || []) : null);
-      if (req.query.raw === "1") return res.json({ status: [past.status || past.error, cur.status || cur.error, up.status || up.error], sample: [rowsOf(past)?.slice(0, 2), rowsOf(cur)?.slice(0, 2), rowsOf(up)?.slice(0, 2)], n: [rowsOf(past)?.length, rowsOf(cur)?.length, rowsOf(up)?.length] });
-      return fail(501, "not ready");
+      const P = rowsOf(past);
+      if (!P) return fail(502, `NSE past issues unavailable (${past.status || past.error})`);
+      const num = (v) => { const n = parseFloat(String(v ?? "").replace(/[^0-9.]/g, "")); return Number.isFinite(n) ? n : null; };
+      const band = (s) => { const xs = String(s || "").match(/[\d.]+/g)?.map(Number).filter(Number.isFinite) || []; return xs.length ? [Math.min(...xs), Math.max(...xs)] : null; };
+      const cutoff = new Date(Date.now() - 372 * 86400000).toISOString().slice(0, 10);
+      const listed = P.map(x => ({
+        sym: x.symbol, name: x.companyName || x.company, sme: /sme/i.test(x.securityType || ""), type: x.securityType || null,
+        listed: parseNseDate(x.listingDate), open: parseNseDate(x.ipoStartDate), close: parseNseDate(x.ipoEndDate),
+        price: num(x.issuePrice), band: band(x.priceRange),
+      })).filter(x => x.sym && x.listed && x.listed >= cutoff).sort((a, b) => (a.listed < b.listed ? 1 : -1));
+      const live = (rowsOf(cur) || []).map(x => ({
+        sym: x.symbol, name: x.companyName, sme: /sme/i.test(x.series || x.segment || ""), band: band(x.issuePrice),
+        open: parseNseDate(x.issueStartDate), close: parseNseDate(x.issueEndDate), status: x.status || null,
+        subscribed: num(x.noOfTime) != null ? Math.round(num(x.noOfTime) * 100) / 100 : null, size: num(x.issueSize),
+      })).filter(x => x.sym);
+      const upcoming = (rowsOf(up) || []).map(x => ({ sym: x.symbol, name: x.companyName, sme: /sme/i.test(x.series || x.segment || ""), band: band(x.issuePrice), open: parseNseDate(x.issueStartDate), close: parseNseDate(x.issueEndDate) })).filter(x => x.sym);
+      if (req.query.raw === "1") return res.json({ types: [...new Set(P.map(x => x.securityType))], sample: P.slice(0, 2), live: rowsOf(cur)?.slice(0, 1) });
+      res.setHeader("Cache-Control", "public, max-age=1800, s-maxage=3600, stale-while-revalidate=86400");
+      return res.json({ source: "nse-public-issues", listed, live, upcoming });
     }
 
     return fail(400, "type must be indices, bhav, live, events, flows, deals, surv, pastresults or ipos");
