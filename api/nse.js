@@ -180,7 +180,19 @@ export default async function handler(req, res) {
       return res.json({ source: "nse-event-calendar", symbol: sym, dates });
     }
 
-    return fail(400, "type must be indices, bhav, live, events, flows, deals, surv or pastresults");
+    // IPOs: past issues (last ~400 days), open now, upcoming — straight from NSE's public issue pages
+    if (type === "ipos") {
+      const [past, cur, up] = await Promise.all([
+        get("https://www.nseindia.com/api/public-past-issues", { json: true, timeout: 7000 }),
+        get("https://www.nseindia.com/api/ipo-current-issue", { json: true, timeout: 6000 }),
+        get("https://www.nseindia.com/api/all-upcoming-issues?category=ipo", { json: true, timeout: 6000 }),
+      ]);
+      const rowsOf = (r) => (r.status === 200 ? (Array.isArray(r.body) ? r.body : r.body?.data || []) : null);
+      if (req.query.raw === "1") return res.json({ status: [past.status || past.error, cur.status || cur.error, up.status || up.error], sample: [rowsOf(past)?.slice(0, 2), rowsOf(cur)?.slice(0, 2), rowsOf(up)?.slice(0, 2)], n: [rowsOf(past)?.length, rowsOf(cur)?.length, rowsOf(up)?.length] });
+      return fail(501, "not ready");
+    }
+
+    return fail(400, "type must be indices, bhav, live, events, flows, deals, surv, pastresults or ipos");
   } catch (e) {
     return fail(500, e.message || String(e));
   }
