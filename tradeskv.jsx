@@ -7468,7 +7468,18 @@ function IposPage({ onBack, onOpenStock }) {
   useEffect(() => {
     if (!d) return;
     let alive = true;
-    const todo = d.listed.filter(x => !_ipoPx.has(x.sym));
+    const todo = d.listed.filter(x => !_ipoPx.has(x.sym) && !x.sme);
+    const smeTodo = d.listed.filter(x => !_ipoPx.has(x.sym) && x.sme);
+    if (smeTodo.length) fetch("/api/nse?type=smeclose").then(r => (r.ok ? r.json() : null)).catch(() => null).then(j => {
+      if (!alive) return;
+      const add = {};
+      for (const x of smeTodo) {
+        const c = j?.closes?.[x.sym];
+        const st = c && x.price ? { sessions: null, last: c, lastDate: j.date, listGain: null, sinceIssue: (c / x.price - 1) * 100, offHigh: null, trend: null, nseOnly: true } : null;
+        _ipoPx.set(x.sym, st); add[x.sym] = st;
+      }
+      setPx(p => ({ ...p, ...add })); setLoaded(n => n + smeTodo.length);
+    });
     const known = Object.fromEntries(d.listed.filter(x => _ipoPx.has(x.sym)).map(x => [x.sym, _ipoPx.get(x.sym)]));
     setPx(known); setLoaded(Object.keys(known).length);
     (async () => {
@@ -7535,7 +7546,7 @@ function IposPage({ onBack, onOpenStock }) {
           {[["LISTED", rows.length, null], ["ABOVE ISSUE NOW", withPx.length ? `${Math.round((above / withPx.length) * 100)}%` : "—", null],
             ["TYPICAL SINCE ISSUE", med(withPx.map(x => x.s.sinceIssue)) != null ? pctTxt(med(withPx.map(x => x.s.sinceIssue))) : "—", med(withPx.map(x => x.s.sinceIssue))],
             ["TYPICAL LISTING DAY", med(withPx.map(x => x.s.listGain)) != null ? pctTxt(med(withPx.map(x => x.s.listGain))) : "—", med(withPx.map(x => x.s.listGain))],
-            ["HOLDING TREND", withPx.length ? `${Math.round((withPx.filter(x => x.s.trend).length / withPx.length) * 100)}%` : "—", null],
+            ["HOLDING TREND", withPx.some(x => x.s.trend != null) ? `${Math.round((withPx.filter(x => x.s.trend).length / withPx.filter(x => x.s.trend != null).length) * 100)}%` : "—", null],
             ["PRICES LOADED", `${Math.min(loaded, d.listed.length)}/${d.listed.length}`, null]].map(([k, v, c]) => (
             <div key={k} style={{ minWidth: 0 }}><div style={{ fontSize: 9.5, color: "var(--text3)", letterSpacing: "0.06em" }}>{k}</div><div style={{ fontFamily: "var(--mono)", fontSize: 14, fontWeight: 700, color: c == null ? "var(--text)" : pctCol(c) }}>{v}</div></div>
           ))}
@@ -7556,6 +7567,7 @@ function IposPage({ onBack, onOpenStock }) {
                 <button onClick={() => onOpenStock(x.sym)} style={{ textAlign: "left", background: "none", border: "none", borderTop: "1px solid var(--border)", padding: "6px 0", color: "var(--text)", cursor: "pointer", minWidth: 0 }}>
                   <span style={{ display: "block", fontWeight: 700, fontSize: 12.5 }}>{x.sym}{x.sme && <span style={{ marginLeft: 5, fontSize: 9.5, color: C.warn }}>SME</span>}{s?.trend != null && <span title={`${s.trend ? "Above" : "Below"} its ${s.trendMa}-day average`} style={{ marginLeft: 5, color: s.trend ? C.pos : C.neg }}>●</span>}</span>
                   <span style={{ display: "block", fontSize: 10, color: "var(--text3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{mo(x.listed)} · ₹{x.price ?? "—"}{s ? ` → ₹${s.last >= 1000 ? Math.round(s.last) : s.last.toFixed(1)}` : ""}</span>
+                  {s?.sinceIssue > 1000 && <span style={{ display: "block", fontSize: 9.5, color: C.warn }}>check: may include a bonus / split</span>}
                 </button>
                 {[s?.listGain, s?.sinceIssue, s?.offHigh].map((v, i) => (
                   <span key={i} style={{ fontFamily: "var(--mono)", fontSize: 11.5, textAlign: "right", borderTop: "1px solid var(--border)", padding: "6px 0", alignSelf: "center", color: i === 2 ? (v != null && v > -10 ? C.pos : "var(--text2)") : pctCol(v) }}>
@@ -7568,7 +7580,7 @@ function IposPage({ onBack, onOpenStock }) {
         </div>
       </div>
       <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 10, lineHeight: 1.5 }}>
-        Listing = first-day close vs issue price; since issue = latest close vs issue price; from high = vs the highest price since listing. ● = holding the average that fits its age (20-day under 50 sessions, 50-day under 100, else 100-day). SME IPOs trade in large lots with thin volume, and some have no price data here. Information, not advice.
+        Listing = first-day close vs issue price; since issue = latest close vs issue price; from high = vs the highest price since listing. ● = holding the average that fits its age (20-day under 50 sessions, 50-day under 100, else 100-day). SME prices are NSE's latest close (listing-day and trend need daily history that isn't available for SME); SME stocks trade in large lots with thin volume. Very large gains can include bonus issues or splits. Information, not advice.
       </div>
     </div>
   );

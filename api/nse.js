@@ -180,6 +180,29 @@ export default async function handler(req, res) {
       return res.json({ source: "nse-event-calendar", symbol: sym, dates });
     }
 
+    // Latest NSE closes for SME (Emerge) stocks — Yahoo doesn't carry them. { date, closes: { SYM: close } }
+    if (type === "smeclose") {
+      const { parsed, tried } = await latestArchive(
+        (d) => `https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_${d}.csv`,
+        (text) => {
+          const lines = String(text || "").split(/\r?\n/); if (lines.length < 2) return null;
+          const h = lines[0].split(",").map(x => x.trim().toUpperCase());
+          const iS = h.indexOf("SYMBOL"), iSer = h.indexOf("SERIES"), iC = h.indexOf("CLOSE_PRICE"), iD = h.indexOf("DATE1");
+          if (iS < 0 || iSer < 0 || iC < 0) return null;
+          const closes = {}; let date = null;
+          for (const l of lines.slice(1)) {
+            const c = l.split(",").map(x => x.trim());
+            if (!/^S[MTZ]$/.test(c[iSer] || "")) continue;
+            const v = parseFloat(c[iC]); if (!c[iS] || !(v > 0)) continue;
+            closes[c[iS]] = v; date = date || parseNseDate(c[iD]);
+          }
+          return date ? { date, closes } : null;
+        }, started);
+      if (!parsed) return fail(502, "NSE bhavcopy unavailable", { tried });
+      res.setHeader("Cache-Control", `public, max-age=900, s-maxage=${cacheFor(parsed.date)}`);
+      return res.json({ source: "nse-sec_bhavdata_full (SME series)", ...parsed });
+    }
+
     // IPOs: past issues (last ~400 days), open now, upcoming — straight from NSE's public issue pages
     if (type === "ipos") {
       const [past, cur, up] = await Promise.all([
@@ -199,7 +222,7 @@ export default async function handler(req, res) {
         sym: x.symbol, name: x.companyName || x.company, sme: /sme/i.test(x.securityType || ""), type: x.securityType || null,
         listed: parseNseDate(x.listingDate), open: parseNseDate(x.ipoStartDate), close: parseNseDate(x.ipoEndDate),
         price: price(x.issuePrice), band: band(x.priceRange),
-      })).filter(x => x.sym && x.listed && x.listed >= cutoff && /^(equity|sme)$/i.test(x.type || "")) // no debt / InvIT / REIT
+      })).filter(x => x.sym && x.listed && x.listed >= cutoff && /^(equity|sme)$/i.test(x.type || "") && !/PP\d*$/.test(x.sym)) // no debt / InvIT / REIT / partly-paid
         .map(x => (x.band && (!x.price || x.price < x.band[0] * 0.8 || x.price > x.band[1] * 1.2) ? { ...x, price: x.band[1] } : x)) // a stray value outside the band → top of band
         .sort((a, b) => (a.listed < b.listed ? 1 : -1));
       const live = (rowsOf(cur) || []).map(x => ({
