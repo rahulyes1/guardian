@@ -1387,7 +1387,7 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
       <SectionBoundary name="Market brief">
         <MarketBrief onOpenQuad={() => setPage("quadrant")} onOpenScan={() => setPage("scan")} />
       </SectionBoundary>
-      <Guide id="app" />
+      <WrapEntry onOpen={() => { setPage("wrap"); window.scrollTo(0, 0); }} />
 
       {/* 2 · Your book — what needs action first */}
       <SectionBoundary name="Your positions">
@@ -1442,14 +1442,15 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
       </SectionBoundary>
 
       {/* 3 · Best setups for today, sized for the current rule */}
+      <SectionBoundary name="Mutual funds"><FundsTodayCard onOpen={() => { setPage("funds"); window.scrollTo(0, 0); }} onOpenFund={onOpenFund} /></SectionBoundary>
       <SectionBoundary name="Best setups">
         <BestSetups watchlist={watchlist} portfolio={portfolio} onOpenStock={onOpenStock} onPlan={onPlan} onSeeAll={() => setPage("ideas")} />
       </SectionBoundary>
-
-      {/* 4 · Watchlist and global cues */}
-      <SectionBoundary name="Watchlist alerts"><WatchAlertsCard watchlist={watchlist} onOpen={onOpenStock} /></SectionBoundary>
-      <SectionBoundary name="Global markets"><GlobalBrief /></SectionBoundary>
-      <SectionBoundary name="Mutual funds"><FundsTodayCard onOpen={() => { setPage("funds"); window.scrollTo(0, 0); }} onOpenFund={onOpenFund} /></SectionBoundary>
+      <Fold id="today_more" title="More for today" sub="Watchlist alerts, global markets and how the app works">
+        <SectionBoundary name="Watchlist alerts"><WatchAlertsCard watchlist={watchlist} onOpen={onOpenStock} /></SectionBoundary>
+        <SectionBoundary name="Global markets"><GlobalBrief /></SectionBoundary>
+        <Guide id="app" />
+      </Fold>
     </div>
   );
 }
@@ -7318,6 +7319,129 @@ function MqSectorFunds({ sectors }) {
   );
 }
 
+// ─── EVENING WRAP-UP: the day in one screen ──────────────────────────────────
+function WrapPage({ trades, watchlist, indices, onBack, onOpenStock, onOpenFunds, onOpenQuad }) {
+  const { data: d } = useMarketQuadrant();
+  const { flows, deals } = useFlowsDeals();
+  const [cal, setCal] = useState(null);
+  const [pos, setPos] = useState({});
+  const [holdings] = useMfHoldings();
+  const [port, setPort] = useState(null);
+  const open = (trades || []).filter(t => t.status === "open" || t.status === "partial").map(normalizeTrade);
+  const mySyms = [...new Set([...open.map(t => normalizeSymbol(t.symbol)), ...(watchlist || []).map(w => w.sym)])];
+  useEffect(() => { let alive = true; fetchResultsCalendar().then(c => alive && setCal(c)); return () => { alive = false; }; }, []);
+  useEffect(() => {
+    let alive = true;
+    for (const t of open) {
+      const sym = normalizeSymbol(t.symbol);
+      cachedDetail(sym).then(x => {
+        if (!alive || !x) return;
+        const n = x.closes.length - 1, c = x.closes[n], p = x.closes[n - 1];
+        setPos(s => ({ ...s, [t.id]: { c, chg: p ? (c / p - 1) * 100 : null, day: p ? (c - p) * (t.remainingQty || t.totalQty || 0) : null, date: x.dates[n], intraday: x.intraday } }));
+      });
+    }
+    return () => { alive = false; };
+  }, [open.map(t => t.id).join(",")]);
+  useEffect(() => {
+    let alive = true;
+    if (!holdings.length) return;
+    Promise.all(holdings.map(h => loadMfFull(h.code).then(f => evalHolding(h, f)).catch(() => null))).then(es => {
+      const ok = es.filter(e => e && !e.error); if (!alive || !ok.length) return;
+      setPort({ value: ok.reduce((a, e) => a + e.value, 0), day: ok.reduce((a, e) => a + e.dayChg, 0), date: ok.map(e => e.date).sort().pop() });
+    });
+    return () => { alive = false; };
+  }, [JSON.stringify(holdings)]);
+
+  const sec = (title, children, right) => (
+    <div className="card" style={{ marginBottom: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}><div className="label">{title}</div>{right}</div>
+      {children}
+    </div>
+  );
+  const line = (k, v, c) => <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5, padding: "4px 0", borderTop: "1px solid var(--border)" }}><span style={{ color: "var(--text2)" }}>{k}</span><span style={{ fontFamily: "var(--mono)", color: c || "var(--text)", textAlign: "right" }}>{v}</span></div>;
+  const idx = (x) => (x ? <>{x.price?.toLocaleString("en-IN", { maximumFractionDigits: 2 })} <span style={{ color: pctCol(x.changePct) }}>{pctTxt(x.changePct, 2)}</span></> : "—");
+  const changes = d ? briefChanges(d) : [];
+  const mbi = d?.mbi?.rows?.[d.mbi.rows.length - 1];
+  const hotNow = (d?.sectors || []).filter(x => x.status_d1 && x.status !== x.status_d1);
+  const dayPnl = Object.values(pos).reduce((a, p) => a + (p.day || 0), 0);
+  const soon = cal ? mySyms.map(sym => ({ sym, r: upcomingResults(cal, sym, 3) })).filter(x => x.r).sort((a, b) => a.r.inDays - b.r.inDays) : [];
+  const myDeals = (deals?.deals || []).filter(x => mySyms.includes(x.sym));
+  const istDay = new Date(Date.now() + 19800000).toISOString().slice(0, 10);
+
+  return (
+    <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
+      <button onClick={onBack} className="btn-ghost" style={{ padding: "6px 10px", fontSize: 12, marginBottom: 12 }}>‹ Back</button>
+      <div className="section-title">Day wrap</div>
+      <div style={{ fontSize: 13, color: "var(--text3)", margin: "4px 0 12px" }}>{d ? `Closing picture for ${mqFmtDate(d.as_of)}${d.as_of !== istDay ? " (latest session)" : ""}` : "Loading…"}</div>
+
+      {sec("Market", <>
+        {line("Nifty 50", idx(indices?.nsei))}
+        {line("Nifty 500", idx(indices?.cnx500))}
+        {d && line("Signal · environment", <>{d.overall} · {d.environment?.name}</>, MQ_SIGNAL_COLOR[d.overall])}
+        {d && line("Today's risk per trade", `${suggestedRisk(d)?.pct ?? 0}%`)}
+        {d?.green_light?.em != null && line("Green light", `${d.green_light.em} · ${GL_TEXT[d.green_light.band]}`, GL_COLOR[d.green_light.band])}
+        {mbi && line("Breadth (MBI)", `${mbi.color.toLowerCase()} day`, MBI_COLOR[mbi.color])}
+        {d && line("Stocks above 50-day", `${d.pct_above_50}%`)}
+        {flows?.fii && line(`FII / DII (${mqFmtDate(flows.date)})`, <><span style={{ color: flows.fii.net >= 0 ? C.pos : C.neg }}>{crore(flows.fii.net)}</span> / <span style={{ color: (flows.dii?.net ?? 0) >= 0 ? C.pos : C.neg }}>{flows.dii ? crore(flows.dii.net) : "—"}</span></>)}
+        {changes.length > 0 && <div style={{ marginTop: 6 }}>{changes.slice(0, 5).map((c, i) => <div key={i} style={{ display: "flex", gap: 8, fontSize: 12, color: "var(--text2)", padding: "2px 0" }}><span style={{ width: 6, height: 6, borderRadius: 3, background: c.tone, marginTop: 6, flexShrink: 0 }} /><span>{c.text}</span></div>)}</div>}
+        {hotNow.length > 0 && <div style={{ fontSize: 11.5, color: "var(--text2)", marginTop: 6 }}>Sectors that changed: {hotNow.slice(0, 5).map(x => `${x.name} ${x.status_d1} → ${x.status}`).join(" · ")}</div>}
+      </>, <button className="chip chip-sm" onClick={onOpenQuad}>QUAD ›</button>)}
+
+      {sec("Your positions", open.length === 0 ? <div style={{ fontSize: 12, color: "var(--text3)" }}>No open positions.</div> : <>
+        {Object.keys(pos).length > 0 && <div style={{ fontSize: 13, marginBottom: 4 }}>Today: <b style={{ fontFamily: "var(--mono)", color: pctCol(dayPnl) }}>{dayPnl >= 0 ? "+" : ""}{formatINR(Math.round(dayPnl))}</b></div>}
+        {open.map(t => { const p = pos[t.id], sym = normalizeSymbol(t.symbol); return (
+          <div key={t.id} style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: 10, fontSize: 12.5, borderTop: "1px solid var(--border)", padding: "6px 0", alignItems: "baseline" }}>
+            <button onClick={() => onOpenStock(sym)} style={{ textAlign: "left", background: "none", border: "none", padding: 0, color: "var(--text)", fontWeight: 700, cursor: "pointer" }}>{sym}</button>
+            <span style={{ fontFamily: "var(--mono)", color: pctCol(p?.chg) }}>{p ? pctTxt(p.chg, 2) : "…"}</span>
+            <span style={{ fontFamily: "var(--mono)", color: pctCol(p ? (p.c / t.avgEntry - 1) : null), minWidth: 64, textAlign: "right" }}>{p && t.avgEntry ? `${pctTxt((p.c / t.avgEntry - 1) * 100)} total` : ""}</span>
+          </div>
+        ); })}
+        <div style={{ fontSize: 10.5, color: "var(--text3)", marginTop: 4 }}>Position health (hold / tighten / exit) is on TODAY.</div>
+      </>)}
+
+      {(port || holdings.length > 0) && sec("Your funds", port ? <>
+        {line("Portfolio value", formatINR(Math.round(port.value)))}
+        {line(`Change (NAV ${mqFmtDate(port.date)})`, `${port.day >= 0 ? "+" : ""}${formatINR(Math.round(port.day))}`, pctCol(port.day))}
+        <div style={{ fontSize: 10.5, color: "var(--text3)", marginTop: 4 }}>AMFI publishes tonight's NAVs around 9–11 pm; earlier in the evening this shows the previous day.</div>
+      </> : <Skeleton lines={2} />, <button className="chip chip-sm" onClick={onOpenFunds}>Funds ›</button>)}
+
+      {d?.scans && sec("Setups that appeared", <>
+        {[["htf", "High-tight flags"], ["first52", "First 52-week highs"], ["pb21", "21-EMA pullbacks"], ["pivots", "Pocket pivots"], ["ep", "Earnings EPs"]].map(([k, l]) => {
+          const rows = d.scans[k] || [];
+          return rows.length ? <div key={k} style={{ fontSize: 12, padding: "4px 0", borderTop: "1px solid var(--border)" }}>
+            <span style={{ color: "var(--text2)" }}>{l} <b style={{ fontFamily: "var(--mono)" }}>{d.scans[k + "_total"] ?? rows.length}</b>: </span>
+            {rows.slice(0, 5).map((r, i) => <button key={r.sym} onClick={() => onOpenStock(r.sym)} style={{ background: "none", border: "none", padding: 0, color: "var(--text)", cursor: "pointer", textDecoration: "underline dotted", textUnderlineOffset: 3, marginRight: 6, font: "inherit" }}>{r.sym}</button>)}
+          </div> : null;
+        })}
+        {d.picks?.rows?.length > 0 && <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 6 }}>Tonight's forward-test picks: {d.picks.rows.map(x => x.sym).join(", ")}</div>}
+      </>)}
+
+      {sec("Coming up for your stocks", <>
+        {soon.length === 0 ? <div style={{ fontSize: 12, color: "var(--text3)" }}>{cal ? "No results due in the next 3 days for your positions or watchlist." : "Loading results calendar…"}</div>
+          : soon.map(({ sym, r }) => line(sym, r.inDays === 0 ? "results today" : r.inDays === 1 ? "results tomorrow" : `results in ${r.inDays} days`, r.inDays <= 1 ? C.warn : "var(--text2)"))}
+        {myDeals.length > 0 && <div style={{ marginTop: 6 }}>{myDeals.slice(0, 5).map((x, i) => <div key={i} style={{ fontSize: 11.5, color: "var(--text2)", padding: "2px 0" }}><b style={{ color: x.side === "BUY" ? C.pos : C.neg }}>{x.kind} {x.side.toLowerCase()}</b> in {x.sym} · {x.client}</div>)}</div>}
+      </>)}
+      <div style={{ fontSize: 10, color: "var(--text3)", lineHeight: 1.5 }}>Closes verified against NSE each evening; flows are NSE provisional figures. Information, not advice.</div>
+    </div>
+  );
+}
+
+/** TODAY: the door into the day wrap — prominent after the close. */
+function WrapEntry({ onOpen }) {
+  const ist = new Date(Date.now() + 19800000), mins = ist.getUTCHours() * 60 + ist.getUTCMinutes(), wd = ist.getUTCDay();
+  const after = wd >= 1 && wd <= 5 && mins >= 15 * 60 + 30;
+  return (
+    <button onClick={onOpen} className="card" style={{ display: "flex", width: "100%", alignItems: "center", gap: 10, textAlign: "left", cursor: "pointer", color: "var(--text)", marginBottom: 14, padding: "12px 14px", border: after ? "1.5px solid var(--violet)" : undefined }}>
+      <span style={{ fontSize: 18 }} aria-hidden="true">{after ? "🌙" : "📋"}</span>
+      <span style={{ flex: 1 }}>
+        <span style={{ display: "block", fontSize: 13, fontWeight: 700 }}>{after ? "Today's wrap is ready" : "Day wrap"}</span>
+        <span style={{ display: "block", fontSize: 11, color: "var(--text3)" }}>Market, your positions and funds, new setups, results coming up — one screen</span>
+      </span>
+      <span aria-hidden="true" style={{ color: "var(--text3)" }}>›</span>
+    </button>
+  );
+}
+
 /** TODAY: your tracked funds at a glance, or a door into Funds. */
 function FundsTodayCard({ onOpen, onOpenFund }) {
   const [watch] = useMfWatch();
@@ -7516,6 +7640,8 @@ export default function App() {
         <MarketQuadrantPage onPickStock={openStock} />
       )}
       {page === "funds" && <FundsPage onOpenFund={openFund} />}
+      {page === "wrap" && <WrapPage trades={realTrades} watchlist={watchlist} indices={indicesTicker} onBack={() => { setPage("today"); window.scrollTo(0, 0); }}
+        onOpenStock={openStock} onOpenFunds={() => { setPage("funds"); window.scrollTo(0, 0); }} onOpenQuad={() => { setPage("quadrant"); window.scrollTo(0, 0); }} />}
       {page === "fund" && fundCode && <FundPage code={fundCode} onBack={() => { setPage("funds"); window.scrollTo(0, 0); }} />}
       {page === "stock" && stockSym && (
         <StockPage symbol={stockSym} onBack={() => setPage(stockBack || "scan")} onPlan={pickStock} watchlist={watchlist} setWatchlist={setWatchlist} trades={trades} />
