@@ -1222,7 +1222,7 @@ function PriceBadge({ info, loading }) {
 }
 
 // ─── TOP BAR ────────────────────────────────────────────────────────────────
-function TopBar({ regime, portfolio, page, indicesData }) {
+function TopBar({ regime, portfolio, page, indicesData, onSearch }) {
   // The chip shows the same verdict as every other screen: the market signal (bias is one of its four readings)
   const { data: mq } = useMarketQuadrant();
   const sig = mq?.overall;
@@ -1305,6 +1305,9 @@ function TopBar({ regime, portfolio, page, indicesData }) {
       </div>
 
       {/* Right: portfolio value */}
+      {onSearch && <button onClick={onSearch} aria-label="Search stocks, funds and IPOs" title="Search" style={{ background: "none", border: "1px solid var(--border)", borderRadius: 10, width: 36, height: 36, display: "inline-flex", alignItems: "center", justifyContent: "center", color: "var(--text2)", cursor: "pointer", flexShrink: 0 }}>
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
+      </button>}
       <div style={{
         background: "var(--bg3)", border: "1px solid var(--border2)",
         borderRadius: 10, padding: "5px 10px",
@@ -1390,7 +1393,8 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
       <SectionBoundary name="Market brief">
         <MarketBrief onOpenQuad={() => setPage("quadrant")} onOpenScan={() => setPage("scan")} />
       </SectionBoundary>
-      <WrapEntry onOpen={() => { setPage("wrap"); window.scrollTo(0, 0); }} />
+      {isPreOpen() ? <SectionBoundary name="Morning brief"><MorningBrief trades={trades} watchlist={watchlist} onOpenStock={onOpenStock} /></SectionBoundary>
+        : <WrapEntry onOpen={() => { setPage("wrap"); window.scrollTo(0, 0); }} />}
 
       {/* 2 · Your book — what needs action first */}
       <SectionBoundary name="Your positions">
@@ -3710,7 +3714,7 @@ const SCAN_SORT = {
   reclaim50: (a, b) => (b.ret3m ?? -999) - (a.ret3m ?? -999),
 };
 
-function ScanPage({ onPickStock, watchlist, setWatchlist, onOpenIpos }) {
+function ScanPage({ onPickStock, watchlist, setWatchlist, onOpenIpos, onOpenMovers }) {
   const { data, loading, error, progress, retry } = useMarketQuadrant();
   const [micro, setMicro] = useState(() => { try { return localStorage.getItem("td_scan_micro") === "1"; } catch (_) { return false; } });
   const [microData, setMicroData] = useState(null);
@@ -3732,7 +3736,10 @@ function ScanPage({ onPickStock, watchlist, setWatchlist, onOpenIpos }) {
     <div style={{ marginBottom: 14 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
         <div className="section-title">Scan</div>
-        {onOpenIpos && <button className="chip" onClick={onOpenIpos}>IPO tracker ›</button>}
+        <span style={{ display: "flex", gap: 6 }}>
+          {onOpenMovers && <button className="chip" onClick={onOpenMovers}>Movers ›</button>}
+          {onOpenIpos && <button className="chip" onClick={onOpenIpos}>IPOs ›</button>}
+        </span>
       </div>
       <div style={{ fontSize: 13, color: "var(--text3)", marginTop: 4 }}>Nifty 500 setups from today's close. Tap a stock for its chart and checklist.</div>
     </div>
@@ -3832,7 +3839,7 @@ function ScanPage({ onPickStock, watchlist, setWatchlist, onOpenIpos }) {
                   <div style={{ padding: "7px 0", borderTop: "1px solid var(--border)", minWidth: 0 }}>
                     <button onClick={() => onPickStock?.(r.sym)} title={`Open ${r.sym}`}
                       style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", font: "inherit", fontFamily: "var(--display)", fontWeight: 700, letterSpacing: "0.02em", textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{r.sym}</button>
-                    <RsBadge rs={r.rs ?? data.rs_of?.[r.sym] ?? microData?.rs_of?.[r.sym]} grade={r.grade ?? data.grade_of?.[r.sym] ?? microData?.grade_of?.[r.sym]} />
+                    <RsBadge rs={r.rs ?? data.rs_of?.[r.sym] ?? microData?.rs_of?.[r.sym]} grade={r.grade ?? data.grade_of?.[r.sym] ?? microData?.grade_of?.[r.sym]} /><NoteMark sym={r.sym} />
                     <div style={{ fontSize: 10, color: "var(--text3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                       {r.results && <span style={{ color: C.warn, marginRight: 4 }} title="Results were due around this move">★</span>}
                       {r.not_ipo && <span style={{ color: C.warn, marginRight: 4 }} title="Demerger / relisting — 'from listing' starts at its first traded day">demerger ·</span>}
@@ -4159,7 +4166,7 @@ function ResultsWarning({ symbol, style }) {
   );
 }
 
-function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [] }) {
+function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [], onCompare }) {
   const { data: mq } = useMarketQuadrant();
   const { deals } = useFlowsDeals();
   const myDeals = (deals?.deals || []).filter(x => x.sym === symbol).filter((x, i, arr) => arr.findIndex(y => y.client === x.client && y.side === x.side && y.qty === x.qty && y.price === x.price) === i);
@@ -4239,7 +4246,7 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [
           {plan && <button className="btn-primary" style={{ padding: "8px 14px", fontSize: 12, borderRadius: 10 }} onClick={() => onPlan?.({ symbol, entry: plan.entry, stop: plan.stop })}>Plan trade ›</button>}
           {plan && <div style={{ width: "100%", fontFamily: "var(--mono)", fontSize: 12, color: "var(--text2)" }}>Entry ₹{plan.entry} · stop ₹{plan.stop} (−{plan.riskPct}%)</div>}
         </div>
-        <div style={{ marginTop: 10 }}><WatchButton symbol={symbol} watchlist={watchlist} setWatchlist={setWatchlist} /></div>
+        <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}><WatchButton symbol={symbol} watchlist={watchlist} setWatchlist={setWatchlist} />{onCompare && <button className="chip chip-sm" onClick={() => onCompare(symbol)}>Compare ›</button>}</div>
         <ResultsWarning symbol={symbol} style={{ marginTop: 8 }} />
         {d.delivery && (
           <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 6 }}>
@@ -4294,8 +4301,9 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [
         {wTrend && <div style={{ fontSize: 11, marginTop: 6, color: wTrend.above && wTrend.rising ? C.pos : !wTrend.above && !wTrend.rising ? C.neg : C.warn }}>{wTrend.label}</div>}
       </div>
 
+      <StockNotes symbol={symbol} last={c} />
       <div className="card" style={{ marginBottom: 12 }}>
-        <div className="label" style={{ marginBottom: 8 }}>Relative strength vs Nifty 500</div>
+        <div className="label" style={{ marginBottom: 8 }}>Relative strength vs Nifty 500{secInfo ? ` and ${sector}` : ""}</div>
         <svg viewBox="0 0 340 60" width="100%" style={{ display: "block" }} role="img" aria-label="Relative strength line versus Nifty 500">
           {(() => {
             const vals = rsLine.filter(v => v != null); if (!vals.length) return null;
@@ -4309,15 +4317,17 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [
             </>);
           })()}
         </svg>
-        <div style={{ display: "grid", gridTemplateColumns: "auto 1fr 1fr 1fr", columnGap: 10, rowGap: 4, fontSize: 11, marginTop: 8, fontFamily: "var(--mono)" }}>
+        <div style={{ display: "grid", gridTemplateColumns: secInfo ? "auto 1fr 1fr 1fr 1fr" : "auto 1fr 1fr 1fr", columnGap: 10, rowGap: 4, fontSize: 11, marginTop: 8, fontFamily: "var(--mono)" }}>
           <span style={{ color: "var(--text3)" }} />
           <span style={{ color: "var(--text3)", textAlign: "right" }}>{symbol}</span>
+          {secInfo && <span style={{ color: "var(--text3)", textAlign: "right" }} title={`Average of ${sector} stocks in the Nifty 500`}>Sector</span>}
           <span style={{ color: "var(--text3)", textAlign: "right" }}>N500</span>
           <span style={{ color: "var(--text3)", textAlign: "right" }}>Edge</span>
           {periods.map(p => (
             <Fragment key={p.l}>
               <span style={{ color: "var(--text3)" }}>{p.l}</span>
               <span style={{ textAlign: "right", color: col(p.s) }}>{pct(p.s)}</span>
+              {secInfo && <span style={{ textAlign: "right", color: "var(--text2)" }}>{pct({ "1M": secInfo.ret1m, "3M": secInfo.ret3m, "6M": secInfo.ret6m }[p.l] ?? null)}</span>}
               <span style={{ textAlign: "right", color: "var(--text2)" }}>{pct(p.ix)}</span>
               <span style={{ textAlign: "right", color: col(p.rel), fontWeight: 700 }}>{p.rel == null ? "—" : `${p.rel > 0 ? "+" : ""}${p.rel.toFixed(1)}`}</span>
             </Fragment>
@@ -5742,7 +5752,7 @@ function IdeaRow({ x, portfolio, riskPct, onOpen, onPlan, compact }) {
     <div style={{ padding: "9px 0", borderTop: "1px solid var(--border)" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <button onClick={() => onOpen?.(x.sym)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", fontFamily: "var(--display)", fontWeight: 700, fontSize: 14, textDecoration: "underline dotted", textUnderlineOffset: 3 }}>{x.sym}</button>
-        <RsBadge rs={x.rs} grade={x.grade} />
+        <RsBadge rs={x.rs} grade={x.grade} /><NoteMark sym={x.sym} />
         {x.micro && <span style={{ fontSize: 9, color: "var(--text3)", border: "1px solid var(--border)", borderRadius: 6, padding: "0 4px" }}>micro</span>}
         <NseFlagBadge f={x.flags} sym={x.sym} />
         {res && <span title={`Results ${mqFmtDate(res.date)} — a gap can jump the stop`} style={{ fontSize: 9, fontWeight: 700, color: C.warn, border: `1px solid ${C.warn}66`, borderRadius: 6, padding: "0 4px" }}>📅 {res.inDays === 0 ? "results today" : `results ${res.inDays}d`}</span>}
@@ -7391,6 +7401,7 @@ function WrapPage({ trades, watchlist, indices, onBack, onOpenStock, onOpenFunds
         {d && line("Stocks above 50-day", `${d.pct_above_50}%`)}
         {flows?.fii && line(`FII / DII (${mqFmtDate(flows.date)})`, <><span style={{ color: flows.fii.net >= 0 ? C.pos : C.neg }}>{crore(flows.fii.net)}</span> / <span style={{ color: (flows.dii?.net ?? 0) >= 0 ? C.pos : C.neg }}>{flows.dii ? crore(flows.dii.net) : "—"}</span></>)}
         {changes.length > 0 && <div style={{ marginTop: 6 }}>{changes.slice(0, 5).map((c, i) => <div key={i} style={{ display: "flex", gap: 8, fontSize: 12, color: "var(--text2)", padding: "2px 0" }}><span style={{ width: 6, height: 6, borderRadius: 3, background: c.tone, marginTop: 6, flexShrink: 0 }} /><span>{c.text}</span></div>)}</div>}
+        {d?.chg_of && (() => { const e = Object.entries(d.chg_of).sort((a, b) => b[1] - a[1]); return <div style={{ fontSize: 11.5, color: "var(--text2)", marginTop: 6 }}>Biggest moves: {e.slice(0, 3).map(([k, v]) => <span key={k} style={{ color: C.pos }}>{k} {pctTxt(v)} </span>)}· {e.slice(-3).reverse().map(([k, v]) => <span key={k} style={{ color: C.neg }}>{k} {pctTxt(v)} </span>)}</div>; })()}
         {hotNow.length > 0 && <div style={{ fontSize: 11.5, color: "var(--text2)", marginTop: 6 }}>Sectors that changed: {hotNow.slice(0, 5).map(x => `${x.name} ${x.status_d1} → ${x.status}`).join(" · ")}</div>}
       </>, <button className="chip chip-sm" onClick={onOpenQuad}>QUAD ›</button>)}
 
@@ -7589,6 +7600,291 @@ function IposPage({ onBack, onOpenStock }) {
   );
 }
 
+// ─── MOVERS: today's moves, heatmap, 52-week highs / lows, strength leaders, delivery ─────────
+function MoversPage({ onBack, onOpenStock }) {
+  const { data: d } = useMarketQuadrant();
+  const [tab, setTab] = useState(() => { try { return localStorage.getItem("td_movers_tab") || "movers"; } catch (_) { return "movers"; } });
+  const pick = (t) => { setTab(t); try { localStorage.setItem("td_movers_tab", t); } catch (_) {} };
+  const micro = readMicro();
+  const back = <button onClick={onBack} className="btn-ghost" style={{ padding: "6px 10px", fontSize: 12, marginBottom: 12 }}>‹ Back</button>;
+  if (!d?.chg_of) return <div className="fade-in" style={{ padding: "16px 16px 120px" }}>{back}<div className="section-title">Movers</div><div className="card" style={{ marginTop: 12 }}><Skeleton lines={6} /></div></div>;
+  const chg = { ...(micro?.chg_of || {}), ...d.chg_of };
+  const sectorOf = (sym) => d.sector_of?.[sym] || micro?.sector_of?.[sym] || "Other";
+  const q = (sym) => d.q_of?.[sym] || micro?.q_of?.[sym] || null;
+  const isMicro = (sym) => !(sym in d.chg_of);
+  const tag = (sym) => isMicro(sym) ? <span style={{ fontSize: 9.5, color: "var(--text3)", marginLeft: 4 }}>micro</span> : null;
+  const symBtn = (sym) => <button onClick={() => onOpenStock(sym)} style={{ background: "none", border: "none", padding: 0, color: "var(--text)", fontWeight: 700, cursor: "pointer", font: "inherit", textAlign: "left" }}>{sym}{tag(sym)}</button>;
+  const row = (sym, right, sub) => (
+    <div key={sym} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, fontSize: 12.5, borderTop: "1px solid var(--border)", padding: "6px 0", alignItems: "baseline" }}>
+      <span style={{ minWidth: 0 }}>{symBtn(sym)}<span style={{ display: "block", fontSize: 10, color: "var(--text3)" }}>{sub ?? sectorOf(sym)}</span></span>
+      <span style={{ fontFamily: "var(--mono)", textAlign: "right" }}>{right}</span>
+    </div>
+  );
+  const TABS = [["movers", "Movers"], ["heat", "Heatmap"], ["hl", "52-week highs"], ["rs", "Strength leaders"], ["deliv", "Delivery"]];
+  const entries = Object.entries(chg).filter(([, v]) => Number.isFinite(v));
+  const up = [...entries].sort((a, b) => b[1] - a[1]).slice(0, 12), dn = [...entries].sort((a, b) => a[1] - b[1]).slice(0, 12);
+  const vol = entries.map(([s, v]) => ({ s, v, vx: q(s)?.vx })).filter(x => x.vx >= 3 && Math.abs(x.v) >= 2).sort((a, b) => b.vx - a.vx).slice(0, 15);
+  const breadth = { up: entries.filter(([, v]) => v > 0).length, dn: entries.filter(([, v]) => v < 0).length };
+  return (
+    <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
+      {back}
+      <div className="section-title">Movers</div>
+      <div style={{ fontSize: 13, color: "var(--text3)", margin: "4px 0 10px" }}>What moved on {mqFmtDate(d.as_of)} — Nifty 500{micro?.chg_of ? " + Microcap 250" : ""} · <span style={{ color: C.pos }}>{breadth.up} up</span> · <span style={{ color: C.neg }}>{breadth.dn} down</span></div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>{TABS.map(([k, l]) => <button key={k} className="chip chip-sm" aria-pressed={tab === k} onClick={() => pick(k)}>{l}</button>)}</div>
+
+      {tab === "movers" && <>
+        <div className="card" style={{ marginBottom: 12 }}><div className="label">Top gainers</div>{up.map(([s, v]) => row(s, <span style={{ color: C.pos }}>{pctTxt(v)}</span>))}</div>
+        <div className="card" style={{ marginBottom: 12 }}><div className="label">Top losers</div>{dn.map(([s, v]) => row(s, <span style={{ color: C.neg }}>{pctTxt(v)}</span>))}</div>
+        <div className="card"><div className="label">Unusual volume</div>
+          <div style={{ fontSize: 11, color: "var(--text3)", margin: "2px 0 4px" }}>3× or more the 50-day average volume, with a move of 2%+.</div>
+          {vol.length ? vol.map(x => row(x.s, <><span style={{ color: pctCol(x.v) }}>{pctTxt(x.v)}</span> <span style={{ color: "var(--text2)" }}>{x.vx}×</span></>)) : <div style={{ fontSize: 12, color: "var(--text3)", padding: "6px 0" }}>Nothing unusual today.</div>}
+        </div>
+      </>}
+
+      {tab === "heat" && <MoversHeatmap chg={d.chg_of} sectorOf={sectorOf} onOpenStock={onOpenStock} />}
+
+      {tab === "hl" && <>
+        {(() => {
+          const H = [...(d.high_list || []), ...(micro?.high_list || [])], L = [...(d.low_list || []), ...(micro?.low_list || [])];
+          const bySec = {}; for (const x of H) (bySec[x.sector] ||= []).push(x);
+          const secs = Object.entries(bySec).sort((a, b) => b[1].length - a[1].length);
+          return <>
+            <div className="card" style={{ marginBottom: 12 }}>
+              <div className="label">New 52-week highs · {H.length}</div>
+              <div style={{ fontSize: 11, color: "var(--text3)", margin: "2px 0 6px" }}>Grouped by sector — several in one sector often marks a theme getting going. ★ = first 52-week high in 20+ sessions.</div>
+              {secs.length ? secs.map(([sec, xs]) => (
+                <div key={sec} style={{ borderTop: "1px solid var(--border)", padding: "6px 0" }}>
+                  <div style={{ fontSize: 11.5, color: "var(--text2)", marginBottom: 3 }}><b>{sec}</b> · {xs.length}</div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{xs.map(x => <button key={x.sym} className="chip chip-sm" onClick={() => onOpenStock(x.sym)}>{x.first ? "★ " : ""}{x.sym} <span style={{ color: pctCol(x.chg), fontFamily: "var(--mono)" }}>{pctTxt(x.chg)}</span></button>)}</div>
+                </div>
+              )) : <div style={{ fontSize: 12, color: "var(--text3)" }}>None today.</div>}
+            </div>
+            <div className="card"><div className="label">New 52-week lows · {L.length}</div>{L.length ? L.map(x => row(x.sym, <span style={{ color: pctCol(x.chg) }}>{pctTxt(x.chg)}</span>, x.sector)) : <div style={{ fontSize: 12, color: "var(--text3)", padding: "6px 0" }}>None today.</div>}</div>
+          </>;
+        })()}
+      </>}
+
+      {tab === "rs" && (() => {
+        const ranked = Object.entries(d.rs_of || {}).filter(([, v]) => v != null).sort((a, b) => b[1] - a[1]);
+        const top = ranked.slice(0, 50), cutWk = Object.values(d.rs_wk_of || {}).sort((a, b) => b - a)[49] ?? 99;
+        return <div className="card">
+          <div className="label">Strongest 50 by strength rank</div>
+          <div style={{ fontSize: 11, color: "var(--text3)", margin: "2px 0 6px" }}>RS 1–99 vs the Nifty 500 · arrow = change over the past week · NEW = not in the top 50 a week ago.</div>
+          {top.map(([s, rs], i) => { const wk = d.rs_wk_of?.[s], dlt = wk != null ? rs - wk : null; return (
+            <div key={s} style={{ display: "grid", gridTemplateColumns: "22px 1fr auto auto", gap: 8, fontSize: 12.5, borderTop: "1px solid var(--border)", padding: "5px 0", alignItems: "baseline" }}>
+              <span style={{ color: "var(--text3)", fontFamily: "var(--mono)", fontSize: 11 }}>{i + 1}</span>
+              <span style={{ minWidth: 0 }}>{symBtn(s)}{wk != null && wk < cutWk && <span style={{ marginLeft: 5, fontSize: 9.5, color: C.pos, fontWeight: 800 }}>NEW</span>}<span style={{ display: "block", fontSize: 10, color: "var(--text3)" }}>{sectorOf(s)} · grade {d.grade_of?.[s] || "—"}</span></span>
+              <span style={{ fontFamily: "var(--mono)", fontWeight: 700 }}>{rs}</span>
+              <span style={{ fontFamily: "var(--mono)", minWidth: 36, textAlign: "right", color: dlt == null ? "var(--text3)" : dlt > 0 ? C.pos : dlt < 0 ? C.neg : "var(--text3)" }}>{dlt == null ? "—" : dlt > 0 ? `▲${dlt}` : dlt < 0 ? `▼${-dlt}` : "="}</span>
+            </div>
+          ); })}
+        </div>;
+      })()}
+
+      {tab === "deliv" && (() => {
+        const dv = { ...(micro?.deliv_of || {}), ...(d.deliv_of || {}) };
+        const rows = Object.entries(dv).map(([s, p]) => ({ s, p, v: chg[s], vx: q(s)?.vx })).filter(x => x.p >= 55 && x.v >= 1.5 && (x.vx ?? 0) >= 1.3).sort((a, b) => b.p - a.p).slice(0, 25);
+        return <div className="card">
+          <div className="label">High delivery on an up day</div>
+          <div style={{ fontSize: 11, color: "var(--text3)", margin: "2px 0 6px", lineHeight: 1.45 }}>55%+ of the day's traded shares were taken as delivery (held, not intraday), on a 1.5%+ gain with 1.3×+ normal volume — buying that looks like accumulation. NSE's figure for {mqFmtDate(d.as_of)}.</div>
+          {rows.length ? rows.map(x => row(x.s, <><span style={{ color: C.pos }}>{Math.round(x.p)}% deliv</span> <span style={{ color: pctCol(x.v) }}>{pctTxt(x.v)}</span></>, `${sectorOf(x.s)}${x.vx ? ` · ${x.vx}× volume` : ""}`)) : <div style={{ fontSize: 12, color: "var(--text3)", padding: "6px 0" }}>Nothing qualifies today (or NSE's delivery figures aren't in yet).</div>}
+        </div>;
+      })()}
+    </div>
+  );
+}
+
+function MoversHeatmap({ chg, sectorOf, onOpenStock }) {
+  const bySec = {};
+  for (const [s, v] of Object.entries(chg)) if (Number.isFinite(v)) (bySec[sectorOf(s)] ||= []).push([s, v]);
+  const secs = Object.entries(bySec).map(([k, xs]) => [k, xs.sort((a, b) => b[1] - a[1]), xs.reduce((a, [, v]) => a + v, 0) / xs.length]).sort((a, b) => b[2] - a[2]);
+  const bg = (v) => { const a = Math.min(1, Math.abs(v) / 4); return v >= 0 ? `rgba(34,197,94,${0.15 + a * 0.6})` : `rgba(239,68,68,${0.15 + a * 0.6})`; };
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8 }}>Every Nifty 500 stock, by sector (best sector first). Deeper colour = bigger move (±4% = full). Tap a tile for the stock.</div>
+      {secs.map(([sec, xs, avg]) => (
+        <div key={sec} className="card" style={{ marginBottom: 10, padding: "8px 10px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 5 }}><b>{sec}</b><span style={{ fontFamily: "var(--mono)", color: pctCol(avg) }}>{pctTxt(avg)} avg · {xs.length}</span></div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(62px, 1fr))", gap: 3 }}>
+            {xs.map(([s, v]) => (
+              <button key={s} onClick={() => onOpenStock(s)} title={`${s} ${pctTxt(v)}`} style={{ background: bg(v), border: "none", borderRadius: 4, padding: "4px 2px", cursor: "pointer", minWidth: 0, color: "var(--text)" }}>
+                <span style={{ display: "block", fontSize: 9.5, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s}</span>
+                <span style={{ display: "block", fontSize: 9.5, fontFamily: "var(--mono)" }}>{v > 0 ? "+" : ""}{v.toFixed(1)}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── SEARCH: stocks, funds, IPOs in one box ──────────────────────────────────
+function SearchSheet({ open, onClose, onOpenStock, onOpenFund, onOpenIpos }) {
+  const [q, setQ] = useState("");
+  const [syms, setSyms] = useState(null), [mf, setMf] = useState(null), [ipos, setIpos] = useState(null);
+  const inputRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    setTimeout(() => inputRef.current?.focus(), 50);
+    loadLocalSymbols().then(setSyms);
+    loadMfList().then(setMf).catch(() => {});
+    loadIpos().then(setIpos).catch(() => {});
+    const k = (e) => e.key === "Escape" && onClose(); document.addEventListener("keydown", k); return () => document.removeEventListener("keydown", k);
+  }, [open]);
+  if (!open) return null;
+  const ql = q.trim().toLowerCase();
+  const stocks = ql.length >= 1 && syms ? syms.filter(r => r.symbol.toLowerCase().includes(ql) || r.name.toLowerCase().includes(ql)).map(r => [rankLocalSymbolMatch(r, ql), r]).sort((a, b) => a[0][0] - b[0][0] || (a[0][1] < b[0][1] ? -1 : 1)).slice(0, 8).map(x => x[1]) : [];
+  const funds = ql.length >= 2 && mf ? mf.funds.filter(f => f[1].toLowerCase().includes(ql) || f[2].toLowerCase().includes(ql)).slice(0, 6) : [];
+  const ipoHits = ql.length >= 2 && ipos ? [...(ipos.live || []), ...ipos.listed].filter(x => x.sym.toLowerCase().includes(ql) || (x.name || "").toLowerCase().includes(ql)).slice(0, 4) : [];
+  const go = (fn) => { setQ(""); onClose(); fn(); };
+  const item = (k, title, sub, fn) => <button key={k} onClick={() => go(fn)} style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", borderTop: "1px solid var(--border)", padding: "9px 0", color: "var(--text)", cursor: "pointer", minHeight: 44 }}><span style={{ display: "block", fontSize: 13, fontWeight: 600 }}>{title}</span><span style={{ display: "block", fontSize: 10.5, color: "var(--text3)" }}>{sub}</span></button>;
+  const head = (t) => <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.1em", marginTop: 10 }}>{t}</div>;
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Search" onClick={(e) => e.target === e.currentTarget && onClose()} style={{ position: "fixed", inset: 0, zIndex: 450, background: "rgba(0,0,0,0.55)", display: "flex", justifyContent: "center", alignItems: "flex-start" }}>
+      <div style={{ width: "100%", maxWidth: 480, background: "var(--bg)", borderBottom: "1px solid var(--border)", padding: "12px 16px 16px", maxHeight: "85vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input ref={inputRef} value={q} onChange={e => setQ(e.target.value)} placeholder="Stock, fund or IPO — e.g. tata, parag, flexi" aria-label="Search stocks, funds and IPOs" style={{ flex: 1 }} />
+          <button className="btn-ghost" style={{ padding: "8px 12px", fontSize: 12 }} onClick={onClose}>Close</button>
+        </div>
+        {!ql && <div style={{ fontSize: 11.5, color: "var(--text3)", marginTop: 10 }}>Search every NSE stock, all 1,700+ mutual funds and the last year's IPOs.</div>}
+        {stocks.length > 0 && <>{head("STOCKS")}{stocks.map(r => item("s" + r.symbol, r.symbol, r.name, () => onOpenStock(r.symbol)))}</>}
+        {funds.length > 0 && <>{head("MUTUAL FUNDS")}{funds.map(f => item("f" + f[0], f[1], `${f[2].replace(/ Mutual Fund$/, "")} · ${mf.cats[f[3]]?.split(" · ")[1] || ""}`, () => onOpenFund(f[0])))}</>}
+        {ipoHits.length > 0 && <>{head("IPOS")}{ipoHits.map(x => item("i" + x.sym, x.name || x.sym, x.listed ? `listed ${mqFmtDate(x.listed)} at ₹${x.price}` : "open for bidding", () => (x.listed ? onOpenStock(x.sym) : onOpenIpos())))}</>}
+        {ql && !stocks.length && !funds.length && !ipoHits.length && <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 10 }}>{syms ? `Nothing matches "${q}".` : "Loading…"}</div>}
+      </div>
+    </div>
+  );
+}
+
+// ─── NOTES on any stock ──────────────────────────────────────────────────────
+const readNotes = () => { try { return JSON.parse(localStorage.getItem("td_stock_notes") || "{}"); } catch (_) { return {}; } };
+function useStockNotes() {
+  const [n, setN] = useState(readNotes);
+  useEffect(() => { const on = () => setN(readNotes()); window.addEventListener("td_stock_notes", on); return () => window.removeEventListener("td_stock_notes", on); }, []);
+  const save = (sym, v) => { const next = { ...readNotes() }; if (v && (v.note || v.target)) next[sym] = { ...v, at: new Date().toISOString() }; else delete next[sym]; try { localStorage.setItem("td_stock_notes", JSON.stringify(next)); } catch (_) {} setN(next); window.dispatchEvent(new Event("td_stock_notes")); };
+  return [n, save];
+}
+function NoteMark({ sym }) {
+  const [n] = useStockNotes();
+  return n[sym] ? <span title={n[sym].note || `target ₹${n[sym].target}`} style={{ marginLeft: 4, fontSize: 10 }}>📝</span> : null;
+}
+function StockNotes({ symbol, last }) {
+  const [notes, save] = useStockNotes();
+  const cur = notes[symbol];
+  const [edit, setEdit] = useState(false), [note, setNote] = useState(cur?.note || ""), [target, setTarget] = useState(cur?.target ?? "");
+  useEffect(() => { setNote(notes[symbol]?.note || ""); setTarget(notes[symbol]?.target ?? ""); setEdit(false); }, [symbol]);
+  const tgt = cur?.target > 0 ? +cur.target : null;
+  return (
+    <div className="card" style={{ marginBottom: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <div className="label">Your note</div>
+        <button className="chip chip-sm" onClick={() => setEdit(v => !v)}>{edit ? "Cancel" : cur ? "Edit" : "+ Add note"}</button>
+      </div>
+      {!edit && cur && <>
+        {cur.note && <div style={{ fontSize: 13, color: "var(--text)", whiteSpace: "pre-wrap", marginTop: 6, lineHeight: 1.5 }}>{cur.note}</div>}
+        {tgt && <div style={{ fontSize: 12, color: "var(--text2)", marginTop: 6 }}>Target ₹{tgt}{last ? <> · <b style={{ color: last >= tgt ? C.pos : "var(--text)" }}>{last >= tgt ? "reached" : `${((tgt / last - 1) * 100).toFixed(1)}% away`}</b></> : null}</div>}
+        <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 4 }}>Saved {mqFmtDate(cur.at?.slice(0, 10))}</div>
+      </>}
+      {!edit && !cur && <div style={{ fontSize: 11.5, color: "var(--text3)", marginTop: 4 }}>Jot down why you're watching it, and a price target. It shows here and as 📝 in lists.</div>}
+      {edit && <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+        <textarea value={note} onChange={e => setNote(e.target.value)} rows={3} placeholder="Why I'm watching it, what I'm waiting for…" aria-label="Note" style={{ width: "100%", resize: "vertical" }} />
+        <label style={{ fontSize: 10.5, color: "var(--text3)" }}>Target price ₹ (optional)<input type="number" value={target} onChange={e => setTarget(e.target.value)} style={{ width: "100%", marginTop: 3 }} /></label>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn-primary" style={{ flex: 1, padding: 10, fontSize: 13 }} onClick={() => { save(symbol, { note: note.trim(), target: +target > 0 ? +target : null }); setEdit(false); }}>Save</button>
+          {cur && <button className="btn-ghost" style={{ padding: "10px 14px", fontSize: 13, color: C.neg }} onClick={() => { save(symbol, null); setEdit(false); }}>Delete</button>}
+        </div>
+      </div>}
+    </div>
+  );
+}
+
+// ─── COMPARE up to 3 stocks ──────────────────────────────────────────────────
+function ComparePage({ syms, setSyms, onBack, onOpenStock }) {
+  const { data: mq } = useMarketQuadrant();
+  const [dets, setDets] = useState({});
+  const [range, setRange] = useState(126);
+  const [q, setQ] = useState(""), [all, setAll] = useState(null);
+  const [cal, setCal] = useState(null);
+  useEffect(() => { loadLocalSymbols().then(setAll); fetchResultsCalendar().then(setCal); }, []);
+  useEffect(() => { let alive = true; for (const s of syms) if (!dets[s]) cachedDetail(s).then(x => alive && x && setDets(p => ({ ...p, [s]: x }))); return () => { alive = false; }; }, [syms.join(",")]);
+  const COL = ["#3B82F6", C.pos, "#D9632B"];
+  const ql = q.trim().toLowerCase();
+  const hits = ql && all ? all.filter(r => r.symbol.toLowerCase().startsWith(ql) || r.name.toLowerCase().includes(ql)).slice(0, 6) : [];
+  const ready = syms.filter(s => dets[s]);
+  const series = ready.map(s => { const d = dets[s], n = d.closes.length, a = Math.max(0, n - range), base = d.closes[a]; return { s, pts: d.closes.slice(a).map((c, i) => [d.dates[a + i], (c / base) * 100]) }; });
+  const W = 340, H = 140, padR = 36;
+  const vals = series.flatMap(x => x.pts.map(p => p[1])); const lo = Math.min(100, ...vals), hi = Math.max(100, ...vals), sp = hi - lo || 1;
+  const path = (pts) => pts.map((p, i) => `${i ? "L" : "M"}${((i / Math.max(1, pts.length - 1)) * (W - padR)).toFixed(1)},${(6 + (1 - (p[1] - lo) / sp) * (H - 10)).toFixed(1)}`).join("");
+  const ret = (d, n) => { const k = d.closes.length - 1 - n; return k >= 0 ? (d.closes[d.closes.length - 1] / d.closes[k] - 1) * 100 : null; };
+  const rowsDef = [
+    ["Price", (s, d) => `₹${d.closes[d.closes.length - 1].toFixed(1)}`],
+    ["Today", (s) => mq?.chg_of?.[s] != null ? pctTxt(mq.chg_of[s]) : "—"],
+    ["1M", (s, d) => pctTxt(ret(d, 21))], ["3M", (s, d) => pctTxt(ret(d, 63))], ["6M", (s, d) => pctTxt(ret(d, 126))],
+    ["From 52w high", (s, d) => { const h = Math.max(...d.closes.slice(-252)); return pctTxt((d.closes[d.closes.length - 1] / h - 1) * 100); }],
+    ["Strength (RS)", (s) => mq?.rs_of?.[s] ?? "—"], ["Grade", (s) => mq?.grade_of?.[s] ?? "—"],
+    ["Sector", (s) => { const sec = mq?.sector_of?.[s]; const st = sec && (mq.sectors || []).find(x => x.name === sec)?.status; return sec ? `${sec}${st ? ` · ${st}` : ""}` : "—"; }],
+    ["Results", (s) => { const r = cal && upcomingResults(cal, s, 30); return r ? `in ${r.inDays}d` : "—"; }],
+  ];
+  return (
+    <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
+      <button onClick={onBack} className="btn-ghost" style={{ padding: "6px 10px", fontSize: 12, marginBottom: 12 }}>‹ Back</button>
+      <div className="section-title">Compare</div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "8px 0" }}>
+        {syms.map((s, i) => <button key={s} className="chip chip-sm" onClick={() => setSyms(syms.filter(x => x !== s))} style={{ borderColor: COL[i], color: COL[i] }}>{s} ✕</button>)}
+      </div>
+      {syms.length < 3 && <div style={{ marginBottom: 10 }}>
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder={syms.length ? "Add another stock" : "Add a stock to compare"} aria-label="Add a stock to compare" style={{ width: "100%" }} />
+        {hits.map(r => <button key={r.symbol} onClick={() => { setSyms([...new Set([...syms, r.symbol])].slice(0, 3)); setQ(""); }} style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", borderTop: "1px solid var(--border)", padding: "8px 0", color: "var(--text)", cursor: "pointer", fontSize: 12.5 }}><b>{r.symbol}</b> <span style={{ color: "var(--text3)", fontSize: 11 }}>{r.name}</span></button>)}
+      </div>}
+      {ready.length > 0 && <div className="card" style={{ marginBottom: 12 }}>
+        <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>{[[63, "3M"], [126, "6M"], [250, "1Y"]].map(([n, l]) => <button key={n} className="chip chip-sm" aria-pressed={range === n} onClick={() => setRange(n)}>{l}</button>)}<span style={{ flex: 1 }} /><span style={{ fontSize: 10.5, color: "var(--text3)", alignSelf: "center" }}>rebased to 100</span></div>
+        <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: "block" }} role="img" aria-label="Price comparison chart">
+          <line x1="0" x2={W - padR} y1={6 + (1 - (100 - lo) / sp) * (H - 10)} y2={6 + (1 - (100 - lo) / sp) * (H - 10)} stroke="var(--border)" strokeDasharray="3 3" />
+          {series.map((x) => <path key={x.s} d={path(x.pts)} fill="none" stroke={COL[syms.indexOf(x.s)]} strokeWidth="1.8" />)}
+          {series.map((x) => { const v = x.pts[x.pts.length - 1][1]; return <text key={x.s} x={W - padR + 3} y={6 + (1 - (v - lo) / sp) * (H - 10) + 3} fontSize="9" fill={COL[syms.indexOf(x.s)]} fontFamily="var(--mono)">{v.toFixed(0)}</text>; })}
+        </svg>
+      </div>}
+      {ready.length > 0 && <div className="card">
+        <div style={{ display: "grid", gridTemplateColumns: `100px repeat(${ready.length}, minmax(0, 1fr))`, gap: "5px 8px", fontSize: 12 }}>
+          <span />{ready.map(s => <button key={s} onClick={() => onOpenStock(s)} style={{ background: "none", border: "none", padding: 0, color: COL[syms.indexOf(s)], fontWeight: 800, cursor: "pointer", textAlign: "right", font: "inherit" }}>{s}</button>)}
+          {rowsDef.map(([l, f]) => <Fragment key={l}><span style={{ color: "var(--text3)", fontSize: 11 }}>{l}</span>{ready.map(s => <span key={s} style={{ fontFamily: "var(--mono)", textAlign: "right", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f(s, dets[s])}</span>)}</Fragment>)}
+        </div>
+      </div>}
+      {!syms.length && <div style={{ fontSize: 12, color: "var(--text3)" }}>Add 2–3 stocks to see them on one chart and side by side.</div>}
+    </div>
+  );
+}
+
+// ─── PRE-MARKET BRIEF (weekday mornings) ─────────────────────────────────────
+function MorningBrief({ trades, watchlist, onOpenStock }) {
+  const { data: d } = useMarketQuadrant();
+  const { deals } = useFlowsDeals();
+  const [g, setG] = useState(null), [cal, setCal] = useState(null);
+  useEffect(() => { let alive = true; fetchGlobal().then(x => alive && setG(x)).catch(() => {}); fetchResultsCalendar().then(c => alive && setCal(c)); return () => { alive = false; }; }, []);
+  const open = (trades || []).filter(t => t.status === "open" || t.status === "partial").map(normalizeTrade);
+  const mine = [...new Set([...open.map(t => normalizeSymbol(t.symbol)), ...(watchlist || []).map(w => w.sym)])];
+  const today = cal ? mine.map(s => ({ s, r: upcomingResults(cal, s, 1) })).filter(x => x.r) : [];
+  const myDeals = (deals?.deals || []).filter(x => mine.includes(x.sym));
+  const sr = d ? suggestedRisk(d) : null;
+  return (
+    <div className="card" style={{ marginBottom: 14, border: "1.5px solid var(--violet)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}><div className="label">☀️ Before the open</div><span style={{ fontSize: 10.5, color: "var(--text3)" }}>NSE opens 9:15</span></div>
+      {d && <div style={{ fontSize: 12.5, marginTop: 6 }}>Signal <b style={{ color: MQ_SIGNAL_COLOR[d.overall] }}>{d.overall}</b> · risk <b>{sr?.pct ?? 0}%</b> per trade · {d.environment?.name?.toLowerCase()}</div>}
+      {g?.length > 0 && <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6, marginTop: 8 }}>
+        {g.slice(0, 8).map(x => <div key={x.t} style={{ minWidth: 0 }}><div style={{ fontSize: 9.5, color: "var(--text3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{x.name}</div><div style={{ fontFamily: "var(--mono)", fontSize: 12, color: pctCol(x.chg) }}>{pctTxt(x.chg)}</div></div>)}
+      </div>}
+      {open.length > 0 && <div style={{ marginTop: 8 }}>
+        <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.08em" }}>YOUR STOPS TODAY</div>
+        {open.map(t => <div key={t.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "3px 0", borderTop: "1px solid var(--border)" }}><button onClick={() => onOpenStock(normalizeSymbol(t.symbol))} style={{ background: "none", border: "none", padding: 0, color: "var(--text)", fontWeight: 700, cursor: "pointer" }}>{normalizeSymbol(t.symbol)}</button><span style={{ fontFamily: "var(--mono)", color: C.neg }}>stop ₹{t.currentStop || t.stop || "—"}</span></div>)}
+      </div>}
+      {today.length > 0 && <div style={{ fontSize: 12, color: C.warn, marginTop: 8 }}>📅 Results {today.map(x => `${x.s} ${x.r.inDays === 0 ? "today" : "tomorrow"}`).join(" · ")} — expect a gap.</div>}
+      {myDeals.length > 0 && <div style={{ fontSize: 12, color: "var(--text2)", marginTop: 6 }}>Big deals yesterday: {myDeals.slice(0, 3).map(x => `${x.sym} ${x.kind} ${x.side.toLowerCase()}`).join(" · ")}</div>}
+      {!open.length && !today.length && <div style={{ fontSize: 11.5, color: "var(--text3)", marginTop: 8 }}>No open positions or results today in your stocks.</div>}
+    </div>
+  );
+}
+
 /** TODAY: IPOs open for bidding now, or a door into the tracker. */
 function IpoTodayCard({ onOpen }) {
   const [d, setD] = useState(null);
@@ -7608,6 +7904,12 @@ function IpoTodayCard({ onOpen }) {
       )) : <div style={{ fontSize: 12, color: "var(--text3)", padding: "4px 0" }}>{d ? `${d.listed.filter(x => !x.sme).length} mainboard and ${d.listed.filter(x => x.sme).length} SME listings in the last year — see how each has done.` : "Loading NSE's IPO list…"}</div>}
     </button>
   );
+}
+
+/** Weekday, 05:00–09:15 IST. */
+function isPreOpen() {
+  const ist = new Date(Date.now() + 19800000), m = ist.getUTCHours() * 60 + ist.getUTCMinutes(), wd = ist.getUTCDay();
+  return wd >= 1 && wd <= 5 && m >= 5 * 60 && m < 9 * 60 + 15;
 }
 
 /** TODAY: the door into the day wrap — prominent after the close. */
@@ -7737,6 +8039,11 @@ export default function App() {
   const [fundCode, setFundCode] = useState(null);     // mutual fund detail page
   const openFund = (code) => { setFundCode(code); setPage("fund"); window.scrollTo(0, 0); };
   const [ipoBack, setIpoBack] = useState("today");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [compareSyms, setCompareSyms] = useState([]);
+  const [subBack, setSubBack] = useState("today");
+  const openSub = (p) => { setSubBack(page === p ? subBack : page); setPage(p); window.scrollTo(0, 0); };
+  const openCompare = (sym) => { setCompareSyms(xs => [...new Set([...xs, sym].filter(Boolean))].slice(-3)); openSub("compare"); };
   const openIpos = () => { setIpoBack(page === "ipos" ? ipoBack : page); setPage("ipos"); window.scrollTo(0, 0); };
   const [stockBack, setStockBack] = useState("scan");
   const [pbSub, setPbSub] = useState(() => { try { return localStorage.getItem("td_playbook_sub") || "setups"; } catch (_) { return "setups"; } });
@@ -7790,7 +8097,8 @@ export default function App() {
   return (
     <div style={{ maxWidth: 480, margin: "0 auto", minHeight: "100vh", background: "var(--bg)", position: "relative" }}>
       <GlobalStyle />
-      <TopBar regime={regime} portfolio={portfolio} page={page} indicesData={indicesTicker} />
+      <TopBar regime={regime} portfolio={portfolio} page={page} indicesData={indicesTicker} onSearch={() => setSearchOpen(true)} />
+      <SearchSheet open={searchOpen} onClose={() => setSearchOpen(false)} onOpenStock={openStock} onOpenFund={openFund} onOpenIpos={openIpos} onOpenMovers={() => openSub("movers")} />
       <NiftyStrip data={indicesTicker} />
 
       {page === "today" && (
@@ -7826,12 +8134,14 @@ export default function App() {
         <MarketQuadrantPage onPickStock={openStock} />
       )}
       {page === "funds" && <FundsPage onOpenFund={openFund} />}
+      {page === "movers" && <MoversPage onBack={() => { setPage(subBack); window.scrollTo(0, 0); }} onOpenStock={openStock} />}
+      {page === "compare" && <ComparePage syms={compareSyms} setSyms={setCompareSyms} onBack={() => { setPage(subBack); window.scrollTo(0, 0); }} onOpenStock={openStock} />}
       {page === "ipos" && <IposPage onBack={() => { setPage(ipoBack); window.scrollTo(0, 0); }} onOpenStock={openStock} />}
       {page === "wrap" && <WrapPage trades={realTrades} watchlist={watchlist} indices={indicesTicker} onBack={() => { setPage("today"); window.scrollTo(0, 0); }}
         onOpenStock={openStock} onOpenFunds={() => { setPage("funds"); window.scrollTo(0, 0); }} onOpenQuad={() => { setPage("quadrant"); window.scrollTo(0, 0); }} />}
       {page === "fund" && fundCode && <FundPage code={fundCode} onBack={() => { setPage("funds"); window.scrollTo(0, 0); }} />}
       {page === "stock" && stockSym && (
-        <StockPage symbol={stockSym} onBack={() => setPage(stockBack || "scan")} onPlan={pickStock} watchlist={watchlist} setWatchlist={setWatchlist} trades={trades} />
+        <StockPage symbol={stockSym} onBack={() => setPage(stockBack || "scan")} onPlan={pickStock} watchlist={watchlist} setWatchlist={setWatchlist} trades={trades} onCompare={openCompare} />
       )}
 
       {page === "today" && <div style={{ padding: "0 16px 120px", marginTop: -100 }}><AppSettings onTour={() => setShowTour(true)} /></div>}

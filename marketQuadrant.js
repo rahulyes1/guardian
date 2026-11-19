@@ -18,7 +18,7 @@ export const MQ_SIGNALS = ["INVEST", "SELECTIVE", "CASH"];
 let API_BASE = "";
 export function setApiBase(url) { API_BASE = String(url || "").replace(/\/+$/, ""); }
 
-const LOCAL_KEY       = "td_mq_v20";  // v16: accuracy fixes (universe-scaled green light, MBI infinities, listings)
+const LOCAL_KEY       = "td_mq_v21";  // v16: accuracy fixes (universe-scaled green light, MBI infinities, listings)
 const BATCH           = 50;           // symbols per /api/spark call (server caps at 50)
 const PARALLEL        = 3;            // spark calls in flight (avoids Yahoo 429s)
 const RANGE           = "2y";         // 200-SMA + 52w history needs >1y
@@ -93,7 +93,7 @@ export function configureSharedStore(getClient) { sharedClientGetter = getClient
 
 function looksValid(d) {
   return d && MQ_SIGNALS.includes(d.overall) && Array.isArray(d.history) && typeof d.total === "number" && d.total >= 400
-    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d && Array.isArray(d.scans.ep) && d.rs_of && d.scan_stats && d.plan_of && d.market_monitor && Array.isArray(d.scans.coil) && d.mbi && d.green_light !== undefined && Array.isArray(d.scans.fundflow) && d.q_of && d.dip !== undefined && Array.isArray(d.scans.htf);
+    && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d && Array.isArray(d.scans.ep) && d.rs_of && d.scan_stats && d.plan_of && d.market_monitor && Array.isArray(d.scans.coil) && d.mbi && d.green_light !== undefined && Array.isArray(d.scans.fundflow) && d.q_of && d.dip !== undefined && Array.isArray(d.scans.htf) && d.chg_of;
 }
 async function readShared() {
   const sb = sharedClientGetter?.();
@@ -1023,6 +1023,10 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   for (const sec of sectors) {
     const rets = (bySector[sec.name] || []).map(s => retOver(s, 21)).filter(Number.isFinite);
     sec.ret1m = rets.length ? r1((rets.reduce((x, y) => x + y, 0) / rets.length) * 100) : null;
+    for (const [k, bars] of [["ret3m", 63], ["ret6m", 126]]) {
+      const xs = (bySector[sec.name] || []).map(st => retOver(st, bars)).filter(Number.isFinite);
+      sec[k] = xs.length ? r1((xs.reduce((x, y) => x + y, 0) / xs.length) * 100) : null;
+    }
   }
   const momentumLeaders = sectors.filter(x => x.ret1m != null && x.ret1m > 0)
     .sort((x, y) => y.ret1m - x.ret1m).slice(0, 5).map(x => ({ name: x.name, ret1m: x.ret1m }));
@@ -1099,6 +1103,20 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
   const srankOf = {};
   { const bySec = {}; for (const st of stocks) { const r = rsOf[st.sym]; if (r != null) (bySec[sectorMap[st.sym] || "Other"] ||= []).push([st.sym, r]); }
     for (const [sec, xs] of Object.entries(bySec)) { if (sec === "Other" || xs.length < 3) continue; xs.sort((a, b) => b[1] - a[1]); xs.forEach(([sym], k) => { srankOf[sym] = [k + 1, xs.length]; }); } }
+  // Today's move for every stock (movers, heatmap), new 52-week highs / lows, strength rank a week ago
+  const chgOf = {}, newHigh = [], newLow = [], rsWkOf = {};
+  for (const st of stocks) {
+    const c = st.closes, x = c[last], p = c[last - 1];
+    if (x != null && p != null) chgOf[st.sym] = Math.round((x / p - 1) * 1000) / 10;
+    if (x != null && last >= 251 && st.h252[last] != null && st.h252[last - 1] != null) {
+      if (x >= st.h252[last]) {
+        let prior = false; for (let k = last - 20; k < last; k++) if (c[k] != null && st.h252[k] != null && c[k] >= st.h252[k]) { prior = true; break; }
+        newHigh.push({ sym: st.sym, sector: sectorMap[st.sym] || "Other", chg: chgOf[st.sym] ?? null, first: !prior });
+      }
+      if (st.l252[last] != null && x <= st.l252[last]) newLow.push({ sym: st.sym, sector: sectorMap[st.sym] || "Other", chg: chgOf[st.sym] ?? null });
+    }
+    const w = rsScore(c, last - 5); if (w != null) rsWkOf[st.sym] = rsRating(w, rsBreaks);
+  }
   const envOk = overall !== "CASH" && environment.name !== "NO MONEY";
   const statusOfSector = Object.fromEntries(sectors.map(x => [x.name, x.status]));
   const gradeOf = {};
@@ -1398,7 +1416,7 @@ export function computeFromAligned(axis, aligned, sectorMap = {}, now = Date.now
       const emOn = Object.fromEntries((ftAll?.history || []).map(h => [h.d, emEq(h)]));
       return systemBacktest({ axis, stocks, volumes, last, sigAt: signalAt, envAt, emAt: (t) => emOn[axis[t]] ?? null });
     })() : undefined,
-    picks, forward, srank_of: srankOf,
+    picks, forward, srank_of: srankOf, chg_of: chgOf, rs_wk_of: rsWkOf, high_list: newHigh, low_list: newLow,
     bias, trend, swing, momentum,
     bias_turning: biasTurning, bias_days: biasDays, bias_needed: BIAS_DAYS,
     swing_state: swingState, momentum_sign: momentumSign, momentum_dir: momentumDir,
@@ -1582,7 +1600,7 @@ export function upcomingResults(cal, sym, days = 7) {
 }
 
 // ─── wider universe: NSE Microcap 250 (loaded on demand, scans only) ─────────
-const MICRO_KEY = "td_mq_micro_v9"; // v9: + trade-for-trade / upper-circuit flags
+const MICRO_KEY = "td_mq_micro_v10"; // v9: + trade-for-trade / upper-circuit flags
 let _microInflight = null;
 export async function loadMicrocapScans({ force = false } = {}) {
   const pub = getLastMarketQuadrant();
@@ -1612,7 +1630,8 @@ export async function loadMicrocapScans({ force = false } = {}) {
     const r = computeFromAligned(axis, aligned, sectorMap, Date.now(), verification, vols, null, cal?.results || null,
       { rsBreaks: getLastMarketQuadrant()?.rs_breaks || null, microcap: true });
     const data = { as_of: r.as_of, final: r.final, verification, total: r.total, scans: r.scans, leaders: r.leaders, sector_of: r.sector_of, rs_of: r.rs_of, grade_of: r.grade_of, plan_of: r.plan_of, q_of: r.q_of, scan_stats: r.scan_stats,
-      flags_of: bhav?.date === r.as_of ? nseFlags(bhav, Object.keys(aligned).map(t => t.replace(/\.NS$/, ""))) : {} };
+      flags_of: bhav?.date === r.as_of ? nseFlags(bhav, Object.keys(aligned).map(t => t.replace(/\.NS$/, ""))) : {},
+      chg_of: r.chg_of, high_list: r.high_list, low_list: r.low_list, deliv_of: bhav?.date === r.as_of ? Object.fromEntries(Object.keys(aligned).map(t => t.replace(/\.NS$/, "")).filter(x => bhav.closes[x]?.deliv != null).map(x => [x, bhav.closes[x].deliv])) : {} };
     try { localStorage.setItem(MICRO_KEY, JSON.stringify({ data, savedAt: Date.now() })); } catch (_) {}
     return data;
   })().finally(() => { _microInflight = null; });
