@@ -12,7 +12,7 @@
 //   DRY_RUN=1 node scripts/nightly-quad.mjs      # compute + print, don't publish
 import fs from "node:fs";
 import { createClient } from "@supabase/supabase-js";
-import { setApiBase, loadMarketQuadrant, isVerified, setPriorPicks, setPickStats, computeLongBacktest, loadMicrocapScans } from "../marketQuadrant.js";
+import { setApiBase, subscribeProgress, loadMarketQuadrant, isVerified, setPriorPicks, setPickStats, computeLongBacktest, loadMicrocapScans } from "../marketQuadrant.js";
 
 const APP = (process.env.APP_URL || "https://guardian-swart-theta.vercel.app").replace(/\/$/, "");
 const SB_URL = process.env.SUPABASE_URL, SB_KEY = process.env.SUPABASE_PUBLISHABLE_KEY;
@@ -23,20 +23,31 @@ const mem = {};
 globalThis.localStorage = { getItem: (k) => mem[k] ?? null, setItem: (k, v) => { mem[k] = String(v); }, removeItem: (k) => { delete mem[k]; } };
 
 const summary = [];
-const log = (m) => { console.log(m); summary.push(m); };
+// On GitHub, every line is also an annotation: annotations are readable on the public run page / API
+// without signing in, so a failure can be diagnosed from outside.
+const GH = !!process.env.GITHUB_ACTIONS;
+const log = (m) => {
+  console.log(m); summary.push(m);
+  if (GH) console.log(`::${/❌/.test(m) ? "error" : /⚠️/.test(m) ? "warning" : "notice"}::${String(m).replace(/\r?\n/g, " | ").slice(0, 900)}`);
+};
+const t0 = Date.now(), step = (m) => log(`[${Math.round((Date.now() - t0) / 1000)}s] ${m}`);
 const finish = (code) => {
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## Nightly QUAD\n\n${summary.map((s) => `- ${s}`).join("\n")}\n`);
   process.exit(code);
 };
 process.on("unhandledRejection", (e) => { log(`❌ Unexpected error: ${e?.stack || e}`); finish(1); });
+process.on("uncaughtException", (e) => { log(`❌ Uncaught: ${e?.stack || e}`); finish(1); });
 
 setApiBase(APP);
+step(`start · node ${process.version} · app ${APP} · supabase ${SB_URL ? "set" : "missing"} / key ${SB_KEY ? SB_KEY.slice(0, 12) + "…" : "missing"}`);
+try { const r = await fetch(`${APP}/nifty500.json`); step(`app reachable: nifty500.json HTTP ${r.status}`); } catch (e) { log(`❌ App not reachable from this runner: ${e.message}`); }
 
 // 1 · Supabase: earlier evenings' picks (forward test) and the last 5-year records (to choose tonight's picks)
 const sb = SB_URL && SB_KEY ? createClient(SB_URL, SB_KEY, { auth: { persistSession: false, autoRefreshToken: false } }) : null;
 if (sb) {
   const { error: authErr } = await sb.auth.signInAnonymously();
-  if (authErr) { log(`❌ Supabase sign-in failed: ${authErr.message}`); finish(1); }
+  if (authErr) log(`⚠️ Supabase sign-in failed (${authErr.status || ""}): ${authErr.message} — will compute anyway and retry before publishing`);
+  else step("supabase signed in");
   const { data: prior, error: pErr } = await sb.from("market_quadrant").select("as_of, picks:data->picks, lstats:data->long_bt->scan_stats").order("as_of", { ascending: false }).limit(60);
   if (pErr) log(`⚠️ Couldn't read earlier picks: ${pErr.message}`);
   const list = (prior || []).map(x => x.picks).filter(p => p?.d && Array.isArray(p.rows));
@@ -48,10 +59,13 @@ if (sb) {
 
 // 2 · The verified result — the part that must always go out
 let r;
+step("computing the Nifty 500 result…");
 try {
+  let lastMsg = "";
+  subscribeProgress((m) => { if (m !== lastMsg && !/batch/i.test(m)) { lastMsg = m; step(m); } });
   r = await loadMarketQuadrant({ force: true });
 } catch (e) {
-  log(`❌ Calculation failed: ${e.message}`);
+  log(`❌ Calculation failed: ${e?.stack || e?.message || e}`);
   finish(1);
 }
 const v = r.verification;
@@ -66,6 +80,8 @@ if (!r.final || !isVerified(r)) {
 const canPublish = !DRY && sb;
 if (!DRY && !sb) log("⚠️ Not published: add SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY as GitHub Actions secrets to enable nightly publishing.");
 const publish = async (what) => {
+  const { data: sess } = await sb.auth.getSession();
+  if (!sess?.session) { const { error: e2 } = await sb.auth.signInAnonymously(); if (e2) { log(`❌ Supabase sign-in failed again: ${e2.message}`); return false; } }
   const { error } = await sb.from("market_quadrant").upsert({ as_of: r.as_of, data: r, computed_at: r.updated_at }, { onConflict: "as_of" });
   if (error) { log(`❌ Publish (${what}) failed: ${error.message}`); return false; }
   log(`✅ Published ${what} for ${r.as_of} (${Math.round(JSON.stringify(r).length / 1024)} KB)`);
