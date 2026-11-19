@@ -200,6 +200,7 @@ export default async function handler(req, res) {
         listed: parseNseDate(x.listingDate), open: parseNseDate(x.ipoStartDate), close: parseNseDate(x.ipoEndDate),
         price: price(x.issuePrice), band: band(x.priceRange),
       })).filter(x => x.sym && x.listed && x.listed >= cutoff && /^(equity|sme)$/i.test(x.type || "")) // no debt / InvIT / REIT
+        .map(x => (x.band && (!x.price || x.price < x.band[0] * 0.8 || x.price > x.band[1] * 1.2) ? { ...x, price: x.band[1] } : x)) // a stray value outside the band → top of band
         .sort((a, b) => (a.listed < b.listed ? 1 : -1));
       const live = (rowsOf(cur) || []).map(x => ({
         sym: x.symbol, name: x.companyName, sme: /sme/i.test(x.series || x.segment || ""), band: band(x.issuePrice),

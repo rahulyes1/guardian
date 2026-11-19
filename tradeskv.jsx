@@ -1315,7 +1315,7 @@ function TopBar({ regime, portfolio, page, indicesData }) {
 }
 
 // ─── TODAY PAGE ─────────────────────────────────────────────────────────────
-function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, trades, setPage, watchlist, onOpenStock, onPlan, onOpenFund }) {
+function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, trades, setPage, watchlist, onOpenStock, onPlan, onOpenFund, onOpenIpos }) {
   const cfg = REGIME_CONFIG[regime];
   const openTrades = trades.filter(t => t.status === "open" || t.status === "partial").map(normalizeTrade);
   const totalRisk = openTrades.reduce((s, t) => s + (t.riskAmount || 0), 0);
@@ -1443,6 +1443,7 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
 
       {/* 3 · Best setups for today, sized for the current rule */}
       <SectionBoundary name="Mutual funds"><FundsTodayCard onOpen={() => { setPage("funds"); window.scrollTo(0, 0); }} onOpenFund={onOpenFund} /></SectionBoundary>
+      <SectionBoundary name="IPOs"><IpoTodayCard onOpen={onOpenIpos} /></SectionBoundary>
       <SectionBoundary name="Best setups">
         <BestSetups watchlist={watchlist} portfolio={portfolio} onOpenStock={onOpenStock} onPlan={onPlan} onSeeAll={() => setPage("ideas")} />
       </SectionBoundary>
@@ -3706,7 +3707,7 @@ const SCAN_SORT = {
   reclaim50: (a, b) => (b.ret3m ?? -999) - (a.ret3m ?? -999),
 };
 
-function ScanPage({ onPickStock, watchlist, setWatchlist }) {
+function ScanPage({ onPickStock, watchlist, setWatchlist, onOpenIpos }) {
   const { data, loading, error, progress, retry } = useMarketQuadrant();
   const [micro, setMicro] = useState(() => { try { return localStorage.getItem("td_scan_micro") === "1"; } catch (_) { return false; } });
   const [microData, setMicroData] = useState(null);
@@ -3726,7 +3727,10 @@ function ScanPage({ onPickStock, watchlist, setWatchlist }) {
 
   const head = (
     <div style={{ marginBottom: 14 }}>
-      <div className="section-title">Scan</div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <div className="section-title">Scan</div>
+        {onOpenIpos && <button className="chip" onClick={onOpenIpos}>IPO tracker ›</button>}
+      </div>
       <div style={{ fontSize: 13, color: "var(--text3)", marginTop: 4 }}>Nifty 500 setups from today's close. Tap a stock for its chart and checklist.</div>
     </div>
   );
@@ -7426,6 +7430,171 @@ function WrapPage({ trades, watchlist, indices, onBack, onOpenStock, onOpenFunds
   );
 }
 
+// ─── IPO TRACKER: every NSE listing of the last year ─────────────────────────
+let _iposP = null;
+function loadIpos() {
+  return (_iposP ||= fetch("/api/nse?type=ipos").then(r => (r.ok ? r.json() : Promise.reject(new Error("NSE IPO list unavailable")))).catch(e => { _iposP = null; throw e; }));
+}
+const _ipoPx = new Map(); // sym → stats | null
+/** Listing-day and since-listing numbers from the stock's own daily bars. */
+function ipoStats(ipo, it) {
+  const r = it?.response?.[0], ts = r?.timestamp, cl = r?.indicators?.quote?.[0]?.close;
+  if (!Array.isArray(ts) || !Array.isArray(cl)) return null;
+  const off = ts.length - (it.ohlcTail || []).length;
+  const bars = [];
+  ts.forEach((t, i) => { const d = istDayKey(t); if (cl[i] != null && d >= ipo.listed) bars.push({ d, c: cl[i], o: i >= off ? it.ohlcTail[i - off]?.[0] : null, h: i >= off ? it.ohlcTail[i - off]?.[1] : null }); });
+  if (!bars.length) return null;
+  const first = bars[0], last = bars[bars.length - 1], closes = bars.map(b => b.c);
+  const hi = Math.max(...bars.map(b => b.h ?? b.c));
+  const ma = (n) => (closes.length >= Math.min(n, 15) ? closes.slice(-n).reduce((a, b) => a + b, 0) / Math.min(n, closes.length) : null);
+  const age = bars.length, per = age < 50 ? 20 : age < 100 ? 50 : 100, trendMa = ma(per);
+  const p = ipo.price, m1 = closes.length > 21 ? (last.c / closes[closes.length - 22] - 1) * 100 : null;
+  return {
+    sessions: age, last: last.c, lastDate: last.d,
+    listOpenGain: p && first.o ? (first.o / p - 1) * 100 : null, listGain: p ? (first.c / p - 1) * 100 : null,
+    sinceIssue: p ? (last.c / p - 1) * 100 : null, sinceListing: (last.c / first.c - 1) * 100,
+    offHigh: (last.c / hi - 1) * 100, m1, trend: trendMa != null ? last.c > trendMa : null, trendMa: per,
+  };
+}
+
+function IposPage({ onBack, onOpenStock }) {
+  const [d, setD] = useState(null), [err, setErr] = useState(null);
+  const [seg, setSeg] = useState(() => { try { return localStorage.getItem("td_ipo_seg") || "main"; } catch (_) { return "main"; } });
+  const [sort, setSort] = useState("new");
+  const [px, setPx] = useState({});
+  const [loaded, setLoaded] = useState(0);
+  const pickSeg = (v) => { setSeg(v); try { localStorage.setItem("td_ipo_seg", v); } catch (_) {} };
+  useEffect(() => { let alive = true; loadIpos().then(x => alive && setD(x)).catch(e => alive && setErr(e.message)); return () => { alive = false; }; }, []);
+  useEffect(() => {
+    if (!d) return;
+    let alive = true;
+    const todo = d.listed.filter(x => !_ipoPx.has(x.sym));
+    const known = Object.fromEntries(d.listed.filter(x => _ipoPx.has(x.sym)).map(x => [x.sym, _ipoPx.get(x.sym)]));
+    setPx(known); setLoaded(Object.keys(known).length);
+    (async () => {
+      const chunks = []; for (let i = 0; i < todo.length; i += 40) chunks.push(todo.slice(i, i + 40));
+      let k = 0;
+      await Promise.all([0, 1].map(async () => {
+        while (alive && k < chunks.length) {
+          const ch = chunks[k++];
+          try {
+            const j = await fetch(`/api/spark?symbols=${encodeURIComponent(ch.map(x => x.sym + ".NS").join(","))}&range=1y&interval=1d&ohlc=260`).then(r => (r.ok ? r.json() : null));
+            const by = Object.fromEntries((j?.spark?.result || []).map(it => [it.symbol.replace(/\.NS$/, ""), it]));
+            const add = {};
+            for (const x of ch) { const st = ipoStats(x, by[x.sym]); _ipoPx.set(x.sym, st); add[x.sym] = st; }
+            if (alive) { setPx(p => ({ ...p, ...add })); setLoaded(n => n + ch.length); }
+          } catch (_) {}
+        }
+      }));
+    })();
+    return () => { alive = false; };
+  }, [d]);
+
+  const back = <button onClick={onBack} className="btn-ghost" style={{ padding: "6px 10px", fontSize: 12, marginBottom: 12 }}>‹ Back</button>;
+  const head = <><div className="section-title">IPOs</div><div style={{ fontSize: 13, color: "var(--text3)", margin: "4px 0 12px" }}>Every NSE listing of the last 12 months — how it listed and how it has done since. From NSE's issue records.</div></>;
+  if (!d) return <div className="fade-in" style={{ padding: "16px 16px 120px" }}>{back}{head}<div className="card" style={{ fontSize: 12, color: err ? "var(--red)" : "var(--text3)" }}>{err || <Skeleton lines={6} />}</div></div>;
+
+  const inSeg = (x) => (seg === "all" ? true : seg === "sme" ? x.sme : !x.sme);
+  const rows = d.listed.filter(inSeg).map(x => ({ ...x, s: px[x.sym] }));
+  const withPx = rows.filter(x => x.s);
+  const SORTS = { new: (a, b) => (a.listed < b.listed ? 1 : -1), since: (a, b) => (b.s?.sinceIssue ?? -999) - (a.s?.sinceIssue ?? -999),
+    listing: (a, b) => (b.s?.listGain ?? -999) - (a.s?.listGain ?? -999), high: (a, b) => (b.s?.offHigh ?? -999) - (a.s?.offHigh ?? -999) };
+  const sorted = [...rows].sort(SORTS[sort]);
+  const med = (xs) => { const v = xs.filter(Number.isFinite).sort((a, b) => a - b); return v.length ? v[v.length >> 1] : null; };
+  const above = withPx.filter(x => x.s.sinceIssue > 0).length;
+  const best = [...withPx].sort((a, b) => b.s.sinceIssue - a.s.sinceIssue)[0], worst = [...withPx].sort((a, b) => a.s.sinceIssue - b.s.sinceIssue)[0];
+  const live = (d.live || []).filter(inSeg), upcoming = (d.upcoming || []).filter(inSeg);
+  const mo = (iso) => (iso ? `${mqFmtDate(iso)} ${iso.slice(2, 4)}` : "—");
+  return (
+    <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
+      {back}{head}
+      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        {[["main", `Mainboard ${d.listed.filter(x => !x.sme).length}`], ["sme", `SME ${d.listed.filter(x => x.sme).length}`], ["all", "All"]].map(([k, l]) => <button key={k} className="chip" aria-pressed={seg === k} onClick={() => pickSeg(k)}>{l}</button>)}
+      </div>
+
+      {(live.length > 0 || upcoming.length > 0) && (
+        <div className="card" style={{ marginBottom: 12, paddingTop: 10 }}>
+          <div className="label" style={{ marginBottom: 4 }}>Open for bidding now</div>
+          {live.map(x => (
+            <div key={x.sym} style={{ borderTop: "1px solid var(--border)", padding: "7px 0" }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+                <span style={{ flex: 1, fontSize: 12.5, fontWeight: 700 }}>{x.name}{x.sme && <span style={{ marginLeft: 6, fontSize: 10, color: C.warn, border: `1px solid ${C.warn}66`, borderRadius: 6, padding: "0 4px" }}>SME</span>}</span>
+                <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: x.subscribed >= 1 ? C.pos : "var(--text2)" }}>{x.subscribed != null ? `${x.subscribed}× subscribed` : ""}</span>
+              </div>
+              <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>Band ₹{x.band?.[0]}–{x.band?.[1]} · closes {mo(x.close)}{x.size ? ` · ${(x.size / 1e7).toFixed(2)} cr shares on offer` : ""}</div>
+            </div>
+          ))}
+          {upcoming.map(x => <div key={x.sym} style={{ borderTop: "1px solid var(--border)", padding: "7px 0", fontSize: 12 }}><b>{x.name}</b> <span style={{ color: "var(--text3)" }}>· opens {mo(x.open)}{x.band ? ` · ₹${x.band[0]}–${x.band[1]}` : ""}</span></div>)}
+          <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 4 }}>Subscription is NSE's running total (times the shares on offer).</div>
+        </div>
+      )}
+
+      <div className="card" style={{ marginBottom: 12 }}>
+        <div className="label" style={{ marginBottom: 6 }}>The last 12 months{seg === "sme" ? " · SME" : seg === "main" ? " · mainboard" : ""}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 }}>
+          {[["LISTED", rows.length, null], ["ABOVE ISSUE NOW", withPx.length ? `${Math.round((above / withPx.length) * 100)}%` : "—", null],
+            ["TYPICAL SINCE ISSUE", med(withPx.map(x => x.s.sinceIssue)) != null ? pctTxt(med(withPx.map(x => x.s.sinceIssue))) : "—", med(withPx.map(x => x.s.sinceIssue))],
+            ["TYPICAL LISTING DAY", med(withPx.map(x => x.s.listGain)) != null ? pctTxt(med(withPx.map(x => x.s.listGain))) : "—", med(withPx.map(x => x.s.listGain))],
+            ["HOLDING TREND", withPx.length ? `${Math.round((withPx.filter(x => x.s.trend).length / withPx.length) * 100)}%` : "—", null],
+            ["PRICES LOADED", `${Math.min(loaded, d.listed.length)}/${d.listed.length}`, null]].map(([k, v, c]) => (
+            <div key={k} style={{ minWidth: 0 }}><div style={{ fontSize: 9.5, color: "var(--text3)", letterSpacing: "0.06em" }}>{k}</div><div style={{ fontFamily: "var(--mono)", fontSize: 14, fontWeight: 700, color: c == null ? "var(--text)" : pctCol(c) }}>{v}</div></div>
+          ))}
+        </div>
+        {best && worst && <div style={{ fontSize: 11.5, color: "var(--text2)", marginTop: 8 }}>Best: <b>{best.sym}</b> <span style={{ color: C.pos }}>{pctTxt(best.s.sinceIssue)}</span> · worst: <b>{worst.sym}</b> <span style={{ color: C.neg }}>{pctTxt(worst.s.sinceIssue)}</span> since issue</div>}
+      </div>
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
+        {[["new", "Newest"], ["since", "Best since issue"], ["listing", "Best listing"], ["high", "Nearest high"]].map(([k, l]) => <button key={k} className="chip chip-sm" aria-pressed={sort === k} onClick={() => setSort(k)}>{l}</button>)}
+      </div>
+      <div className="card" style={{ paddingTop: 6 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", columnGap: 10, fontSize: 12 }}>
+          {["IPO · LISTED", "LISTING", "SINCE ISSUE", "FROM HIGH"].map((h, i) => <span key={h} style={{ fontSize: 9.5, color: "var(--text3)", textAlign: i ? "right" : "left", padding: "4px 0" }}>{h}</span>)}
+          {sorted.map(x => {
+            const s = x.s, pending = !(x.sym in px);
+            return (
+              <Fragment key={x.sym + x.listed}>
+                <button onClick={() => onOpenStock(x.sym)} style={{ textAlign: "left", background: "none", border: "none", borderTop: "1px solid var(--border)", padding: "6px 0", color: "var(--text)", cursor: "pointer", minWidth: 0 }}>
+                  <span style={{ display: "block", fontWeight: 700, fontSize: 12.5 }}>{x.sym}{x.sme && <span style={{ marginLeft: 5, fontSize: 9.5, color: C.warn }}>SME</span>}{s?.trend != null && <span title={`${s.trend ? "Above" : "Below"} its ${s.trendMa}-day average`} style={{ marginLeft: 5, color: s.trend ? C.pos : C.neg }}>●</span>}</span>
+                  <span style={{ display: "block", fontSize: 10, color: "var(--text3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{mo(x.listed)} · ₹{x.price ?? "—"}{s ? ` → ₹${s.last >= 1000 ? Math.round(s.last) : s.last.toFixed(1)}` : ""}</span>
+                </button>
+                {[s?.listGain, s?.sinceIssue, s?.offHigh].map((v, i) => (
+                  <span key={i} style={{ fontFamily: "var(--mono)", fontSize: 11.5, textAlign: "right", borderTop: "1px solid var(--border)", padding: "6px 0", alignSelf: "center", color: i === 2 ? (v != null && v > -10 ? C.pos : "var(--text2)") : pctCol(v) }}>
+                    {v != null ? pctTxt(v) : pending ? "…" : "—"}
+                  </span>
+                ))}
+              </Fragment>
+            );
+          })}
+        </div>
+      </div>
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 10, lineHeight: 1.5 }}>
+        Listing = first-day close vs issue price; since issue = latest close vs issue price; from high = vs the highest price since listing. ● = holding the average that fits its age (20-day under 50 sessions, 50-day under 100, else 100-day). SME IPOs trade in large lots with thin volume, and some have no price data here. Information, not advice.
+      </div>
+    </div>
+  );
+}
+
+/** TODAY: IPOs open for bidding now, or a door into the tracker. */
+function IpoTodayCard({ onOpen }) {
+  const [d, setD] = useState(null);
+  useEffect(() => { let alive = true; loadIpos().then(x => alive && setD(x)).catch(() => {}); return () => { alive = false; }; }, []);
+  const live = d?.live || [];
+  return (
+    <button onClick={onOpen} className="card" style={{ display: "block", width: "100%", textAlign: "left", cursor: "pointer", color: "var(--text)", marginBottom: 14, paddingTop: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <div className="label">IPOs</div><span style={{ fontSize: 11, color: "var(--text3)" }}>Tracker ›</span>
+      </div>
+      {live.length ? live.slice(0, 3).map(x => (
+        <div key={x.sym} style={{ display: "flex", gap: 8, fontSize: 12, padding: "5px 0", borderTop: "1px solid var(--border)", alignItems: "baseline" }}>
+          <span style={{ flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{x.name}{x.sme ? " · SME" : ""}</span>
+          <span style={{ fontFamily: "var(--mono)", color: x.subscribed >= 1 ? C.pos : "var(--text2)" }}>{x.subscribed != null ? `${x.subscribed}×` : ""}</span>
+          <span style={{ fontSize: 10.5, color: "var(--text3)" }}>closes {mqFmtDate(x.close)}</span>
+        </div>
+      )) : <div style={{ fontSize: 12, color: "var(--text3)", padding: "4px 0" }}>{d ? `${d.listed.filter(x => !x.sme).length} mainboard and ${d.listed.filter(x => x.sme).length} SME listings in the last year — see how each has done.` : "Loading NSE's IPO list…"}</div>}
+    </button>
+  );
+}
+
 /** TODAY: the door into the day wrap — prominent after the close. */
 function WrapEntry({ onOpen }) {
   const ist = new Date(Date.now() + 19800000), mins = ist.getUTCHours() * 60 + ist.getUTCMinutes(), wd = ist.getUTCDay();
@@ -7552,6 +7721,8 @@ export default function App() {
   const [stockSym, setStockSym] = useState(null);     // stock detail page
   const [fundCode, setFundCode] = useState(null);     // mutual fund detail page
   const openFund = (code) => { setFundCode(code); setPage("fund"); window.scrollTo(0, 0); };
+  const [ipoBack, setIpoBack] = useState("today");
+  const openIpos = () => { setIpoBack(page === "ipos" ? ipoBack : page); setPage("ipos"); window.scrollTo(0, 0); };
   const [stockBack, setStockBack] = useState("scan");
   const [pbSub, setPbSub] = useState(() => { try { return localStorage.getItem("td_playbook_sub") || "setups"; } catch (_) { return "setups"; } });
   const choosePbSub = (v) => { setPbSub(v); try { localStorage.setItem("td_playbook_sub", v); } catch (_) {} };
@@ -7609,7 +7780,7 @@ export default function App() {
 
       {page === "today" && (
         <TodayPage regime={regime} setRegime={handleRegimeChange} regimeSince={regimeSince} portfolio={portfolio} setPortfolio={setPortfolio} trades={realTrades} setPage={setPage}
-          watchlist={watchlist} onOpenStock={openStock} onPlan={pickStock} onOpenFund={openFund} />
+          watchlist={watchlist} onOpenStock={openStock} onPlan={pickStock} onOpenFund={openFund} onOpenIpos={openIpos} />
       )}
       {page === "ideas" && (
         <IdeasPage watchlist={watchlist} portfolio={portfolio} onOpenStock={openStock} onPlan={pickStock} />
@@ -7634,12 +7805,13 @@ export default function App() {
         </div>
       )}
       {page === "scan" && (
-        <ScanPage onPickStock={openStock} watchlist={watchlist} setWatchlist={setWatchlist} />
+        <ScanPage onPickStock={openStock} watchlist={watchlist} setWatchlist={setWatchlist} onOpenIpos={openIpos} />
       )}
       {page === "quadrant" && (
         <MarketQuadrantPage onPickStock={openStock} />
       )}
       {page === "funds" && <FundsPage onOpenFund={openFund} />}
+      {page === "ipos" && <IposPage onBack={() => { setPage(ipoBack); window.scrollTo(0, 0); }} onOpenStock={openStock} />}
       {page === "wrap" && <WrapPage trades={realTrades} watchlist={watchlist} indices={indicesTicker} onBack={() => { setPage("today"); window.scrollTo(0, 0); }}
         onOpenStock={openStock} onOpenFunds={() => { setPage("funds"); window.scrollTo(0, 0); }} onOpenQuad={() => { setPage("quadrant"); window.scrollTo(0, 0); }} />}
       {page === "fund" && fundCode && <FundPage code={fundCode} onBack={() => { setPage("funds"); window.scrollTo(0, 0); }} />}
