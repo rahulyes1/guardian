@@ -1130,7 +1130,7 @@ const GlobalStyle = () => (
       transition: all 0.15s;
     }
     .topbar-idx { min-width: 0; overflow: hidden; }
-    @media (max-width: 560px) { .topbar-idx { display: none !important; } }
+    @media (max-width: 720px) { .topbar-idx { display: none !important; } }
     .chip { min-height: 36px; }
     .chip.chip-sm { min-height: 28px; padding: 3px 10px; font-size: 11px; }
     .chip[aria-pressed="true"] { border-color: var(--violet); color: var(--violet); background: rgba(59,130,246,0.10); }
