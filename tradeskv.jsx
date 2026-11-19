@@ -1223,7 +1223,10 @@ function PriceBadge({ info, loading }) {
 
 // ─── TOP BAR ────────────────────────────────────────────────────────────────
 function TopBar({ regime, portfolio, page, indicesData }) {
-  const cfg = REGIME_CONFIG[regime];
+  // The chip shows the same verdict as every other screen: the market signal (bias is one of its four readings)
+  const { data: mq } = useMarketQuadrant();
+  const sig = mq?.overall;
+  const cfg = sig ? { label: sig, color: MQ_SIGNAL_COLOR[sig], bg: MQ_SIGNAL_BG[sig] } : REGIME_CONFIG[regime];
   const open = isMarketOpen();
   const nsei = indicesData?.nsei || null;
   const cnx500 = indicesData?.cnx500 || null;
