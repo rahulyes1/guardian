@@ -191,13 +191,16 @@ export default async function handler(req, res) {
       const P = rowsOf(past);
       if (!P) return fail(502, `NSE past issues unavailable (${past.status || past.error})`);
       const num = (v) => { const n = parseFloat(String(v ?? "").replace(/[^0-9.]/g, "")); return Number.isFinite(n) ? n : null; };
-      const band = (s) => { const xs = String(s || "").match(/[\d.]+/g)?.map(Number).filter(Number.isFinite) || []; return xs.length ? [Math.min(...xs), Math.max(...xs)] : null; };
+      // "Rs.259 to Rs.272" → [259, 272] (the dot after "Rs" must not start a number)
+      const band = (s) => { const xs = String(s || "").replace(/,/g, "").match(/\d+(?:\.\d+)?/g)?.map(Number).filter(n => Number.isFinite(n) && n > 0) || []; return xs.length ? [Math.min(...xs), Math.max(...xs)] : null; };
+      const price = (s) => band(s)?.[1] ?? null; // the final issue price, or the top of a band
       const cutoff = new Date(Date.now() - 372 * 86400000).toISOString().slice(0, 10);
       const listed = P.map(x => ({
         sym: x.symbol, name: x.companyName || x.company, sme: /sme/i.test(x.securityType || ""), type: x.securityType || null,
         listed: parseNseDate(x.listingDate), open: parseNseDate(x.ipoStartDate), close: parseNseDate(x.ipoEndDate),
-        price: num(x.issuePrice), band: band(x.priceRange),
-      })).filter(x => x.sym && x.listed && x.listed >= cutoff).sort((a, b) => (a.listed < b.listed ? 1 : -1));
+        price: price(x.issuePrice), band: band(x.priceRange),
+      })).filter(x => x.sym && x.listed && x.listed >= cutoff && /^(equity|sme)$/i.test(x.type || "")) // no debt / InvIT / REIT
+        .sort((a, b) => (a.listed < b.listed ? 1 : -1));
       const live = (rowsOf(cur) || []).map(x => ({
         sym: x.symbol, name: x.companyName, sme: /sme/i.test(x.series || x.segment || ""), band: band(x.issuePrice),
         open: parseNseDate(x.issueStartDate), close: parseNseDate(x.issueEndDate), status: x.status || null,
