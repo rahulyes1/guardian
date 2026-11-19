@@ -11,8 +11,17 @@ create table if not exists public.market_quadrant (
     jsonb_typeof(data) = 'object'
     and data ->> 'overall' in ('INVEST', 'SELECTIVE', 'CASH')
     and jsonb_typeof(data -> 'history') = 'array'
-    and pg_column_size(data) < 200000
+    and pg_column_size(data) < 2000000            -- ~2 MB: the result + Microcap 250 + 5-year records
   )
+);
+
+-- Upgrade an existing table (the first version capped rows at 200 KB, which the result outgrew):
+alter table public.market_quadrant drop constraint if exists market_quadrant_shape;
+alter table public.market_quadrant add constraint market_quadrant_shape check (
+  jsonb_typeof(data) = 'object'
+  and data ->> 'overall' in ('INVEST', 'SELECTIVE', 'CASH')
+  and jsonb_typeof(data -> 'history') = 'array'
+  and pg_column_size(data) < 2000000
 );
 
 alter table public.market_quadrant enable row level security;
