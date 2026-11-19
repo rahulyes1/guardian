@@ -192,9 +192,11 @@ export default async function handler(req, res) {
           const closes = {}; let date = null;
           for (const l of lines.slice(1)) {
             const c = l.split(",").map(x => x.trim());
-            if (!/^S[MTZ]$/.test(c[iSer] || "")) continue;
+            // every non-EQ series (SME stocks trade as SM / ST / SZ and similar); the app only looks up SME symbols
+            const ser = c[iSer] || ""; if (!ser || ser === "EQ") continue;
             const v = parseFloat(c[iC]); if (!c[iS] || !(v > 0)) continue;
-            closes[c[iS]] = v; date = date || parseNseDate(c[iD]);
+            if (!(c[iS] in closes) || /^S/.test(ser)) closes[c[iS]] = v;
+            date = date || parseNseDate(c[iD]);
           }
           return date ? { date, closes } : null;
         }, started);
