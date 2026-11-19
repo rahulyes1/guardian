@@ -48,20 +48,22 @@ async function main() {
 
   // ── NSE truth ── (no date given and nothing for today → audit the latest session)
   let idxFile = await get(`https://nsearchives.nseindia.com/content/indices/ind_close_all_${nseFileDate(DAY)}.csv`);
-  if (idxFile.status === 404 && !process.env.AUDIT_DATE) {
+  // NSE answers a file that isn't published yet with 404 or 403 — fall back to the latest session that exists
+  const missing = (st) => st === 404 || st === 403;
+  if (missing(idxFile.status) && !process.env.AUDIT_DATE) {
     for (const d of recentWeekdays(Date.now() - 86400000, 6)) {
       const r = await get(`https://nsearchives.nseindia.com/content/indices/ind_close_all_${nseFileDate(d)}.csv`);
       if (r.status === 200) { note(`No NSE file for ${DAY}; auditing the latest session, ${d}`); DAY = d; idxFile = r; break; }
     }
   }
-  if (idxFile.status === 404) {
+  if (missing(idxFile.status)) {
     const { dow, mins } = istParts();
     const msg = `NSE has no index close file for ${DAY} (weekend, holiday, or not published yet) — nothing to audit.`;
     if (dow >= 1 && dow <= 5 && mins > 20 * 60 && !process.env.AUDIT_DATE) warn(msg + " If today was a trading day, NSE is late.");
     else note(msg);
     return;
   }
-  if (idxFile.status !== 200) { fail(`Could not download NSE index close file: ${idxFile.error}`); return; }
+  if (idxFile.status !== 200) { fail(`Could not download NSE index close file: ${idxFile.error || "HTTP " + idxFile.status}`); return; }
   const nseIdx = parseIndexCloseCsv(idxFile.body);
   const bhavRes = await get(`https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_${nseFileDate(DAY)}.csv`, { timeout: 60000 });
   const bhav = bhavRes.status === 200 ? parseBhavFullCsv(bhavRes.body) : null;
