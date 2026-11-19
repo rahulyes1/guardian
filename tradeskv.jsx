@@ -8098,7 +8098,7 @@ export default function App() {
     <div style={{ maxWidth: 480, margin: "0 auto", minHeight: "100vh", background: "var(--bg)", position: "relative" }}>
       <GlobalStyle />
       <TopBar regime={regime} portfolio={portfolio} page={page} indicesData={indicesTicker} onSearch={() => setSearchOpen(true)} />
-      <SearchSheet open={searchOpen} onClose={() => setSearchOpen(false)} onOpenStock={openStock} onOpenFund={openFund} onOpenIpos={openIpos} onOpenMovers={() => openSub("movers")} />
+      <SearchSheet open={searchOpen} onClose={() => setSearchOpen(false)} onOpenStock={openStock} onOpenFund={openFund} onOpenIpos={openIpos} />
       <NiftyStrip data={indicesTicker} />
 
       {page === "today" && (
@@ -8128,7 +8128,7 @@ export default function App() {
         </div>
       )}
       {page === "scan" && (
-        <ScanPage onPickStock={openStock} watchlist={watchlist} setWatchlist={setWatchlist} onOpenIpos={openIpos} />
+        <ScanPage onPickStock={openStock} watchlist={watchlist} setWatchlist={setWatchlist} onOpenIpos={openIpos} onOpenMovers={() => openSub("movers")} />
       )}
       {page === "quadrant" && (
         <MarketQuadrantPage onPickStock={openStock} />
