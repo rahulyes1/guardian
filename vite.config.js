@@ -12,5 +12,16 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
+    rollupOptions: {
+      output: {
+        // Libraries change rarely: their own files stay cached across app deploys
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (/[\\/](react|react-dom|scheduler)[\\/]/.test(id)) return "react";
+          if (id.includes("@supabase")) return "supabase";
+          return undefined;
+        },
+      },
+    },
   },
 });

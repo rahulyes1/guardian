@@ -50,6 +50,13 @@
       "dest": "api/index.py"
     },
     {
+      "src": "/assets/(.*)",
+      "headers": {
+        "cache-control": "public, max-age=31536000, immutable"
+      },
+      "continue": true
+    },
+    {
       "src": "/(.*)",
       "dest": "/$1"
     }
