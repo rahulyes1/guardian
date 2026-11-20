@@ -158,7 +158,9 @@ async function ter(names) {
       const t = latest[k];
       if (t && (Number.isFinite(t.d) || Number.isFinite(t.r))) { out[code] = [Number.isFinite(t.d) ? t.d : null, Number.isFinite(t.r) ? t.r : null]; hit++; }
     }
-    const maxSerial = Math.max(...Object.values(latest).map((t) => t.date));
+    // newest TER day, ignoring the odd row AMFI dates in the future
+    const todaySerial = Math.floor((Date.now() + 19800000) / 864e5) + 25569;
+    const maxSerial = Math.max(...Object.values(latest).map((t) => t.date).filter((d) => d <= todaySerial));
     const date = Number.isFinite(maxSerial) ? new Date(Date.UTC(1899, 11, 30) + maxSerial * 864e5).toISOString().slice(0, 10) : null; // Excel day number → ISO
     log(`ter: ${month} (to ${date}), ${Object.keys(latest).length} schemes, matched ${hit} plan codes`);
     if (hit) return { ter: out, month, date };
