@@ -188,6 +188,18 @@ export function monthsOf(rows) {
   }
   return out;
 }
+/** Full calendar-year returns (%), last 10 years: { 2024: 18.2, ... } — part years left out. Exported for tests. */
+export function fullYears(months) {
+  const byYear = {};
+  for (const [ym, first, last] of months) { const y = ym.slice(0, 4); (byYear[y] ||= { start: null, last: null, startM: ym, endM: ym }); byYear[y].last = last; byYear[y].endM = ym; }
+  const ys = Object.keys(byYear).sort(), out = {};
+  for (let i = 1; i < ys.length; i++) {
+    const y = ys[i], prev = byYear[ys[i - 1]];
+    if (prev.endM !== `${ys[i - 1]}-12` || byYear[y].endM !== `${y}-12`) continue;
+    out[y] = Math.round((byYear[y].last / prev.last - 1) * 1000) / 10;
+  }
+  return Object.fromEntries(Object.entries(out).slice(-10));
+}
 /** Every fall of 10% or more since launch: peak, trough, depth, and when it got back to the peak. Exported for tests. */
 export function fallsOf(rows) {
   const out = [];
@@ -276,7 +288,8 @@ export default async function handler(req, res) {
         let r = await get(MFAPI + f[0], { json: true, timeout: 5000 });
         if (r.status !== 200 && Date.now() < started + 7000) { await new Promise(res => setTimeout(res, 400)); r = await get(MFAPI + f[0], { json: true, timeout: 4000 }); }
         const st = r.status === 200 ? fundStats(r.body?.data, [f[5], f[4]]) : null;
-        return st ? { code: f[0], name: f[1], house: f[2], nav: st.nav, date: st.date, chg: st.chg, m1: st.ret.m1, m3: st.ret.m3, y1: st.ret.y1, y3: st.ret.y3, y5: st.ret.y5, vol: st.vol, dd: st.maxDD.pct, since: st.since }
+        const yrs = st ? fullYears(monthsOf(r.body.data.map(x => [dmyDate(x.date), parseFloat(x.nav)]).filter(([d, v]) => d && v > 0).sort((a, b) => (a[0] < b[0] ? -1 : 1)))) : null;
+        return st ? { code: f[0], name: f[1], house: f[2], nav: st.nav, date: st.date, chg: st.chg, m1: st.ret.m1, m3: st.ret.m3, y1: st.ret.y1, y3: st.ret.y3, y5: st.ret.y5, vol: st.vol, dd: st.maxDD.pct, since: st.since, yrs }
           : { code: f[0], name: f[1], house: f[2], nav: f[4], date: f[5], missing: true };
       }, started + 8500);
       const out = rows.map((x, i) => x || { code: picked[i][0], name: picked[i][1], house: picked[i][2], nav: picked[i][4], date: picked[i][5], missing: true });

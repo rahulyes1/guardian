@@ -6897,8 +6897,9 @@ function loadMfDeep(code) {
 const ymTxt = (ym) => { if (!ym) return "—"; const [y, m] = ym.split("-"); return `${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][+m - 1]} ${y}`; };
 const lakh = (v) => (v >= 1e7 ? `₹${(v / 1e7).toFixed(2)} Cr` : v >= 1e5 ? `₹${(v / 1e5).toFixed(2)} L` : `₹${Math.round(v).toLocaleString("en-IN")}`);
 
-function FundDeep({ code }) {
+function FundDeep({ code, cat }) {
   const [x, setX] = useState(null), [err, setErr] = useState(null);
+  const { ranks, size } = useYearRanks(code, cat);
   useEffect(() => { let alive = true; setX(null); setErr(null); loadMfDeep(code).then(v => alive && setX(v)).catch(e => alive && setErr(e.message)); return () => { alive = false; }; }, [code]);
   if (err) return <div className="card" style={{ marginBottom: 12, fontSize: 12, color: "var(--text3)" }}>Long-term history couldn't load ({err}).</div>;
   if (!x?.deep?.months) return <div className="card" style={{ marginBottom: 12 }}><div className="label" style={{ marginBottom: 6 }}>Since launch</div><Skeleton lines={5} /></div>;
@@ -6919,8 +6920,8 @@ function FundDeep({ code }) {
       </>)}
 
       {card("Every calendar year", <>
-        <div style={{ display: "grid", gridTemplateColumns: B ? "44px 1fr 56px 56px" : "44px 1fr 56px", columnGap: 6, rowGap: 3, fontSize: 11.5, alignItems: "center" }}>
-          <span style={{ fontSize: 9.5, color: "var(--text3)" }}>YEAR</span><span /><span style={{ fontSize: 9.5, color: "var(--text3)", textAlign: "right" }}>FUND</span>{B && <span style={{ fontSize: 9.5, color: "var(--text3)", textAlign: "right" }}>INDEX</span>}
+        <div style={{ display: "grid", gridTemplateColumns: `44px 1fr 52px${B ? " 50px" : ""}${ranks ? " 54px" : ""}`, columnGap: 6, rowGap: 3, fontSize: 11.5, alignItems: "center" }}>
+          <span style={{ fontSize: 9.5, color: "var(--text3)" }}>YEAR</span><span /><span style={{ fontSize: 9.5, color: "var(--text3)", textAlign: "right" }}>FUND</span>{B && <span style={{ fontSize: 9.5, color: "var(--text3)", textAlign: "right" }}>INDEX</span>}{ranks && <span style={{ fontSize: 9.5, color: "var(--text3)", textAlign: "right" }}>RANK</span>}
           {[...years].reverse().map(y => { const b = byB[y.year]; const won = b && !y.part && !b.part ? y.ret > b.ret : null; return (
             <Fragment key={y.year}>
               <span style={{ fontFamily: "var(--mono)", color: "var(--text2)" }}>{y.year}{y.part ? "*" : ""}</span>
@@ -6930,10 +6931,16 @@ function FundDeep({ code }) {
               </div>
               <span style={{ fontFamily: "var(--mono)", textAlign: "right", color: pctCol(y.ret), fontWeight: won ? 800 : 400 }}>{pctTxt(y.ret)}</span>
               {B && <span style={{ fontFamily: "var(--mono)", textAlign: "right", color: "var(--text3)" }}>{b ? pctTxt(b.ret) : "—"}</span>}
+              {ranks && (() => { const rk = ranks[y.year]; return <span title={rk ? `#${rk.rank} of ${rk.of} in its category` : ""} style={{ textAlign: "right", fontFamily: "var(--mono)", fontSize: 10.5 }}>{rk ? <><b style={{ color: Q_COL[rk.q] }}>Q{rk.q}</b> <span style={{ color: "var(--text3)" }}>{rk.rank}/{rk.of}</span></> : "—"}</span>; })()}
             </Fragment>
           ); })}
         </div>
         <div style={{ fontSize: 10.5, color: "var(--text3)", marginTop: 6 }}>* part year (launch year or year to date).{B && beatYears.length ? ` Beat the ${bName} index fund in ${beatN} of ${beatYears.length} full years (bold).` : ""}</div>
+        {ranks && Object.keys(ranks).length > 0 && (() => { const rs = Object.values(ranks), q1 = rs.filter(r => r.q === 1).length, q4 = rs.filter(r => r.q === 4).length, top = rs.filter(r => r.q <= 2).length; return (
+          <div style={{ fontSize: 11.5, color: "var(--text2)", marginTop: 6, lineHeight: 1.5 }}>Against every fund in its category: <b style={{ color: Q_COL[1] }}>top quarter in {q1}</b> of {rs.length} years, top half in {top}, <b style={{ color: q4 ? Q_COL[4] : "var(--text2)" }}>bottom quarter in {q4}</b>. Q1 = best 25% that year.</div>
+        ); })()}
+        {cat && size > 80 && <div style={{ fontSize: 10.5, color: "var(--text3)", marginTop: 4 }}>Yearly ranks aren't shown for very large categories ({size} funds).</div>}
+        {cat && size <= 80 && !ranks && <div style={{ fontSize: 10.5, color: "var(--text3)", marginTop: 4 }}>Loading where it ranked in its category each year…</div>}
       </>)}
 
       {card("Month by month", <>
@@ -7006,6 +7013,153 @@ function FundDeep({ code }) {
   );
 }
 
+// ─── Category history (all pages) for yearly ranks ───────────────────────────
+function loadCategoryAll(cat) {
+  const c = _mfCat.get(cat);
+  if (c?.done && c.rows.every(r => r.missing || r.yrs !== undefined)) return Promise.resolve(c.rows);
+  const key = "__all_" + cat;
+  if (_mfCat.get(key)) return _mfCat.get(key);
+  const p = (async () => {
+    let rows = [], offset = 0;
+    for (;;) {
+      const j = await fetch(`/api/mf?type=cat&cat=${encodeURIComponent(cat)}&offset=${offset}`).then(r => (r.ok ? r.json() : Promise.reject(new Error("Category data unavailable"))));
+      rows = [...rows, ...j.funds]; offset += j.shown;
+      if (!j.more) break;
+    }
+    _mfCat.set(cat, { rows, total: rows.length, done: true });
+    return rows;
+  })().catch(e => { _mfCat.delete(key); throw e; });
+  _mfCat.set(key, p);
+  return p;
+}
+/** Where a fund ranked in its category each full calendar year. */
+function useYearRanks(code, cat) {
+  const { data: list } = useMfList();
+  const [ranks, setRanks] = useState(null);
+  const size = list && cat ? list.funds.filter(f => list.cats[f[3]] === cat).length : null;
+  useEffect(() => {
+    let alive = true; setRanks(null);
+    if (!cat || !size || size > 80) return;
+    loadCategoryAll(cat).then(rows => {
+      if (!alive) return;
+      const out = {};
+      const years = new Set(rows.flatMap(r => Object.keys(r.yrs || {})));
+      for (const y of years) {
+        const xs = rows.filter(r => r.yrs?.[y] != null).sort((a, b) => b.yrs[y] - a.yrs[y]);
+        const i = xs.findIndex(r => r.code === code);
+        if (i >= 0 && xs.length >= 4) out[y] = { rank: i + 1, of: xs.length, q: Math.min(4, Math.ceil(((i + 1) / xs.length) * 4)) };
+      }
+      setRanks(out);
+    }).catch(() => alive && setRanks({}));
+    return () => { alive = false; };
+  }, [code, cat, size]);
+  return { ranks, size };
+}
+const Q_COL = { 1: C.pos, 2: C.lime, 3: C.warn, 4: C.neg };
+
+// ─── FUND vs FUND ────────────────────────────────────────────────────────────
+function FundComparePage({ codes, setCodes, onOpenFund }) {
+  const { data: list } = useMfList();
+  const [deep, setDeep] = useState({});
+  const [q, setQ] = useState("");
+  const [range, setRange] = useState(5);
+  const [sip, setSip] = useState("10000");
+  useEffect(() => { let alive = true; for (const c of codes) if (!deep[c]) loadMfDeep(c).then(x => alive && setDeep(p => ({ ...p, [c]: x }))).catch(() => {}); return () => { alive = false; }; }, [codes.join(",")]);
+  const COL = ["#3B82F6", C.pos, "#D9632B"];
+  const ql = q.trim().toLowerCase();
+  const hits = ql.length >= 2 && list ? list.funds.filter(f => f[1].toLowerCase().includes(ql) || f[2].toLowerCase().includes(ql)).slice(0, 6) : [];
+  const ready = codes.filter(c => deep[c]?.deep?.months?.length);
+  const nameOf = (c) => (deep[c]?.meta?.scheme_name || list?.funds.find(f => f[0] === c)?.[1] || String(c)).replace(/\s*-\s*direct.*$/i, "");
+  const short = (c) => nameOf(c).replace(/\s+(Fund|Scheme)$/i, "").split(" ").slice(0, 3).join(" ");
+  // common window for the chart and "since common start"
+  const lastYm = ready.length ? ready.map(c => deep[c].deep.months.at(-1)[0]).sort()[0] : null;
+  const firstCommon = ready.length ? ready.map(c => deep[c].deep.months[0][0]).sort().at(-1) : null;
+  const rangeStart = lastYm ? (() => { if (range === 0) return firstCommon; const [y, m] = lastYm.split("-").map(Number); const t = y * 12 + (m - 1) - range * 12; const s = `${Math.floor(t / 12)}-${String((t % 12) + 1).padStart(2, "0")}`; return s > firstCommon ? s : firstCommon; })() : null;
+  const series = ready.map(c => { const ms = deep[c].deep.months.filter(m => m[0] >= rangeStart && m[0] <= lastYm); const base = ms[0]?.[1]; return { c, pts: ms.map(m => [m[0], (m[2] / base) * 100]) }; });
+  const W = 340, H = 140, padR = 36, vals = series.flatMap(x => x.pts.map(p => p[1]));
+  const lo = Math.min(100, ...vals), hi = Math.max(100, ...vals), sp = hi - lo || 1;
+  const yy = (v) => 6 + (1 - (v - lo) / sp) * (H - 12);
+  const path = (pts) => pts.map((p, i) => `${i ? "L" : "M"}${((i / Math.max(1, pts.length - 1)) * (W - padR)).toFixed(1)},${yy(p[1]).toFixed(1)}`).join("");
+  const stats = Object.fromEntries(ready.map(c => {
+    const x = deep[c], M = x.deep.months, B = x.deep.bench?.months || null;
+    return [c, { x, risk: riskStats(M, B), roll: rollingReturns(M, B, 3), years: Object.fromEntries(calendarYears(M).filter(y => !y.part).map(y => [y.year, y.ret])),
+      common: (() => { const s = sinceLaunch(M.filter(m => m[0] >= rangeStart)); return s?.cagr; })(), calc: investCalc(M, { sip: +sip || 0, start: rangeStart }) }];
+  }));
+  const best = (vals, low = false) => { const xs = vals.filter(v => v != null); if (!xs.length) return null; return low ? Math.min(...xs) : Math.max(...xs); };
+  const ROWS = [
+    ["Category", c => stats[c].x.cat?.split(" · ")[1] || "—", null],
+    ["1Y", c => stats[c].x.ret.y1, "hi", pctTxt], ["3Y /yr", c => stats[c].x.ret.y3, "hi", pctTxt], ["5Y /yr", c => stats[c].x.ret.y5, "hi", pctTxt], ["10Y /yr", c => stats[c].x.ret.y10, "hi", pctTxt],
+    [`Since ${ymTxt(rangeStart)} /yr`, c => stats[c].common, "hi", pctTxt],
+    ["Sharpe (3Y)", c => stats[c].risk?.sharpe, "hi"], ["Sortino (3Y)", c => stats[c].risk?.sortino, "hi"],
+    ["Volatility", c => stats[c].risk?.vol, "lo", v => `${v}%`], ["Beta*", c => stats[c].risk?.beta, null], ["Alpha* /yr", c => stats[c].risk?.alpha, "hi", pctTxt],
+    ["Up capture*", c => stats[c].risk?.upCapture, "hi", v => `${v}%`], ["Down capture*", c => stats[c].risk?.downCapture, "lo", v => `${v}%`],
+    ["Worst fall", c => stats[c].x.deep.falls?.[0]?.depth ?? null, "hi", v => `${v}%`],
+    ["Rolling 3Y typical", c => stats[c].roll?.median, "hi", pctTxt], ["Rolling 3Y worst", c => stats[c].roll?.min, "hi", pctTxt],
+    ["Beat its index (rolling)", c => stats[c].roll?.beat, "hi", v => `${v}%`], ["Positive months (3Y)", c => stats[c].risk?.posMonths, "hi", v => `${v}%`],
+  ];
+  const allYears = [...new Set(ready.flatMap(c => Object.keys(stats[c].years)))].sort((a, b) => b - a).slice(0, 10);
+  return (
+    <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
+      <div className="section-title">Compare funds</div>
+      <div style={{ fontSize: 13, color: "var(--text3)", margin: "4px 0 10px" }}>Up to 3 funds, side by side — returns, risk, every year and a SIP.</div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+        {codes.map((c, i) => <button key={c} className="chip chip-sm" onClick={() => setCodes(codes.filter(x => x !== c))} style={{ borderColor: COL[i], color: COL[i] }}>{short(c)} ✕</button>)}
+      </div>
+      {codes.length < 3 && <div style={{ marginBottom: 10 }}>
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder={codes.length ? "Add another fund" : "Add a fund — e.g. parag parikh, hdfc flexi"} aria-label="Add a fund to compare" style={{ width: "100%" }} />
+        {hits.map(f => <button key={f[0]} onClick={() => { setCodes([...new Set([...codes, f[0]])].slice(0, 3)); setQ(""); }} style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", borderTop: "1px solid var(--border)", padding: "8px 0", color: "var(--text)", cursor: "pointer", fontSize: 12.5 }}>{f[1]} <span style={{ color: "var(--text3)", fontSize: 10.5 }}>· {list.cats[f[3]]?.split(" · ")[1]}</span></button>)}
+      </div>}
+      {codes.length > ready.length && <div className="card" style={{ marginBottom: 12 }}><Skeleton lines={3} /></div>}
+      {ready.length > 0 && <>
+        <div className="card" style={{ marginBottom: 12 }}>
+          <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>{[[1, "1Y"], [3, "3Y"], [5, "5Y"], [0, "Max"]].map(([n, l]) => <button key={n} className="chip chip-sm" aria-pressed={range === n} onClick={() => setRange(n)}>{l}</button>)}<span style={{ flex: 1 }} /><span style={{ fontSize: 10.5, color: "var(--text3)", alignSelf: "center" }}>₹100 from {ymTxt(rangeStart)}</span></div>
+          <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: "block" }} role="img" aria-label="Growth of the compared funds">
+            <line x1="0" x2={W - padR} y1={yy(100)} y2={yy(100)} stroke="var(--border)" strokeDasharray="3 3" />
+            {series.map(x => <path key={x.c} d={path(x.pts)} fill="none" stroke={COL[codes.indexOf(x.c)]} strokeWidth="1.8" />)}
+            {series.map(x => { const v = x.pts.at(-1)?.[1]; return v ? <text key={x.c} x={W - padR + 3} y={yy(v) + 3} fontSize="9" fill={COL[codes.indexOf(x.c)]} fontFamily="var(--mono)">{Math.round(v)}</text> : null; })}
+          </svg>
+        </div>
+        <div className="card" style={{ marginBottom: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: `minmax(92px, 1.3fr) repeat(${ready.length}, minmax(0, 1fr))`, gap: "5px 8px", fontSize: 11.5 }}>
+            <span />{ready.map(c => <button key={c} onClick={() => onOpenFund(c)} style={{ background: "none", border: "none", padding: 0, color: COL[codes.indexOf(c)], fontWeight: 800, cursor: "pointer", textAlign: "right", font: "inherit", fontSize: 11 }}>{short(c)}</button>)}
+            {ROWS.map(([l, get, dir, fmt]) => { const vs = ready.map(get), b = dir ? best(vs, dir === "lo") : null; return (
+              <Fragment key={l}><span style={{ color: "var(--text3)", fontSize: 10.5 }}>{l}</span>
+                {ready.map((c, i) => <span key={c} style={{ fontFamily: "var(--mono)", textAlign: "right", fontWeight: b != null && vs[i] === b && ready.length > 1 ? 800 : 400, color: b != null && vs[i] === b && ready.length > 1 ? C.pos : "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{vs[i] == null ? "—" : fmt ? fmt(vs[i]) : vs[i]}</span>)}
+              </Fragment>
+            ); })}
+          </div>
+          <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>Best in each row in green. * vs each fund's own category index fund.</div>
+        </div>
+        {allYears.length > 0 && <div className="card" style={{ marginBottom: 12 }}>
+          <div className="label" style={{ marginBottom: 6 }}>Every calendar year</div>
+          <div style={{ display: "grid", gridTemplateColumns: `48px repeat(${ready.length}, minmax(0, 1fr))`, gap: "4px 8px", fontSize: 11.5, fontFamily: "var(--mono)" }}>
+            <span />{ready.map(c => <span key={c} style={{ textAlign: "right", color: COL[codes.indexOf(c)], fontFamily: "var(--body)", fontWeight: 700, fontSize: 10.5 }}>{short(c)}</span>)}
+            {allYears.map(y => { const vs = ready.map(c => stats[c].years[y] ?? null), b = best(vs); return (
+              <Fragment key={y}><span style={{ color: "var(--text2)" }}>{y}</span>{ready.map((c, i) => <span key={c} style={{ textAlign: "right", color: pctCol(vs[i]), fontWeight: vs[i] === b && ready.length > 1 ? 800 : 400 }}>{vs[i] == null ? "—" : pctTxt(vs[i])}</span>)}</Fragment>
+            ); })}
+          </div>
+          {ready.length > 1 && <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 6 }}>{ready.map(c => `${short(c)} best in ${allYears.filter(y => { const vs = ready.map(z => stats[z].years[y] ?? null); return vs.every(v => v != null) && stats[c].years[y] === best(vs); }).length}`).join(" · ")} (years all had)</div>}
+        </div>}
+        <div className="card">
+          <div className="label" style={{ marginBottom: 6 }}>SIP from {ymTxt(rangeStart)}</div>
+          <label style={{ fontSize: 10.5, color: "var(--text3)" }}>₹ per month<input type="number" value={sip} onChange={e => setSip(e.target.value)} style={{ width: "100%", marginTop: 3, marginBottom: 8 }} /></label>
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(${ready.length}, minmax(0, 1fr))`, gap: 8 }}>
+            {ready.map(c => { const r = stats[c].calc; return (
+              <div key={c} style={{ border: `1.5px solid ${COL[codes.indexOf(c)]}`, borderRadius: 10, padding: "6px 8px", minWidth: 0 }}>
+                <div style={{ fontSize: 10, color: "var(--text3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{short(c)}</div>
+                <div style={{ fontFamily: "var(--mono)", fontSize: 15, fontWeight: 800 }}>{r ? lakh(r.value) : "—"}</div>
+                <div style={{ fontSize: 10.5, color: pctCol(r?.xirr) }}>{r?.xirr != null ? `${pctTxt(r.xirr)}/yr` : ""}</div>
+              </div>
+            ); })}
+          </div>
+          {ready[0] && stats[ready[0]].calc && <div style={{ fontSize: 10.5, color: "var(--text3)", marginTop: 6 }}>{lakh(stats[ready[0]].calc.invested)} invested over {stats[ready[0]].calc.months} months in each.</div>}
+        </div>
+      </>}
+      {!codes.length && <div style={{ fontSize: 12, color: "var(--text3)" }}>Add 2–3 funds above, or tap Compare on any fund page.</div>}
+    </div>
+  );
+}
+
 function FundCalc({ M, B, bName }) {
   const def = M[Math.max(0, M.length - 61)][0];
   const [sip, setSip] = useState("10000"), [lump, setLump] = useState(""), [start, setStart] = useState(def), [step, setStep] = useState("0");
@@ -7066,7 +7220,7 @@ function FundVsIndex({ d, code }) {
   );
 }
 
-function FundPage({ code, onBack }) {
+function FundPage({ code, onBack, onCompare }) {
   const [d, setD] = useState(null), [err, setErr] = useState(null);
   const [range, setRange] = useState(3);
   const [watch, toggleWatch] = useMfWatch();
@@ -7107,7 +7261,10 @@ function FundPage({ code, onBack }) {
           <span style={{ fontFamily: "var(--mono)", fontSize: 13, color: pctCol(d.chg) }}>{pctTxt(d.chg, 2)}</span>
           <span style={{ fontSize: 11, color: "var(--text3)" }}>NAV {mqFmtDate(d.date)} (prev {mqFmtDate(d.prevDate)})</span>
         </div>
-        <button className="chip" aria-pressed={watching} onClick={() => toggleWatch(code)} style={{ marginTop: 10 }}>{watching ? "★ Tracking" : "☆ Track this fund"}</button>
+        <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+          <button className="chip" aria-pressed={watching} onClick={() => toggleWatch(code)}>{watching ? "★ Tracking" : "☆ Track this fund"}</button>
+          {onCompare && <button className="chip" onClick={() => onCompare(code)}>Compare with other funds ›</button>}
+        </div>
 
         <div style={{ display: "flex", gap: 6, margin: "14px 0 6px" }}>
           {[1, 3, 5, 10].map(n => <button key={n} className="chip chip-sm" aria-pressed={range === n} onClick={() => setRange(n)}>{n}Y</button>)}
@@ -7150,7 +7307,7 @@ function FundPage({ code, onBack }) {
         )}
       </div>
 
-      <FundDeep code={code} />
+      <FundDeep code={code} cat={d.cat} />
       <div style={{ fontSize: 10, color: "var(--text3)", lineHeight: 1.5 }}>NAV from AMFI; history since {mqFmtDate(d.since)} {d.since?.slice(0, 4)} from mfapi.in. Returns exclude exit loads and taxes. Information, not advice.</div>
     </div>
   );
@@ -8111,7 +8268,7 @@ const NAV_GROUP = {
   today: "today", wrap: "today",
   ideas: "stocks", scan: "stocks", movers: "stocks", watch: "stocks",
   quadrant: "market",
-  funds: "invest", fund: "invest", ipos: "invest",
+  funds: "invest", fund: "invest", ipos: "invest", fundcmp: "invest",
   journal: "journal", playbook: "journal",
 };
 const NAV_DEFAULT = { today: "today", stocks: "ideas", market: "quadrant", invest: "funds", journal: "journal" };
@@ -8155,7 +8312,7 @@ function SegBar({ items, active, onPick }) {
   );
 }
 const STOCKS_SEGS = [["ideas", "Ideas"], ["scan", "Scans"], ["movers", "Movers"], ["watch", "Watchlist"]];
-const INVEST_SEGS = [["funds", "Mutual funds"], ["ipos", "IPOs"]];
+const INVEST_SEGS = [["funds", "Mutual funds"], ["fundcmp", "Compare"], ["ipos", "IPOs"]];
 const JOURNAL_SEGS = [["journal", "Trades"], ["review", "Review"], ["stats", "Stats"], ["setups", "Setups"]];
 
 /** Top-bar menu: portfolio value, theme, tour, how the app works. */
@@ -8209,6 +8366,9 @@ export default function App() {
   const [stockSym, setStockSym] = useState(null);     // stock detail page
   const [fundCode, setFundCode] = useState(null);     // mutual fund detail page
   const [fundBack, setFundBack] = useState("funds");
+  const [fundCmp, setFundCmp] = useState(() => { try { return JSON.parse(localStorage.getItem("td_fund_cmp") || "[]"); } catch (_) { return []; } });
+  const setFundCmpSaved = (xs) => { setFundCmp(xs); try { localStorage.setItem("td_fund_cmp", JSON.stringify(xs)); } catch (_) {} };
+  const openFundCompare = (code) => { setFundCmpSaved([...new Set([...fundCmp, code])].slice(-3)); setPage("fundcmp"); window.scrollTo(0, 0); };
   const openFund = (code) => { setFundCode(code); if (page !== "fund") setFundBack(page); setPage("fund"); window.scrollTo(0, 0); };
   const [ipoBack, setIpoBack] = useState("today");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -8276,7 +8436,7 @@ export default function App() {
       <SearchSheet open={searchOpen} onClose={() => setSearchOpen(false)} onOpenStock={openStock} onOpenFund={openFund} onOpenIpos={openIpos} />
       <NiftyStrip data={indicesTicker} />
       {NAV_GROUP[page] === "stocks" && <SegBar items={STOCKS_SEGS} active={page} onPick={(k) => { setPage(k); window.scrollTo(0, 0); }} />}
-      {(page === "funds" || page === "ipos") && <SegBar items={INVEST_SEGS} active={page} onPick={(k) => { setPage(k); window.scrollTo(0, 0); }} />}
+      {(page === "funds" || page === "ipos" || page === "fundcmp") && <SegBar items={INVEST_SEGS} active={page} onPick={(k) => { setPage(k); window.scrollTo(0, 0); }} />}
       {(page === "journal" || page === "playbook") && <SegBar items={JOURNAL_SEGS} active={page === "journal" ? "journal" : pbSub}
         onPick={(k) => { if (k === "journal") setPage("journal"); else { choosePbSub(k); setPage("playbook"); } window.scrollTo(0, 0); }} />}
 
@@ -8323,7 +8483,8 @@ export default function App() {
       {page === "ipos" && <IposPage onOpenStock={openStock} />}
       {page === "wrap" && <WrapPage trades={realTrades} watchlist={watchlist} indices={indicesTicker} onBack={() => { setPage("today"); window.scrollTo(0, 0); }}
         onOpenStock={openStock} onOpenFunds={() => { setPage("funds"); window.scrollTo(0, 0); }} onOpenQuad={() => { setPage("quadrant"); window.scrollTo(0, 0); }} />}
-      {page === "fund" && fundCode && <FundPage code={fundCode} onBack={() => { setPage(fundBack); window.scrollTo(0, 0); }} />}
+      {page === "fund" && fundCode && <FundPage code={fundCode} onBack={() => { setPage(fundBack); window.scrollTo(0, 0); }} onCompare={openFundCompare} />}
+      {page === "fundcmp" && <FundComparePage codes={fundCmp} setCodes={setFundCmpSaved} onOpenFund={openFund} />}
       {page === "stock" && stockSym && (
         <StockPage symbol={stockSym} onBack={() => setPage(stockBack || "scan")} onPlan={pickStock} watchlist={watchlist} setWatchlist={setWatchlist} trades={trades} onCompare={openCompare} />
       )}

@@ -63,3 +63,9 @@ test("fund stats: returns, SIP, drawdown and AMFI's newer NAV appended", () => {
   assert.ok(s.sip.y5.xirr > 5 && s.sip.y5.xirr < 20, `xirr ${s.sip.y5.xirr}`);
   assert.ok(s.series.length > 250);
 });
+
+test("full calendar years only (part years left out)", async () => {
+  const { fullYears } = await import("../api/mf.js");
+  const months = [["2023-06", 10, 10], ["2023-12", 10, 12], ["2024-01", 12, 12], ["2024-12", 12, 15], ["2025-12", 15, 18], ["2026-03", 18, 20]];
+  assert.deepEqual(fullYears(months), { 2024: 25, 2025: 20 });
+});
