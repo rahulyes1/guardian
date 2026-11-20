@@ -1,0 +1,47 @@
+name: Monthly fund facts (AMFI expense ratios, AUM, category flows)
+
+# Rebuilds public/fund_facts.json from AMFI and commits it; the commit redeploys the app on Vercel.
+#   - category net inflows: AMFI's monthly report (out by about the 10th)
+#   - expense ratios (TER): AMFI's daily TER disclosure, one Excel file per month
+#   - AUM: AMFI's quarterly average AUM per scheme
+# Only public/fund_facts.json is ever committed. Run it by hand from the Actions tab any time.
+on:
+  schedule:
+    - cron: "30 3 12 * *"   # 09:00 IST on the 12th — after AMFI's monthly report
+    - cron: "30 3 26 * *"   # mid-month refresh for expense-ratio changes
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fund-facts
+  cancel-in-progress: false
+
+jobs:
+  fund-facts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build fund_facts.json from AMFI
+        run: node scripts/fund-facts.mjs
+      - name: Check the file before committing
+        run: |
+          node -e "
+          const j = JSON.parse(require('fs').readFileSync('public/fund_facts.json', 'utf8'));
+          const n = (o) => Object.keys(o || {}).length;
+          console.log('ter', n(j.ter), 'aum', n(j.aum), 'flow months', j.flows?.months?.length);
+          if (n(j.ter) < 800 || n(j.aum) < 800 || !(j.flows?.months?.length >= 6)) { console.error('Fund facts look incomplete — not committing.'); process.exit(1); }"
+      - name: Commit if changed
+        run: |
+          if git diff --quiet -- public/fund_facts.json; then echo "No change."; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/fund_facts.json
+          git commit -m "data: AMFI fund facts $(date -u +%Y-%m-%d)"
+          git pull --rebase origin main
+          git push origin HEAD:main

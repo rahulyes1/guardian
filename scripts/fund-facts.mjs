@@ -1,4 +1,4 @@
-// Builds public/fund_facts.json from AMFI (run by hand each month: node scripts/fund-facts.mjs):
+// Builds public/fund_facts.json from AMFI (run monthly by .github/workflows/fund-facts.yml, or by hand):
 //   ter   { amfiCode: [directTER, regularTER] }   — expense ratio % (latest day AMFI lists this month)
 //   aum   { amfiCode: ₹ crore }                   — the whole scheme's quarterly average AUM (all plans together)
 //   flows { months: ["2025-11", ...], groups: [{ name, cats: [{ name, net: [₹ cr per month], aum }] }] } — AMFI monthly report
