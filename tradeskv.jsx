@@ -1222,7 +1222,7 @@ function PriceBadge({ info, loading }) {
 }
 
 // ─── TOP BAR ────────────────────────────────────────────────────────────────
-function TopBar({ regime, portfolio, page, indicesData, onSearch }) {
+function TopBar({ regime, portfolio, page, indicesData, onSearch, onMenu }) {
   // The chip shows the same verdict as every other screen: the market signal (bias is one of its four readings)
   const { data: mq } = useMarketQuadrant();
   const sig = mq?.overall;
@@ -1308,14 +1308,14 @@ function TopBar({ regime, portfolio, page, indicesData, onSearch }) {
       {onSearch && <button onClick={onSearch} aria-label="Search stocks, funds and IPOs" title="Search" style={{ background: "none", border: "1px solid var(--border)", borderRadius: 10, width: 36, height: 36, display: "inline-flex", alignItems: "center", justifyContent: "center", color: "var(--text2)", cursor: "pointer", flexShrink: 0 }}>
         <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
       </button>}
-      <div style={{
+      <button onClick={onMenu} aria-label="Menu: trading capital, settings, tour" title="Menu" style={{
         background: "var(--bg3)", border: "1px solid var(--border2)",
-        borderRadius: 10, padding: "5px 10px",
+        borderRadius: 10, padding: "5px 10px", minHeight: 36, cursor: "pointer",
         fontFamily: "var(--mono)", fontSize: 12, color: "var(--text)",
-        flexShrink: 0,
+        flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 6,
       }}>
-        {formatINR(portfolio)}
-      </div>
+        {formatINR(portfolio)}<span aria-hidden="true" style={{ color: "var(--text3)" }}>☰</span>
+      </button>
     </div>
   );
 }
@@ -1391,10 +1391,9 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
     <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
       {/* 1 · Market — signal, environment, today's rule, what changed */}
       <SectionBoundary name="Market brief">
-        <MarketBrief onOpenQuad={() => setPage("quadrant")} onOpenScan={() => setPage("scan")} />
+        {isPreOpen() ? <MorningBrief trades={trades} watchlist={watchlist} onOpenStock={onOpenStock} />
+          : <MarketBrief onOpenQuad={() => { setPage("quadrant"); window.scrollTo(0, 0); }} onOpenScan={() => { setPage("ideas"); window.scrollTo(0, 0); }} onOpenWrap={() => { setPage("wrap"); window.scrollTo(0, 0); }} />}
       </SectionBoundary>
-      {isPreOpen() ? <SectionBoundary name="Morning brief"><MorningBrief trades={trades} watchlist={watchlist} onOpenStock={onOpenStock} /></SectionBoundary>
-        : <WrapEntry onOpen={() => { setPage("wrap"); window.scrollTo(0, 0); }} />}
 
       {/* 2 · Your book — what needs action first */}
       <SectionBoundary name="Your positions">
@@ -1449,15 +1448,16 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
       </SectionBoundary>
 
       {/* 3 · Best setups for today, sized for the current rule */}
-      <SectionBoundary name="Mutual funds"><FundsTodayCard onOpen={() => { setPage("funds"); window.scrollTo(0, 0); }} onOpenFund={onOpenFund} /></SectionBoundary>
-      <SectionBoundary name="IPOs"><IpoTodayCard onOpen={onOpenIpos} /></SectionBoundary>
       <SectionBoundary name="Best setups">
-        <BestSetups watchlist={watchlist} portfolio={portfolio} onOpenStock={onOpenStock} onPlan={onPlan} onSeeAll={() => setPage("ideas")} />
+        <BestSetups watchlist={watchlist} portfolio={portfolio} onOpenStock={onOpenStock} onPlan={onPlan} onSeeAll={() => { setPage("ideas"); window.scrollTo(0, 0); }} />
       </SectionBoundary>
-      <Fold id="today_more" title="More for today" sub="Watchlist alerts, global markets and how the app works">
-        <SectionBoundary name="Watchlist alerts"><WatchAlertsCard watchlist={watchlist} onOpen={onOpenStock} /></SectionBoundary>
+      <SectionBoundary name="Watchlist moves"><WatchAlertsCard watchlist={watchlist} onOpen={onOpenStock} /></SectionBoundary>
+      {!isMarketHours() && <>
+        <SectionBoundary name="Mutual funds"><FundsTodayCard onOpen={() => { setPage("funds"); window.scrollTo(0, 0); }} onOpenFund={onOpenFund} /></SectionBoundary>
+        <SectionBoundary name="IPOs"><IpoTodayCard onOpen={onOpenIpos} /></SectionBoundary>
+      </>}
+      <Fold id="today_more" title="Global markets" sub="US futures, Asia, crude, gold and the rupee">
         <SectionBoundary name="Global markets"><GlobalBrief /></SectionBoundary>
-        <Guide id="app" />
       </Fold>
     </div>
   );
@@ -3164,7 +3164,9 @@ function MqLeaders({ leaders, sector, onClear, onPickStock }) {
 function MarketQuadrantPage({ onPickStock }) {
   const { data, loading, refreshing, error, progress, refresh, retry } = useMarketQuadrant();
   const [sector, setSector] = useState(null); // tapped sector → its stocks shown first
-  const header = <div style={{ fontSize: 11, color: "var(--text3)", letterSpacing: "0.15em", marginBottom: 16, fontWeight: 700 }}>MARKET QUADRANT</div>;
+  const header = <div className="section-title" style={{ marginBottom: 10 }}>Market</div>;
+  const [mseg, setMseg] = useState(() => { try { return localStorage.getItem("td_market_seg") || "signal"; } catch (_) { return "signal"; } });
+  const pickM = (k) => { setMseg(k); try { localStorage.setItem("td_market_seg", k); } catch (_) {} window.scrollTo(0, 0); };
 
   if (loading && !data?.history) return (
     <div className="fade-in" style={{ padding: "20px 16px 100px" }}>
@@ -3214,7 +3216,10 @@ function MarketQuadrantPage({ onPickStock }) {
         </div>
       )}
 
-      <QuadJumpBar />
+      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        {[["signal", "Signal"], ["breadth", "Breadth"], ["sectors", "Sectors"], ["flows", "Money flow"]].map(([k, l]) => <button key={k} className="chip" aria-pressed={mseg === k} onClick={() => pickM(k)} style={{ flex: "1 0 auto" }}>{l}</button>)}
+      </div>
+      {mseg === "signal" && <>
       <div id="q-signal" style={{ scrollMarginTop: 100 }}><Guide id="signal" d={data} compact /></div>
       {/* ── Overall Signal ── */}
       <div style={{ background: sigBg, border: `1px solid ${sigColor}33`, borderRadius: 18, padding: "20px 16px", marginBottom: 14, textAlign: "center" }}>
@@ -3284,6 +3289,8 @@ function MarketQuadrantPage({ onPickStock }) {
       <MqEnvironment data={data} />
       <MqGreenLight gl={data.green_light} long={data.long_bt} />
       <MqFollowThrough data={data} />
+      </>}
+      {mseg === "breadth" && <>
       <QuadSection id="breadth" title="Breadth" d={data} />
       <MqBreadthChart history={h} />
 
@@ -3327,6 +3334,8 @@ function MarketQuadrantPage({ onPickStock }) {
 
       <MqMbi mbi={data.mbi} dip={data.dip} long={data.long_bt} />
       <MqMarketMonitor mm={data.market_monitor} />
+      </>}
+      {mseg === "sectors" && <>
       <QuadSection id="sectors" title="Sectors & themes" d={data} />
       <SectionBoundary name="Sector funds"><MqSectorFunds sectors={data.sectors} /></SectionBoundary>
       <MqSectorGrid sectors={data.sectors} sectorStocks={data.sector_stocks} selected={sector} onSelect={setSector} onPickStock={onPickStock} />
@@ -3335,9 +3344,13 @@ function MarketQuadrantPage({ onPickStock }) {
       <MqThemes themes={data.themes} onPickStock={onPickStock} />
       <MqLeaders leaders={sector ? data.leaders.filter(l => l.sector === sector) : data.leaders} sector={sector} onClear={() => setSector(null)} onPickStock={onPickStock} />
 
-      <QuadSection id="flows" title="Institutions" d={data} />
+      </>}
+      {mseg === "flows" && <>
+      <QuadSection id="flows" title="Money flow" d={data} />
       <MqFlowsDeals data={data} onPickStock={onPickStock} />
       <EtfPanel lockout={data.environment?.lockout} onPickStock={onPickStock} />
+      </>}
+      {mseg === "signal" && <>
       {/* ── To Upgrade ── */}
       {data.to_upgrade?.length > 0 && (
         <div style={mqCardStyle}>
@@ -3376,6 +3389,7 @@ function MarketQuadrantPage({ onPickStock }) {
         <MqExitRules rows={data.long_bt?.exit_bt} from={data.long_bt?.from} />
       </Fold>
 
+      </>}
       {/* ── Footer: refresh + timestamp ── */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
         <button className="btn-ghost" style={{ fontSize: 12, padding: "8px 14px" }} onClick={refresh} disabled={refreshing}>
@@ -3534,12 +3548,11 @@ function Skeleton({ lines = 4 }) {
 }
 
 const TOUR = [
-  ["TODAY", "Your market brief — signal, today's risk per trade and what changed — then your positions with HOLD / TIGHTEN / EXIT and today's best setups. Tap ⓘ for how it all fits together."],
-  ["SCAN", "Ready-made lists from the Nifty 500 (and Microcap 250), each with its own track record. The quality gate hides thin or slow stocks."],
-  ["IDEAS", "Everything worth a look in one ranked list, already sized for today's risk, with results dates flagged."],
-  ["Plan sheet", "Tap Plan on any idea (or + Plan a trade): entry, stop and quantity from today's risk, capped by your open risk."],
-  ["PLAYBOOK", "Your setups with rules and live examples, plus your journal, Zerodha import and stats."],
-  ["QUAD", "The full market picture — readings, sizing, breadth, sectors, institutions and every gauge's record. Each section has an ⓘ guide."],
+  ["TODAY", "One screen that follows the clock: a brief before the open, the market during the day, the day wrap after 3:30 — then your positions, today's best setups and your watchlist."],
+  ["STOCKS", "Ideas (ranked and sized for today), Scans, Movers (gainers, heatmap, 52-week highs, leaders, delivery) and your Watchlist. Tap any stock for its chart, plan, notes and compare."],
+  ["MARKET", "The full picture in four parts: Signal (and today's risk per trade), Breadth, Sectors and Money flow."],
+  ["INVEST", "Your mutual fund portfolio, every fund vs its index, and the year's IPOs — kept apart from trading."],
+  ["JOURNAL", "Your trades (with Zerodha import), review, stats and setups. The ☰ next to your capital opens settings and this tour; 🔍 searches stocks, funds and IPOs."],
 ];
 function Tour({ onDone }) {
   const [i, setI] = useState(0);
@@ -3577,7 +3590,7 @@ function AppSettings({ onTour }) {
   );
 }
 
-function MarketBrief({ onOpenQuad, onOpenScan }) {
+function MarketBrief({ onOpenQuad, onOpenScan, onOpenWrap }) {
   const { data, loading, error, progress, retry } = useMarketQuadrant();
   const { flows } = useFlowsDeals();
   const [allChanges, setAllChanges] = useState(false);
@@ -3667,10 +3680,10 @@ function MarketBrief({ onOpenQuad, onOpenScan }) {
       })()}
 
       <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-        <button className="btn-primary" style={{ flex: 1, padding: "10px 8px", fontSize: 12 }} onClick={onOpenScan}>
-          SCAN · {(d.scans?.pivots_total || 0) + (d.scans?.tight_total || 0) + (d.scans?.reclaim50_total || 0)} ideas
-        </button>
-        <button className="btn-ghost" style={{ flex: 1, padding: "10px 8px", fontSize: 12 }} onClick={onOpenQuad}>Full QUAD ›</button>
+        {onOpenWrap && !isMarketHours() && !isPreOpen()
+          ? <button className="btn-primary" style={{ flex: 1, padding: "10px 8px", fontSize: 12 }} onClick={onOpenWrap}>🌙 Day wrap ›</button>
+          : <button className="btn-primary" style={{ flex: 1, padding: "10px 8px", fontSize: 12 }} onClick={onOpenScan}>Today's ideas ›</button>}
+        <button className="btn-ghost" style={{ flex: 1, padding: "10px 8px", fontSize: 12 }} onClick={onOpenQuad}>Market ›</button>
       </div>
 
     </div>
@@ -3736,10 +3749,7 @@ function ScanPage({ onPickStock, watchlist, setWatchlist, onOpenIpos, onOpenMove
     <div style={{ marginBottom: 14 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
         <div className="section-title">Scan</div>
-        <span style={{ display: "flex", gap: 6 }}>
-          {onOpenMovers && <button className="chip" onClick={onOpenMovers}>Movers ›</button>}
-          {onOpenIpos && <button className="chip" onClick={onOpenIpos}>IPOs ›</button>}
-        </span>
+
       </div>
       <div style={{ fontSize: 13, color: "var(--text3)", marginTop: 4 }}>Nifty 500 setups from today's close. Tap a stock for its chart and checklist.</div>
     </div>
@@ -6651,16 +6661,8 @@ function PlaybookPage({ trades, setTrades, portfolio, sub, setSub, onOpenStock, 
   const view = trades.filter(t => (paperView ? t.paper : !t.paper));
   return (
     <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
-        <div className="section-title">Playbook</div>
-        <button className="chip" onClick={onOpenJournal}>Journal ›</button>
-      </div>
-      <div style={{ fontSize: 13, color: "var(--text3)", marginBottom: 12 }}>Your setups, rules and how you actually trade them.</div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-        {[["setups", "Setups"], ["review", "Review"], ["stats", "Stats"]].map(([id, l]) => (
-          <button key={id} className="chip" aria-pressed={sub === id} onClick={() => setSub(id)} style={sub === id ? { borderColor: "var(--text)", color: "var(--text)", flex: 1 } : { flex: 1 }}>{l}</button>
-        ))}
-      </div>
+      <div className="section-title">{{ review: "Review", stats: "Stats", setups: "Setups" }[sub] || "Setups"}</div>
+      <div style={{ fontSize: 13, color: "var(--text3)", margin: "4px 0 12px" }}>{{ review: "Go back over closed trades: what went right and wrong.", stats: "Your results, by setup, market condition and discipline.", setups: "Your setups, their rules and today's live examples." }[sub] || ""}</div>
       {hasPaper && sub !== "review" && (
         <div style={{ display: "flex", gap: 6, marginBottom: 10, fontSize: 11, color: "var(--text3)", alignItems: "center" }}>
           Showing:
@@ -7475,7 +7477,7 @@ function ipoStats(ipo, it) {
   };
 }
 
-function IposPage({ onBack, onOpenStock }) {
+function IposPage({ onBack = null, onOpenStock }) {
   const [d, setD] = useState(null), [err, setErr] = useState(null);
   const [seg, setSeg] = useState(() => { try { return localStorage.getItem("td_ipo_seg") || "main"; } catch (_) { return "main"; } });
   const [sort, setSort] = useState("new");
@@ -7519,7 +7521,7 @@ function IposPage({ onBack, onOpenStock }) {
     return () => { alive = false; };
   }, [d]);
 
-  const back = <button onClick={onBack} className="btn-ghost" style={{ padding: "6px 10px", fontSize: 12, marginBottom: 12 }}>‹ Back</button>;
+  const back = onBack ? <button onClick={onBack} className="btn-ghost" style={{ padding: "6px 10px", fontSize: 12, marginBottom: 12 }}>‹ Back</button> : null;
   const head = <><div className="section-title">IPOs</div><div style={{ fontSize: 13, color: "var(--text3)", margin: "4px 0 12px" }}>Every NSE listing of the last 12 months — how it listed and how it has done since. From NSE's issue records.</div></>;
   if (!d) return <div className="fade-in" style={{ padding: "16px 16px 120px" }}>{back}{head}<div className="card" style={{ fontSize: 12, color: err ? "var(--red)" : "var(--text3)" }}>{err || <Skeleton lines={6} />}</div></div>;
 
@@ -7605,12 +7607,12 @@ function IposPage({ onBack, onOpenStock }) {
 }
 
 // ─── MOVERS: today's moves, heatmap, 52-week highs / lows, strength leaders, delivery ─────────
-function MoversPage({ onBack, onOpenStock }) {
+function MoversPage({ onBack = null, onOpenStock }) {
   const { data: d } = useMarketQuadrant();
   const [tab, setTab] = useState(() => { try { return localStorage.getItem("td_movers_tab") || "movers"; } catch (_) { return "movers"; } });
   const pick = (t) => { setTab(t); try { localStorage.setItem("td_movers_tab", t); } catch (_) {} };
   const micro = readMicro();
-  const back = <button onClick={onBack} className="btn-ghost" style={{ padding: "6px 10px", fontSize: 12, marginBottom: 12 }}>‹ Back</button>;
+  const back = onBack ? <button onClick={onBack} className="btn-ghost" style={{ padding: "6px 10px", fontSize: 12, marginBottom: 12 }}>‹ Back</button> : null;
   if (!d?.chg_of) return <div className="fade-in" style={{ padding: "16px 16px 120px" }}>{back}<div className="section-title">Movers</div><div className="card" style={{ marginTop: 12 }}><Skeleton lines={6} /></div></div>;
   const chg = { ...(micro?.chg_of || {}), ...d.chg_of };
   const sectorOf = (sym) => d.sector_of?.[sym] || micro?.sector_of?.[sym] || "Other";
@@ -7910,6 +7912,12 @@ function IpoTodayCard({ onOpen }) {
   );
 }
 
+/** Weekday, 09:15–15:30 IST — trading screens only; investing cards wait for the close. */
+function isMarketHours() {
+  const ist = new Date(Date.now() + 19800000), m = ist.getUTCHours() * 60 + ist.getUTCMinutes(), wd = ist.getUTCDay();
+  return wd >= 1 && wd <= 5 && m >= 9 * 60 + 15 && m < 15 * 60 + 30;
+}
+
 /** Weekday, 05:00–09:15 IST. */
 function isPreOpen() {
   const ist = new Date(Date.now() + 19800000), m = ist.getUTCHours() * 60 + ist.getUTCMinutes(), wd = ist.getUTCDay();
@@ -7968,52 +7976,81 @@ function FundsTodayCard({ onOpen, onOpenFund }) {
   );
 }
 
-function BottomNav({ page, setPage }) {
-  const tabs = [
-    { id: "today", label: "TODAY", icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
-      </svg>
-    )},
-    { id: "scan", label: "SCAN", icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><polyline points="8 12 10 10 12 12 14 9"/>
-      </svg>
-    )},
-    { id: "ideas", label: "IDEAS", icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.2 1 2V17h6v-.3c0-.8.4-1.5 1-2A7 7 0 0 0 12 2z"/>
-      </svg>
-    )},
-    { id: "playbook", label: "PLAYBOOK", icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="9" y1="7" x2="16" y2="7"/><line x1="9" y1="11" x2="14" y2="11"/>
-      </svg>
-    )},
-    { id: "quadrant", label: "QUAD", icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/>
-      </svg>
-    )},
-  ];
+// Which bottom tab a page belongs to
+const NAV_GROUP = {
+  today: "today", wrap: "today",
+  ideas: "stocks", scan: "stocks", movers: "stocks", watch: "stocks",
+  quadrant: "market",
+  funds: "invest", fund: "invest", ipos: "invest",
+  journal: "journal", playbook: "journal",
+};
+const NAV_DEFAULT = { today: "today", stocks: "ideas", market: "quadrant", invest: "funds", journal: "journal" };
+function lastIn(group) { try { return localStorage.getItem(`td_last_${group}`) || NAV_DEFAULT[group]; } catch (_) { return NAV_DEFAULT[group]; } }
 
+function BottomNav({ page, setPage }) {
+  const ico = (d) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">{d}</svg>;
+  const tabs = [
+    { id: "today", label: "TODAY", icon: ico(<><rect x="3" y="4" width="18" height="18" rx="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" /></>) },
+    { id: "stocks", label: "STOCKS", icon: ico(<><polyline points="3 17 9 11 13 15 21 7" /><polyline points="15 7 21 7 21 13" /></>) },
+    { id: "market", label: "MARKET", icon: ico(<><path d="M3 12a9 9 0 1 1 18 0" /><line x1="12" y1="12" x2="16.5" y2="7.5" /><circle cx="12" cy="12" r="1.5" /></>) },
+    { id: "invest", label: "INVEST", icon: ico(<><path d="M21 12A9 9 0 1 1 12 3v9z" /><path d="M14 2.2A9 9 0 0 1 21.8 10H14z" /></>) },
+    { id: "journal", label: "JOURNAL", icon: ico(<><path d="M4 4h12a3 3 0 0 1 3 3v13H7a3 3 0 0 1-3-3z" /><line x1="8" y1="8" x2="15" y2="8" /><line x1="8" y1="12" x2="15" y2="12" /></>) },
+  ];
+  const active = NAV_GROUP[page];
   return (
     <div style={{
-      position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 200,
-      background: "var(--bar)", backdropFilter: "blur(24px)",
-      borderTop: "1px solid var(--border2)",
-      boxShadow: "none",
-      display: "flex",
-      paddingBottom: "env(safe-area-inset-bottom)",
-      maxWidth: 480, margin: "0 auto",
+      position: "fixed", bottom: 0, left: 0, right: 0,
+      background: "var(--bar)", backdropFilter: "blur(20px)",
+      borderTop: "1px solid var(--border)",
+      display: "flex", paddingBottom: "env(safe-area-inset-bottom)",
+      zIndex: 100, maxWidth: 480, margin: "0 auto",
     }}>
       {tabs.map(tab => (
-        <button key={tab.id} className={`nav-tab ${page === tab.id ? "active" : ""}`}
-          onClick={() => setPage(tab.id)}>
+        <button key={tab.id} className={`nav-tab ${active === tab.id ? "active" : ""}`} aria-current={active === tab.id ? "page" : undefined}
+          onClick={() => { setPage(tab.id === "today" ? "today" : active === tab.id && page !== "fund" ? page : lastIn(tab.id)); window.scrollTo(0, 0); }}>
           {tab.icon}
           {tab.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+/** Segment bar shown at the top of every page inside a bottom tab. */
+function SegBar({ items, active, onPick }) {
+  return (
+    <div style={{ display: "flex", gap: 6, overflowX: "auto", scrollbarWidth: "none", padding: "12px 16px 0" }}>
+      {items.map(([k, l]) => <button key={k} className="chip" aria-pressed={active === k} onClick={() => onPick(k)} style={{ whiteSpace: "nowrap", flex: "1 0 auto" }}>{l}</button>)}
+    </div>
+  );
+}
+const STOCKS_SEGS = [["ideas", "Ideas"], ["scan", "Scans"], ["movers", "Movers"], ["watch", "Watchlist"]];
+const INVEST_SEGS = [["funds", "Mutual funds"], ["ipos", "IPOs"]];
+const JOURNAL_SEGS = [["journal", "Trades"], ["review", "Review"], ["stats", "Stats"], ["setups", "Setups"]];
+
+/** Top-bar menu: portfolio value, theme, tour, how the app works. */
+function MenuSheet({ open, onClose, portfolio, setPortfolio, onTour }) {
+  const [v, setV] = useState(String(portfolio || ""));
+  useEffect(() => { if (open) setV(String(portfolio || "")); }, [open, portfolio]);
+  if (!open) return null;
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Menu" onClick={(e) => e.target === e.currentTarget && onClose()} style={{ position: "fixed", inset: 0, zIndex: 450, background: "rgba(0,0,0,0.55)", display: "flex", justifyContent: "center", alignItems: "flex-start" }}>
+      <div style={{ width: "100%", maxWidth: 480, background: "var(--bg)", padding: "14px 16px 18px", maxHeight: "88vh", overflowY: "auto", borderBottom: "1px solid var(--border)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <div className="section-title" style={{ fontSize: 22 }}>Menu</div>
+          <button className="btn-ghost" style={{ padding: "8px 12px", fontSize: 12 }} onClick={onClose}>Close</button>
+        </div>
+        <div className="card" style={{ marginBottom: 12 }}>
+          <div className="label" style={{ marginBottom: 6 }}>Trading capital</div>
+          <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8 }}>Used for position sizing, heat and risk per trade. Your mutual funds are tracked separately under INVEST.</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input type="number" value={v} onChange={e => setV(e.target.value)} aria-label="Trading capital in rupees" style={{ flex: 1 }} />
+            <button className="btn-primary" style={{ padding: "8px 14px", fontSize: 13 }} disabled={!(+v > 0)} onClick={() => { setPortfolio(Number(v)); onClose(); }}>Save</button>
+          </div>
+        </div>
+        <AppSettings onTour={() => { onClose(); onTour(); }} />
+        <div style={{ marginTop: 12 }}><Guide id="app" /></div>
+      </div>
     </div>
   );
 }
@@ -8041,14 +8078,17 @@ export default function App() {
   const [showTour, setShowTour] = useState(() => { try { return localStorage.getItem("td_tour_done") !== "1"; } catch (_) { return false; } });
   const [stockSym, setStockSym] = useState(null);     // stock detail page
   const [fundCode, setFundCode] = useState(null);     // mutual fund detail page
-  const openFund = (code) => { setFundCode(code); setPage("fund"); window.scrollTo(0, 0); };
+  const [fundBack, setFundBack] = useState("funds");
+  const openFund = (code) => { setFundCode(code); if (page !== "fund") setFundBack(page); setPage("fund"); window.scrollTo(0, 0); };
   const [ipoBack, setIpoBack] = useState("today");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  useEffect(() => { const g = NAV_GROUP[page]; if (g && g !== "today" && page !== "fund") { try { localStorage.setItem(`td_last_${g}`, page); } catch (_) {} } }, [page]);
   const [compareSyms, setCompareSyms] = useState([]);
   const [subBack, setSubBack] = useState("today");
   const openSub = (p) => { setSubBack(page === p ? subBack : page); setPage(p); window.scrollTo(0, 0); };
   const openCompare = (sym) => { setCompareSyms(xs => [...new Set([...xs, sym].filter(Boolean))].slice(-3)); openSub("compare"); };
-  const openIpos = () => { setIpoBack(page === "ipos" ? ipoBack : page); setPage("ipos"); window.scrollTo(0, 0); };
+  const openIpos = () => { setPage("ipos"); window.scrollTo(0, 0); };
   const [stockBack, setStockBack] = useState("scan");
   const [pbSub, setPbSub] = useState(() => { try { return localStorage.getItem("td_playbook_sub") || "setups"; } catch (_) { return "setups"; } });
   const choosePbSub = (v) => { setPbSub(v); try { localStorage.setItem("td_playbook_sub", v); } catch (_) {} };
@@ -8101,7 +8141,12 @@ export default function App() {
   return (
     <div style={{ maxWidth: 480, margin: "0 auto", minHeight: "100vh", background: "var(--bg)", position: "relative" }}>
       <GlobalStyle />
-      <TopBar regime={regime} portfolio={portfolio} page={page} indicesData={indicesTicker} onSearch={() => setSearchOpen(true)} />
+      <TopBar regime={regime} portfolio={portfolio} page={page} indicesData={indicesTicker} onSearch={() => setSearchOpen(true)} onMenu={() => setMenuOpen(true)} />
+      <MenuSheet open={menuOpen} onClose={() => setMenuOpen(false)} portfolio={portfolio} setPortfolio={setPortfolio} onTour={() => setShowTour(true)} />
+      {NAV_GROUP[page] === "stocks" && <SegBar items={STOCKS_SEGS} active={page} onPick={(k) => { setPage(k); window.scrollTo(0, 0); }} />}
+      {(page === "funds" || page === "ipos") && <SegBar items={INVEST_SEGS} active={page} onPick={(k) => { setPage(k); window.scrollTo(0, 0); }} />}
+      {(page === "journal" || page === "playbook") && <SegBar items={JOURNAL_SEGS} active={page === "journal" ? "journal" : pbSub}
+        onPick={(k) => { if (k === "journal") setPage("journal"); else { choosePbSub(k); setPage("playbook"); } window.scrollTo(0, 0); }} />}
       <SearchSheet open={searchOpen} onClose={() => setSearchOpen(false)} onOpenStock={openStock} onOpenFund={openFund} onOpenIpos={openIpos} />
       <NiftyStrip data={indicesTicker} />
 
@@ -8124,31 +8169,35 @@ export default function App() {
       )}
       {page === "journal" && (
         <div>
-          <div style={{ padding: "12px 16px 0" }}>
-            <button className="btn-ghost" style={{ padding: "6px 10px", fontSize: 12 }} onClick={() => setPage(journalBack || "today")}>‹ Back</button>
-          </div>
           <ZerodhaImport trades={trades} setTrades={setTrades} />
           <JournalPage trades={trades} setTrades={setTrades} prefill={prefill} setPrefill={setPrefill} onOpenStock={openStock} />
         </div>
       )}
       {page === "scan" && (
-        <ScanPage onPickStock={openStock} watchlist={watchlist} setWatchlist={setWatchlist} onOpenIpos={openIpos} onOpenMovers={() => openSub("movers")} />
+        <ScanPage onPickStock={openStock} watchlist={watchlist} setWatchlist={setWatchlist} />
       )}
       {page === "quadrant" && (
         <MarketQuadrantPage onPickStock={openStock} />
       )}
       {page === "funds" && <FundsPage onOpenFund={openFund} />}
-      {page === "movers" && <MoversPage onBack={() => { setPage(subBack); window.scrollTo(0, 0); }} onOpenStock={openStock} />}
+      {page === "movers" && <MoversPage onOpenStock={openStock} />}
+      {page === "watch" && (
+        <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
+          <div className="section-title">Watchlist</div>
+          <div style={{ fontSize: 13, color: "var(--text3)", margin: "4px 0 12px" }}>Stocks you're following — today's moves first, then the full list.</div>
+          <SectionBoundary name="Watchlist moves"><WatchAlertsCard watchlist={watchlist} onOpen={openStock} /></SectionBoundary>
+          <div className="card"><WatchlistPanel watchlist={watchlist} setWatchlist={setWatchlist} onPickStock={openStock} /></div>
+        </div>
+      )}
       {page === "compare" && <ComparePage syms={compareSyms} setSyms={setCompareSyms} onBack={() => { setPage(subBack); window.scrollTo(0, 0); }} onOpenStock={openStock} />}
-      {page === "ipos" && <IposPage onBack={() => { setPage(ipoBack); window.scrollTo(0, 0); }} onOpenStock={openStock} />}
+      {page === "ipos" && <IposPage onOpenStock={openStock} />}
       {page === "wrap" && <WrapPage trades={realTrades} watchlist={watchlist} indices={indicesTicker} onBack={() => { setPage("today"); window.scrollTo(0, 0); }}
         onOpenStock={openStock} onOpenFunds={() => { setPage("funds"); window.scrollTo(0, 0); }} onOpenQuad={() => { setPage("quadrant"); window.scrollTo(0, 0); }} />}
-      {page === "fund" && fundCode && <FundPage code={fundCode} onBack={() => { setPage("funds"); window.scrollTo(0, 0); }} />}
+      {page === "fund" && fundCode && <FundPage code={fundCode} onBack={() => { setPage(fundBack); window.scrollTo(0, 0); }} />}
       {page === "stock" && stockSym && (
         <StockPage symbol={stockSym} onBack={() => setPage(stockBack || "scan")} onPlan={pickStock} watchlist={watchlist} setWatchlist={setWatchlist} trades={trades} onCompare={openCompare} />
       )}
 
-      {page === "today" && <div style={{ padding: "0 16px 120px", marginTop: -100 }}><AppSettings onTour={() => setShowTour(true)} /></div>}
       {showTour && <Tour onDone={() => { setShowTour(false); try { localStorage.setItem("td_tour_done", "1"); } catch (_) {} }} />}
 
       <BottomNav page={page} setPage={setPage} />
