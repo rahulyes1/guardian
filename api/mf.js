@@ -179,6 +179,28 @@ const BENCH_OF = {
   "Flexi Cap": "n500", "Multi Cap": "n500", "Focused": "n500", "Value": "n500", "Contra": "n500", "ELSS (tax saver)": "n500",
 };
 
+/** Monthly history: [YYYY-MM, first NAV of the month, last NAV of the month]. Exported for tests. */
+export function monthsOf(rows) {
+  const out = [];
+  for (const [d, v] of rows) {
+    const m = d.slice(0, 7), last = out[out.length - 1];
+    if (last && last[0] === m) last[2] = v; else out.push([m, v, v]);
+  }
+  return out;
+}
+/** Every fall of 10% or more since launch: peak, trough, depth, and when it got back to the peak. Exported for tests. */
+export function fallsOf(rows) {
+  const out = [];
+  let pk = rows[0]?.[1], pkD = rows[0]?.[0], tr = pk, trD = pkD;
+  const close = (recD) => { const depth = tr / pk - 1; if (depth <= -0.1) out.push({ peak: pkD, trough: trD, depth: Math.round(depth * 1000) / 10, recovered: recD }); };
+  for (const [d, v] of rows) {
+    if (v >= pk) { if (tr < pk) close(d); pk = v; pkD = d; tr = v; trD = d; }
+    else if (v < tr) { tr = v; trD = d; }
+  }
+  if (tr < pk) close(null);
+  return out.sort((a, b) => a.depth - b.depth).slice(0, 5);
+}
+
 async function mapLimited(items, limit, fn, deadline) {
   const out = new Array(items.length).fill(null); let next = 0;
   const worker = async () => { while (next < items.length && Date.now() < deadline) { const i = next++; out[i] = await fn(items[i]); } };
@@ -212,13 +234,31 @@ export default async function handler(req, res) {
       const st = fundStats(r.body.data, row ? [row[5], row[4]] : null);
       if (!st) return fail(404, "Not enough NAV history");
       res.setHeader("Cache-Control", "public, max-age=1800, s-maxage=10800, stale-while-revalidate=86400");
-      // ?full=1 → every daily NAV (for exact SIP / purchase NAVs in the portfolio)
-      const navs = req.query.full === "1" ? (() => {
-        const all = r.body.data.map(x => [dmyDate(x.date), parseFloat(x.nav)]).filter(([d, v]) => d && v > 0).sort((a, b) => (a[0] < b[0] ? -1 : 1));
-        if (row && row[5] > (all[all.length - 1]?.[0] || "")) all.push([row[5], row[4]]);
+      const daily = (hist, latest) => {
+        const all = hist.map(x => [dmyDate(x.date), parseFloat(x.nav)]).filter(([d, v]) => d && v > 0).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+        if (latest && latest[0] > (all[all.length - 1]?.[0] || "")) all.push(latest);
         return all;
-      })() : undefined;
-      return res.json({ source: "mfapi.in (AMFI NAVs)", code: Number(code), meta: r.body.meta, cat: row ? lr.body.cats[row[3]] : null, ...st, navs });
+      };
+      const rowsAll = daily(r.body.data, row ? [row[5], row[4]] : null);
+      // ?full=1 → every daily NAV (for exact SIP / purchase NAVs in the portfolio)
+      const navs = req.query.full === "1" ? rowsAll : undefined;
+      const cat = row ? lr.body.cats[row[3]] : null;
+      // ?deep=1 → monthly history since launch, every big fall, and the category's index fund for comparison
+      let deep;
+      if (req.query.deep === "1") {
+        deep = { months: monthsOf(rowsAll), falls: fallsOf(rowsAll) };
+        const B = BENCH_OF[(cat || "").split(" · ")[1]];
+        if (B && lr.status === 200) {
+          const ci = lr.body.cats.indexOf("Index · Equity");
+          const pool = lr.body.funds.filter(f => f[3] === ci && !/elss|etf|fof|equal|momentum|quality|value|low vol|alpha|next/i.test(f[1]));
+          let pick = null; for (const re of BENCH[B].prefer) { pick = pool.find(f => re.test(f[1])); if (pick) break; }
+          if (pick && pick[0] !== Number(code)) {
+            const br = await get(MFAPI + pick[0], { json: true, timeout: 7000 });
+            if (br.status === 200 && br.body?.data) deep.bench = { index: BENCH[B].index, code: pick[0], name: pick[1], months: monthsOf(daily(br.body.data, [pick[5], pick[4]])) };
+          }
+        }
+      }
+      return res.json({ source: "mfapi.in (AMFI NAVs)", code: Number(code), meta: r.body.meta, cat, ...st, navs, deep });
     }
 
     if (type === "cat") {

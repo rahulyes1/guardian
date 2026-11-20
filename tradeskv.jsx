@@ -8,6 +8,7 @@ import {
 import { INDEX_KEYS, reconcileIndex } from "./lib/marketChecks.js";
 import { parseTradebook, buildTrades } from "./lib/tradeImport.js";
 import { useSyncedAppState } from "./appStateSync.js";
+import { calendarYears, monthGrid, riskStats, rollingReturns, investCalc, sinceLaunch, RISK_FREE } from "./lib/fundMath.js";
 // ─── THEME & CONSTANTS ───────────────────────────────────────────────────────
 // Light/dark: accents are picked per theme for contrast (vivid on dark, deeper on light).
 // Switching theme reloads the page so every colour is recomputed.
@@ -6887,6 +6888,158 @@ function MfCategory({ cat, onOpen }) {
   );
 }
 
+// ─── FUND DEEP DIVE: every year since launch, monthly heatmap, risk-adjusted, rolling, falls, calculator ─────
+const _mfDeep = new Map();
+function loadMfDeep(code) {
+  if (!_mfDeep.has(code)) _mfDeep.set(code, fetch(`/api/mf?type=fund&code=${code}&deep=1`).then(r => (r.ok ? r.json() : Promise.reject(new Error("History unavailable")))).catch(e => { _mfDeep.delete(code); throw e; }));
+  return _mfDeep.get(code);
+}
+const ymTxt = (ym) => { if (!ym) return "—"; const [y, m] = ym.split("-"); return `${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][+m - 1]} ${y}`; };
+const lakh = (v) => (v >= 1e7 ? `₹${(v / 1e7).toFixed(2)} Cr` : v >= 1e5 ? `₹${(v / 1e5).toFixed(2)} L` : `₹${Math.round(v).toLocaleString("en-IN")}`);
+
+function FundDeep({ code }) {
+  const [x, setX] = useState(null), [err, setErr] = useState(null);
+  useEffect(() => { let alive = true; setX(null); setErr(null); loadMfDeep(code).then(v => alive && setX(v)).catch(e => alive && setErr(e.message)); return () => { alive = false; }; }, [code]);
+  if (err) return <div className="card" style={{ marginBottom: 12, fontSize: 12, color: "var(--text3)" }}>Long-term history couldn't load ({err}).</div>;
+  if (!x?.deep?.months) return <div className="card" style={{ marginBottom: 12 }}><div className="label" style={{ marginBottom: 6 }}>Since launch</div><Skeleton lines={5} /></div>;
+  const M = x.deep.months, B = x.deep.bench?.months || null, bName = x.deep.bench?.index;
+  const years = calendarYears(M), byB = B ? Object.fromEntries(calendarYears(B).map(y => [y.year, y])) : {};
+  const grid = monthGrid(M), risk = riskStats(M, B), roll = rollingReturns(M, B, 3), launch = sinceLaunch(M);
+  const maxAbs = Math.max(5, ...years.map(y => Math.abs(y.ret ?? 0)));
+  const cell = (v) => { if (v == null) return "transparent"; const a = Math.min(1, Math.abs(v) / 8); return v >= 0 ? `rgba(34,197,94,${0.12 + a * 0.6})` : `rgba(239,68,68,${0.12 + a * 0.6})`; };
+  const card = (title, children, sub) => <div className="card" style={{ marginBottom: 12 }}><div className="label" style={{ marginBottom: sub ? 2 : 8 }}>{title}</div>{sub && <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8, lineHeight: 1.45 }}>{sub}</div>}{children}</div>;
+  const beatYears = B ? years.filter(y => !y.part && byB[y.year] && !byB[y.year].part) : [];
+  const beatN = beatYears.filter(y => y.ret > byB[y.year].ret).length;
+  return (
+    <>
+      {launch && card("Since launch", <>
+        <div style={{ fontSize: 14, lineHeight: 1.5 }}>₹1 lakh invested in <b>{ymTxt(launch.from)}</b> is worth <b style={{ color: C.pos, fontFamily: "var(--mono)" }}>{lakh(launch.value)}</b> today — <b>{launch.multiple}×</b>{launch.cagr != null && <>, <b>{pctTxt(launch.cagr)}</b> a year</>}.</div>
+        {B && <div style={{ fontSize: 11.5, color: "var(--text2)", marginTop: 4 }}>The {bName} index fund since {ymTxt(B[0][0])}: {(() => { const s = sinceLaunch(M.filter(m => m[0] >= B[0][0])), b = sinceLaunch(B); return s && b ? <>this fund {pctTxt(s.cagr)}/yr vs index {pctTxt(b.cagr)}/yr</> : "—"; })()}.</div>}
+        <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 4 }}>History starts {ymTxt(M[0][0])} (Direct plans began in Jan 2013; older funds' earlier years were Regular-plan only).</div>
+      </>)}
+
+      {card("Every calendar year", <>
+        <div style={{ display: "grid", gridTemplateColumns: B ? "44px 1fr 56px 56px" : "44px 1fr 56px", columnGap: 6, rowGap: 3, fontSize: 11.5, alignItems: "center" }}>
+          <span style={{ fontSize: 9.5, color: "var(--text3)" }}>YEAR</span><span /><span style={{ fontSize: 9.5, color: "var(--text3)", textAlign: "right" }}>FUND</span>{B && <span style={{ fontSize: 9.5, color: "var(--text3)", textAlign: "right" }}>INDEX</span>}
+          {[...years].reverse().map(y => { const b = byB[y.year]; const won = b && !y.part && !b.part ? y.ret > b.ret : null; return (
+            <Fragment key={y.year}>
+              <span style={{ fontFamily: "var(--mono)", color: "var(--text2)" }}>{y.year}{y.part ? "*" : ""}</span>
+              <div style={{ display: "flex", alignItems: "center", height: 10 }}>
+                <div style={{ flex: 1, display: "flex", justifyContent: "flex-end" }}>{y.ret < 0 && <div style={{ width: `${(Math.abs(y.ret) / maxAbs) * 100}%`, height: 9, background: C.neg, borderRadius: "4px 0 0 4px" }} />}</div>
+                <div style={{ flex: 1, borderLeft: "1px solid var(--text3)" }}>{y.ret > 0 && <div style={{ width: `${(y.ret / maxAbs) * 100}%`, height: 9, background: C.pos, borderRadius: "0 4px 4px 0" }} />}</div>
+              </div>
+              <span style={{ fontFamily: "var(--mono)", textAlign: "right", color: pctCol(y.ret), fontWeight: won ? 800 : 400 }}>{pctTxt(y.ret)}</span>
+              {B && <span style={{ fontFamily: "var(--mono)", textAlign: "right", color: "var(--text3)" }}>{b ? pctTxt(b.ret) : "—"}</span>}
+            </Fragment>
+          ); })}
+        </div>
+        <div style={{ fontSize: 10.5, color: "var(--text3)", marginTop: 6 }}>* part year (launch year or year to date).{B && beatYears.length ? ` Beat the ${bName} index fund in ${beatN} of ${beatYears.length} full years (bold).` : ""}</div>
+      </>)}
+
+      {card("Month by month", <>
+        <div style={{ display: "grid", gridTemplateColumns: "34px repeat(12, minmax(0, 1fr)) 40px", gap: 2, fontSize: 8.5, fontFamily: "var(--mono)" }}>
+          <span />{"JFMAMJJASOND".split("").map((l, i) => <span key={i} style={{ textAlign: "center", color: "var(--text3)" }}>{l}</span>)}<span style={{ textAlign: "right", color: "var(--text3)" }}>YEAR</span>
+          {grid.map(g => { const y = years.find(z => z.year === g.year); return (
+            <Fragment key={g.year}>
+              <span style={{ color: "var(--text2)" }}>{g.year}</span>
+              {g.cells.map((v, i) => <span key={i} title={v == null ? "" : `${ymTxt(`${g.year}-${String(i + 1).padStart(2, "0")}`)}: ${pctTxt(v)}`} style={{ background: cell(v), borderRadius: 2, textAlign: "center", padding: "3px 0", color: "var(--text)", overflow: "hidden" }}>{v == null ? "" : Math.round(v)}</span>)}
+              <span style={{ textAlign: "right", color: pctCol(y?.ret) }}>{y ? Math.round(y.ret) : ""}</span>
+            </Fragment>
+          ); })}
+        </div>
+        {risk && <div style={{ fontSize: 10.5, color: "var(--text3)", marginTop: 6 }}>Rounded % per month. Over the last 3 years {risk.posMonths}% of months were positive.</div>}
+      </>, "Green months up, red down; deeper = bigger. Spot the seasons when it struggles.")}
+
+      {risk && card("Risk-adjusted · last 3 years", <>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 }}>
+          {[["RETURN /YR", pctTxt(risk.ret), pctCol(risk.ret)], ["VOLATILITY", `${risk.vol}%`, null], ["SHARPE", risk.sharpe, risk.sharpe >= 1 ? C.pos : risk.sharpe < 0.5 ? C.warn : null],
+            ["SORTINO", risk.sortino, risk.sortino >= 1.5 ? C.pos : null], ...(risk.beta != null ? [["BETA", risk.beta, null], ["ALPHA /YR", pctTxt(risk.alpha), pctCol(risk.alpha)],
+            ["UP CAPTURE", `${risk.upCapture}%`, risk.upCapture >= 100 ? C.pos : null], ["DOWN CAPTURE", `${risk.downCapture}%`, risk.downCapture <= 90 ? C.pos : risk.downCapture > 105 ? C.neg : null], ["INDEX FUND /YR", pctTxt(risk.benchRet), null]] : [])].map(([k, v, c]) => (
+            <div key={k} style={{ minWidth: 0 }}><div style={{ fontSize: 9.5, color: "var(--text3)", letterSpacing: "0.05em" }}>{k}</div><div style={{ fontFamily: "var(--mono)", fontSize: 14, fontWeight: 700, color: c || "var(--text)" }}>{v ?? "—"}</div></div>
+          ))}
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--text2)", marginTop: 8, lineHeight: 1.5 }}>
+          {risk.upCapture != null && <>It caught <b>{risk.upCapture}%</b> of the index fund's rising months and <b>{risk.downCapture}%</b> of its falling ones — {risk.upCapture >= 100 && risk.downCapture < 100 ? "more of the ups, less of the downs: the best combination." : risk.downCapture < 90 ? "it protects well in falls." : risk.upCapture < 90 && risk.downCapture > 100 ? "less of the ups and more of the downs — a poor mix." : "roughly in line with the index."} </>}
+          {risk.alpha != null && <>Alpha of {pctTxt(risk.alpha)} a year is the return beyond what its market exposure (beta {risk.beta}) explains. </>}
+          Sharpe and Sortino measure return per unit of risk above a {(RISK_FREE * 100).toFixed(1)}% risk-free rate — above 1 is good.
+        </div>
+      </>, `Monthly returns since ${ymTxt(risk.from)}${B ? `, compared with the ${bName} index fund` : ""}.`)}
+
+      {roll && card(`Rolling 3-year returns`, <>
+        {(() => {
+          const pts = roll.points, W = 340, H = 110, padR = 32, vals = pts.flatMap(p => [p.fund, p.bench].filter(v => v != null));
+          const lo = Math.min(0, ...vals), hi = Math.max(...vals), sp = hi - lo || 1;
+          const xx = (i) => (i / Math.max(1, pts.length - 1)) * (W - padR), yy = (v) => 6 + (1 - (v - lo) / sp) * (H - 12);
+          const line = (k) => pts.map((p, i) => (p[k] == null ? null : `${xx(i).toFixed(1)},${yy(p[k]).toFixed(1)}`)).filter(Boolean).join(" ");
+          return (
+            <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: "block" }} role="img" aria-label="Rolling 3-year returns of the fund and its index fund">
+              <line x1="0" x2={W - padR} y1={yy(0)} y2={yy(0)} stroke="var(--border)" strokeDasharray="3 3" />
+              <text x={W - padR + 3} y={yy(0) + 3} fontSize="9" fill="var(--text3)" fontFamily="var(--mono)">0%</text>
+              <text x={W - padR + 3} y={yy(hi) + 6} fontSize="9" fill="var(--text3)" fontFamily="var(--mono)">{Math.round(hi)}%</text>
+              {B && <polyline points={line("bench")} fill="none" stroke="var(--text3)" strokeWidth="1.3" strokeDasharray="4 3" />}
+              <polyline points={line("fund")} fill="none" stroke="#3B82F6" strokeWidth="1.8" />
+            </svg>
+          );
+        })()}
+        <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>{ymTxt(roll.points[0].ym)} → {ymTxt(roll.points[roll.points.length - 1].ym)} · <span style={{ color: "#3B82F6" }}>━ fund</span>{B && <> · ┅ {bName} index fund</>}</div>
+        <div style={{ fontSize: 12, color: "var(--text2)", marginTop: 6, lineHeight: 1.5 }}>
+          Any 3-year holding: worst <b style={{ color: pctCol(roll.min) }}>{pctTxt(roll.min)}</b>/yr, typical <b>{pctTxt(roll.median)}</b>/yr, best <b style={{ color: pctCol(roll.max) }}>{pctTxt(roll.max)}</b>/yr. Lost money over 3 years {roll.below}% of the time.
+          {roll.beat != null && <> Beat the index fund in <b>{roll.beat}%</b> of {roll.compared} rolling periods.</>}
+        </div>
+      </>, "What you'd have earned a year over every 3-year stretch, month by month — far more honest than a single 3-year number.")}
+
+      {x.deep.falls?.length > 0 && card("Biggest falls", <>
+        {x.deep.falls.map((f, i) => {
+          const rec = f.recovered ? Math.round((Date.parse(f.recovered) - Date.parse(f.trough)) / (30.44 * 864e5)) : null;
+          return (
+            <div key={i} style={{ display: "grid", gridTemplateColumns: "56px 1fr", gap: 8, fontSize: 12, borderTop: i ? "1px solid var(--border)" : "none", padding: "6px 0", alignItems: "baseline" }}>
+              <span style={{ fontFamily: "var(--mono)", fontWeight: 800, color: C.neg }}>{f.depth}%</span>
+              <span style={{ color: "var(--text2)" }}>{ymTxt(f.peak.slice(0, 7))} → {ymTxt(f.trough.slice(0, 7))}{f.recovered ? <span style={{ color: "var(--text3)" }}> · back to the old high {rec <= 1 ? "within a month" : `${rec} months later`}</span> : <span style={{ color: C.warn }}> · not yet back to the old high</span>}</span>
+            </div>
+          );
+        })}
+        <div style={{ fontSize: 10.5, color: "var(--text3)", marginTop: 4 }}>Falls of 10% or more from a peak, deepest first. This is the pain you'd have sat through.</div>
+      </>)}
+
+      <FundCalc M={M} B={B} bName={bName} />
+    </>
+  );
+}
+
+function FundCalc({ M, B, bName }) {
+  const def = M[Math.max(0, M.length - 61)][0];
+  const [sip, setSip] = useState("10000"), [lump, setLump] = useState(""), [start, setStart] = useState(def), [step, setStep] = useState("0");
+  const args = { sip: +sip || 0, lump: +lump || 0, start, stepUp: +step || 0 };
+  const f = (args.sip || args.lump) ? investCalc(M, args) : null;
+  const b = B && f && start >= B[0][0] ? investCalc(B, args) : null;
+  const field = (label, v, set, props = {}) => <label style={{ fontSize: 10.5, color: "var(--text3)", minWidth: 0 }}>{label}<input value={v} onChange={e => set(e.target.value)} style={{ width: "100%", marginTop: 3 }} {...props} /></label>;
+  return (
+    <div className="card" style={{ marginBottom: 12 }}>
+      <div className="label" style={{ marginBottom: 2 }}>What if I had invested?</div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8 }}>A monthly SIP and/or a lump sum from any month, valued at today's NAV.</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        {field("SIP ₹ / month", sip, setSip, { type: "number", min: 0 })}
+        {field("Lump sum ₹ at start", lump, setLump, { type: "number", min: 0 })}
+        {field("Starting", start, setStart, { type: "month", min: M[0][0], max: M[M.length - 1][0] })}
+        {field("SIP step-up % a year", step, setStep, { type: "number", min: 0, max: 50 })}
+      </div>
+      {f && <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: b ? "1fr 1fr" : "1fr", gap: 10 }}>
+        {[["This fund", f, "#3B82F6"], ...(b ? [[`${bName} index fund`, b, "var(--text3)"]] : [])].map(([l, r, c]) => (
+          <div key={l} style={{ border: `1.5px solid ${c}`, borderRadius: 10, padding: "8px 10px" }}>
+            <div style={{ fontSize: 10.5, color: "var(--text3)" }}>{l}</div>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 17, fontWeight: 800 }}>{lakh(r.value)}</div>
+            <div style={{ fontSize: 11, color: "var(--text2)" }}>on {lakh(r.invested)} · <span style={{ color: pctCol(r.gain) }}>{r.gain >= 0 ? "+" : "−"}{lakh(Math.abs(r.gain))}</span></div>
+            <div style={{ fontSize: 11, color: pctCol(r.xirr) }}>{r.xirr != null ? `${pctTxt(r.xirr)} a year (XIRR)` : ""}</div>
+          </div>
+        ))}
+      </div>}
+      {f && b && <div style={{ fontSize: 11.5, color: f.value >= b.value ? C.pos : C.warn, marginTop: 8 }}>{f.value >= b.value ? `${lakh(f.value - b.value)} more than the index fund.` : `${lakh(b.value - f.value)} less than the index fund would have made.`}</div>}
+      {B && start < B[0][0] && <div style={{ fontSize: 10.5, color: "var(--text3)", marginTop: 6 }}>The index fund's history starts {ymTxt(B[0][0])} — pick a later start to compare.</div>}
+      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>Bought at the first NAV of each month; ignores stamp duty, exit loads and taxes.</div>
+    </div>
+  );
+}
+
 /** Did this fund beat the cheap index fund for its category? */
 function FundVsIndex({ d, code }) {
   const b = useMfBench(d.cat);
@@ -6995,32 +7148,9 @@ function FundPage({ code, onBack }) {
             Every 1-year holding period in the last 3 years: worst <b style={{ color: pctCol(d.rolling.min) }}>{pctTxt(d.rolling.min)}</b>, typical <b>{pctTxt(d.rolling.median)}</b>, best <b style={{ color: pctCol(d.rolling.max) }}>{pctTxt(d.rolling.max)}</b> — positive {d.rolling.pos}% of the time.
           </div>
         )}
-        {d.years?.length > 0 && (
-          <div style={{ marginTop: 10 }}>
-            <div style={{ fontSize: 10, color: "var(--text3)", marginBottom: 4 }}>CALENDAR YEARS</div>
-            {d.years.map(([yr, v]) => (
-              <div key={yr} style={{ display: "grid", gridTemplateColumns: "40px 1fr 1fr 52px", alignItems: "center", gap: 4, fontSize: 11, margin: "2px 0" }}>
-                <span style={{ color: "var(--text2)", fontFamily: "var(--mono)" }}>{yr}</span>
-                <div style={{ display: "flex", justifyContent: "flex-end" }}>{v < 0 && <div style={{ width: `${(Math.abs(v) / yrs) * 100}%`, height: 9, background: C.neg, borderRadius: "5px 0 0 5px" }} />}</div>
-                <div style={{ borderLeft: "1px solid var(--text3)" }}>{v > 0 && <div style={{ width: `${(v / yrs) * 100}%`, height: 9, background: C.pos, borderRadius: "0 5px 5px 0" }} />}</div>
-                <span style={{ fontFamily: "var(--mono)", textAlign: "right", color: pctCol(v) }}>{pctTxt(v)}</span>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
 
-      <div className="card" style={{ marginBottom: 12 }}>
-        <div className="label" style={{ marginBottom: 8 }}>SIP of ₹10,000 a month</div>
-        {[["1 year", d.sip?.y1], ["3 years", d.sip?.y3], ["5 years", d.sip?.y5]].filter(([, s]) => s).map(([l, s]) => (
-          <div key={l} style={{ display: "grid", gridTemplateColumns: "64px 1fr auto", gap: 8, alignItems: "baseline", fontSize: 12, borderTop: "1px solid var(--border)", padding: "6px 0" }}>
-            <span style={{ color: "var(--text2)" }}>{l}</span>
-            <span style={{ fontFamily: "var(--mono)" }}>{formatINR(s.invested)} → <b style={{ color: s.value >= s.invested ? C.pos : C.neg }}>{formatINR(s.value)}</b></span>
-            <span style={{ fontFamily: "var(--mono)", color: pctCol(s.xirr) }}>{pctTxt(s.xirr)}/yr</span>
-          </div>
-        ))}
-        <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 4 }}>Invested on the first NAV day of each month; /yr is the XIRR (annual return on a SIP).</div>
-      </div>
+      <FundDeep code={code} />
       <div style={{ fontSize: 10, color: "var(--text3)", lineHeight: 1.5 }}>NAV from AMFI; history since {mqFmtDate(d.since)} {d.since?.slice(0, 4)} from mfapi.in. Returns exclude exit loads and taxes. Information, not advice.</div>
     </div>
   );
