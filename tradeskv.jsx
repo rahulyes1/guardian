@@ -8143,12 +8143,12 @@ export default function App() {
       <GlobalStyle />
       <TopBar regime={regime} portfolio={portfolio} page={page} indicesData={indicesTicker} onSearch={() => setSearchOpen(true)} onMenu={() => setMenuOpen(true)} />
       <MenuSheet open={menuOpen} onClose={() => setMenuOpen(false)} portfolio={portfolio} setPortfolio={setPortfolio} onTour={() => setShowTour(true)} />
+      <SearchSheet open={searchOpen} onClose={() => setSearchOpen(false)} onOpenStock={openStock} onOpenFund={openFund} onOpenIpos={openIpos} />
+      <NiftyStrip data={indicesTicker} />
       {NAV_GROUP[page] === "stocks" && <SegBar items={STOCKS_SEGS} active={page} onPick={(k) => { setPage(k); window.scrollTo(0, 0); }} />}
       {(page === "funds" || page === "ipos") && <SegBar items={INVEST_SEGS} active={page} onPick={(k) => { setPage(k); window.scrollTo(0, 0); }} />}
       {(page === "journal" || page === "playbook") && <SegBar items={JOURNAL_SEGS} active={page === "journal" ? "journal" : pbSub}
         onPick={(k) => { if (k === "journal") setPage("journal"); else { choosePbSub(k); setPage("playbook"); } window.scrollTo(0, 0); }} />}
-      <SearchSheet open={searchOpen} onClose={() => setSearchOpen(false)} onOpenStock={openStock} onOpenFund={openFund} onOpenIpos={openIpos} />
-      <NiftyStrip data={indicesTicker} />
 
       {page === "today" && (
         <TodayPage regime={regime} setRegime={handleRegimeChange} regimeSince={regimeSince} portfolio={portfolio} setPortfolio={setPortfolio} trades={realTrades} setPage={setPage}
