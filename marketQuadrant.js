@@ -1667,7 +1667,17 @@ export async function computeLongBacktest({ onProgress = () => {} } = {}) {
   const fwd = (i) => { let sm = 0, n = 0; for (const c of tick) { const a = c[i], b = c[i + 10]; if (a != null && b != null) { sm += b / a - 1; n++; } } return n ? sm / n : null; };
   const buckets = (key) => { const g = {}; for (const h of r.history) { const i = pos[h.d]; if (i == null || i + 10 >= axis.length || !h[key]) continue; const f = fwd(i); if (f != null) (g[h[key]] ||= []).push(f); }
     return Object.fromEntries(Object.entries(g).map(([k, xs]) => [k, { days: xs.length, fwd: r1((xs.reduce((a, b) => a + b, 0) / xs.length) * 100), up: Math.round((xs.filter(v => v > 0).length / xs.length) * 100) }])); };
+  // stocks within 2% of their highest close in the 5-year window, and the signal for every session
+  const secMap = await fetchSectorMap().catch(() => ({}));
+  const high5 = [];
+  for (const [t, c] of Object.entries(aligned)) {
+    const xs = c.filter(v => v != null); if (xs.length < 500) continue;
+    const last = c[c.length - 1], mx = Math.max(...xs);
+    if (last != null && last >= mx * 0.98) high5.push({ sym: t.replace(/\.NS$/, ""), sector: secMap[t.replace(/\.NS$/, "")] || "Other", off: r1((last / mx - 1) * 100) });
+  }
+  high5.sort((a, b) => b.off - a.off);
   return { from: axis[0], to: axis[axis.length - 1], sessions: axis.length, stocks: got,
+    high5, sig_days: r.history.filter(h => h.sig).slice(-520).map(h => [h.d, h.sig]),
     signal_bt: sbt, by_signal: buckets("sig"), by_env: buckets("e"), exit_bt: r.exit_bt || null,
     system_bt: r.system_bt ? (() => {
       const sb = r.system_bt; if (!idx) return sb;

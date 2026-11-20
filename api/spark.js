@@ -12,8 +12,8 @@ const FETCH_TIMEOUT = 4000; // ms per symbol
 const DEADLINE      = 8000; // ms — stop starting new fetches (Vercel Hobby limit is 10s)
 const MIN_OK_RATIO  = 0.9;  // below this, the response is not cached at the edge
 
-const ALLOWED_RANGES    = new Set(["6mo", "1y", "2y", "5y"]);
-const ALLOWED_INTERVALS = new Set(["1d", "1wk"]);
+const ALLOWED_RANGES    = new Set(["6mo", "1y", "2y", "5y", "10y"]);
+const ALLOWED_INTERVALS = new Set(["1d", "1wk", "1mo"]);
 
 const YF_HEADERS = {
   "User-Agent":

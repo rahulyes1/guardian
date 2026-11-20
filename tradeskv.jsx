@@ -9,6 +9,9 @@ import { INDEX_KEYS, reconcileIndex } from "./lib/marketChecks.js";
 import { parseTradebook, buildTrades } from "./lib/tradeImport.js";
 import { useSyncedAppState } from "./appStateSync.js";
 import { calendarYears, monthGrid, riskStats, rollingReturns, investCalc, sinceLaunch, RISK_FREE } from "./lib/fundMath.js";
+import { AsOf, useStockDeep, useVal, useJson, StockStory, StockValuation, StockResults, StockHolders, StockAnnouncements, StrongerPeers, StockDNA, PriceLevels, Seasonality } from "./features.jsx";
+import { StyleScoreboard, NiftyMovers, MarketMap, IndexWatch, HighClub, SignalCalendar, MarketReplay, HolderFilings, Superinvestors, EtfPremium, ResultsSeason } from "./features-market.jsx";
+import { FundFacts, TerTag, CategoryFlows, RiskReturnMap, IpoSubscription, WatchIndex, YourAnnouncements } from "./features-invest.jsx";
 // ─── THEME & CONSTANTS ───────────────────────────────────────────────────────
 // Light/dark: accents are picked per theme for contrast (vivid on dark, deeper on light).
 // Switching theme reloads the page so every colour is recomputed.
@@ -3165,7 +3168,7 @@ function MqLeaders({ leaders, sector, onClear, onPickStock }) {
 function MarketQuadrantPage({ onPickStock }) {
   const { data, loading, refreshing, error, progress, refresh, retry } = useMarketQuadrant();
   const [sector, setSector] = useState(null); // tapped sector → its stocks shown first
-  const header = <div className="section-title" style={{ marginBottom: 10 }}>Market</div>;
+  const header = <div className="section-title" style={{ marginBottom: 10, display: "flex", alignItems: "center", gap: 8 }}>Market{data?.as_of && <AsOf date={data.as_of} src={data.final === false ? "intraday" : "NSE-verified"} staleDays={4} />}</div>;
   const [mseg, setMseg] = useState(() => { try { return localStorage.getItem("td_market_seg") || "signal"; } catch (_) { return "signal"; } });
   const pickM = (k) => { setMseg(k); try { localStorage.setItem("td_market_seg", k); } catch (_) {} window.scrollTo(0, 0); };
 
@@ -3217,8 +3220,8 @@ function MarketQuadrantPage({ onPickStock }) {
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-        {[["signal", "Signal"], ["breadth", "Breadth"], ["sectors", "Sectors"], ["flows", "Money flow"]].map(([k, l]) => <button key={k} className="chip" aria-pressed={mseg === k} onClick={() => pickM(k)} style={{ flex: "1 0 auto" }}>{l}</button>)}
+      <div style={{ display: "flex", gap: 6, marginBottom: 12, overflowX: "auto", scrollbarWidth: "none", margin: "0 -16px 12px", padding: "0 16px 2px" }}>
+        {[["signal", "Signal"], ["breadth", "Breadth"], ["sectors", "Sectors"], ["styles", "Styles"], ["flows", "Money flow"]].map(([k, l]) => <button key={k} className="chip" aria-pressed={mseg === k} onClick={() => pickM(k)} style={{ flex: "1 0 auto", whiteSpace: "nowrap" }}>{l}</button>)}
       </div>
       {mseg === "signal" && <>
       <div id="q-signal" style={{ scrollMarginTop: 100 }}><Guide id="signal" d={data} compact /></div>
@@ -3290,6 +3293,8 @@ function MarketQuadrantPage({ onPickStock }) {
       <MqEnvironment data={data} />
       <MqGreenLight gl={data.green_light} long={data.long_bt} />
       <MqFollowThrough data={data} />
+      <SectionBoundary name="Signal calendar"><SignalCalendar mq={data} /></SectionBoundary>
+      <SectionBoundary name="Replay"><MarketReplay mq={data} /></SectionBoundary>
       </>}
       {mseg === "breadth" && <>
       <QuadSection id="breadth" title="Breadth" d={data} />
@@ -3335,21 +3340,32 @@ function MarketQuadrantPage({ onPickStock }) {
 
       <MqMbi mbi={data.mbi} dip={data.dip} long={data.long_bt} />
       <MqMarketMonitor mm={data.market_monitor} />
+      <SectionBoundary name="Nifty movers"><NiftyMovers onPickStock={onPickStock} /></SectionBoundary>
+      <SectionBoundary name="High club"><HighClub mq={data} onPickStock={onPickStock} /></SectionBoundary>
       </>}
       {mseg === "sectors" && <>
       <QuadSection id="sectors" title="Sectors & themes" d={data} />
+      <SectionBoundary name="Market map"><MarketMap mq={data} onPickStock={onPickStock} /></SectionBoundary>
       <SectionBoundary name="Sector funds"><MqSectorFunds sectors={data.sectors} /></SectionBoundary>
       <MqSectorGrid sectors={data.sectors} sectorStocks={data.sector_stocks} selected={sector} onSelect={setSector} onPickStock={onPickStock} />
       <MqRotationMap data={data} onSelect={(n) => { setSector(n); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
       <MqSectorRotation data={data} onSelect={setSector} />
       <MqThemes themes={data.themes} onPickStock={onPickStock} />
       <MqLeaders leaders={sector ? data.leaders.filter(l => l.sector === sector) : data.leaders} sector={sector} onClear={() => setSector(null)} onPickStock={onPickStock} />
+      <SectionBoundary name="Results season"><ResultsSeason mq={data} onPickStock={onPickStock} /></SectionBoundary>
+      <SectionBoundary name="Index watch"><IndexWatch onPickStock={onPickStock} /></SectionBoundary>
 
       </>}
       {mseg === "flows" && <>
       <QuadSection id="flows" title="Money flow" d={data} />
       <MqFlowsDeals data={data} onPickStock={onPickStock} />
+      <SectionBoundary name="Holder filings"><HolderFilings mq={data} onPickStock={onPickStock} /></SectionBoundary>
+      <SectionBoundary name="Superinvestors"><Superinvestors onPickStock={onPickStock} /></SectionBoundary>
       <EtfPanel lockout={data.environment?.lockout} onPickStock={onPickStock} />
+      <SectionBoundary name="ETF premium"><EtfPremium onPickStock={onPickStock} /></SectionBoundary>
+      </>}
+      {mseg === "styles" && <>
+      <SectionBoundary name="Styles"><StyleScoreboard /></SectionBoundary>
       </>}
       {mseg === "signal" && <>
       {/* ── To Upgrade ── */}
@@ -4181,8 +4197,11 @@ function ResultsWarning({ symbol, style }) {
   );
 }
 
-function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [], onCompare }) {
+function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [], onCompare, onOpenStock }) {
   const { data: mq } = useMarketQuadrant();
+  const { data: deep, err: deepErr } = useStockDeep(symbol);
+  const { data: valRes } = useVal([symbol]);
+  const { data: styles } = useJson("/api/nse?type=styles", 15 * 60e3);
   const { deals } = useFlowsDeals();
   const myDeals = (deals?.deals || []).filter(x => x.sym === symbol).filter((x, i, arr) => arr.findIndex(y => y.client === x.client && y.side === x.side && y.qty === x.qty && y.price === x.price) === i);
   const marks = tradeMarks(trades, symbol);
@@ -4316,6 +4335,7 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [
         {wTrend && <div style={{ fontSize: 11, marginTop: 6, color: wTrend.above && wTrend.rising ? C.pos : !wTrend.above && !wTrend.rising ? C.neg : C.warn }}>{wTrend.label}</div>}
       </div>
 
+      <SectionBoundary name="Story"><StockStory symbol={symbol} d={d} mq={mq} deep={deep} val={valRes?.val} styles={styles} /></SectionBoundary>
       <StockNotes symbol={symbol} last={c} />
       <div className="card" style={{ marginBottom: 12 }}>
         <div className="label" style={{ marginBottom: 8 }}>Relative strength vs Nifty 500{secInfo ? ` and ${sector}` : ""}</div>
@@ -4350,6 +4370,14 @@ function StockPage({ symbol, onBack, onPlan, watchlist, setWatchlist, trades = [
         </div>
         <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>Line = price ÷ Nifty 500, rebased to 100. Rising = outperforming.</div>
       </div>
+      <SectionBoundary name="Peers"><StrongerPeers symbol={symbol} mq={mq} onPickStock={onOpenStock} /></SectionBoundary>
+      <SectionBoundary name="Valuation"><StockValuation symbol={symbol} d={d} mq={mq} val={valRes?.val} styles={styles} /></SectionBoundary>
+      <SectionBoundary name="Results"><StockResults deep={deep} err={deepErr} /></SectionBoundary>
+      <SectionBoundary name="Holders"><StockHolders deep={deep} err={deepErr} /></SectionBoundary>
+      <SectionBoundary name="Announcements"><StockAnnouncements deep={deep} err={deepErr} /></SectionBoundary>
+      <SectionBoundary name="DNA"><StockDNA d={d} /></SectionBoundary>
+      <SectionBoundary name="Price levels"><PriceLevels d={d} /></SectionBoundary>
+      <SectionBoundary name="Seasonality"><Seasonality symbol={symbol} /></SectionBoundary>
 
       <div className="card" style={{ marginBottom: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
@@ -6761,6 +6789,7 @@ function FundsPage({ onOpenFund }) {
         </div>
       )}
       {!ql && <MfPortfolio list={data} onOpenFund={onOpenFund} />}
+      {!ql && <SectionBoundary name="Fund flows"><CategoryFlows /></SectionBoundary>}
       {watch.length > 0 && !ql && (
         <div className="card" style={{ marginBottom: 12, paddingTop: 10 }}>
           <div className="label" style={{ marginBottom: 4 }}>Funds you track</div>
@@ -6871,7 +6900,7 @@ function MfCategory({ cat, onOpen }) {
             <Fragment key={r.code}>
               <button onClick={() => onOpen(r.code)} style={{ textAlign: "left", background: "none", border: "none", borderTop: "1px solid var(--border)", padding: "6px 0", color: "var(--text)", cursor: "pointer", minWidth: 0 }}>
                 <span style={{ display: "block", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}><span style={{ color: "var(--text3)", fontFamily: "var(--mono)", marginRight: 4 }}>{i + 1}</span>{r.name}</span>
-                <span style={{ display: "block", fontSize: 10, color: "var(--text3)" }}>{r.house.replace(/ Mutual Fund$/, "")}{r.y5 == null && r.since ? ` · since ${r.since.slice(0, 4)}` : ""}</span>
+                <span style={{ display: "block", fontSize: 10, color: "var(--text3)" }}>{r.house.replace(/ Mutual Fund$/, "")}{r.y5 == null && r.since ? ` · since ${r.since.slice(0, 4)}` : ""}<TerTag code={r.code} /></span>
               </button>
               {COLS.map(([k]) => <span key={k} style={{ fontFamily: "var(--mono)", fontSize: 11.5, textAlign: "right", color: k === "dd" ? C.neg : beatCol(r, k) || pctCol(r[k]), fontWeight: beatCol(r, k) ? 700 : 400, borderTop: "1px solid var(--border)", padding: "6px 0", alignSelf: "center" }}>{r[k] != null ? (k === "dd" ? `${r[k]}%` : pctTxt(r[k])) : "—"}</span>)}
             </Fragment>
@@ -6879,6 +6908,7 @@ function MfCategory({ cat, onOpen }) {
         </div>
       )}
       {sorted.length > 80 && <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>Top 80 of {sorted.length} by the chosen column — search to find any other.</div>}
+      {st?.done && <SectionBoundary name="Risk-return map"><RiskReturnMap rows={rows} onOpen={onOpen} bench={bench} /></SectionBoundary>}
       {bench && (tally("y3") || tally("y5")) && (
         <div style={{ fontSize: 11.5, color: "var(--text2)", marginTop: 8, lineHeight: 1.5, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
           vs the {bench.index} index fund — {tally("y3") && <><b>{tally("y3")[0]} of {tally("y3")[1]}</b> beat it over 3 years</>}{tally("y3") && tally("y5") ? ", " : ""}{tally("y5") && <><b>{tally("y5")[0]} of {tally("y5")[1]}</b> over 5 years</>}. Green = beat the index fund, red = lagged it.
@@ -7220,6 +7250,15 @@ function FundVsIndex({ d, code }) {
   );
 }
 
+// expense ratio and size, compared with every direct plan in the same category
+function FundFactsForPage({ code, cat }) {
+  const [list, setList] = useState(null);
+  useEffect(() => { let alive = true; loadMfList().then(l => alive && setList(l)).catch(() => {}); return () => { alive = false; }; }, []);
+  const ci = list && cat ? list.cats.indexOf(cat) : -1;
+  const codes = ci >= 0 ? list.funds.filter(f => f[3] === ci).map(f => f[0]) : null;
+  return <FundFacts code={Number(code)} catCodes={codes} />;
+}
+
 function FundPage({ code, onBack, onCompare }) {
   const [d, setD] = useState(null), [err, setErr] = useState(null);
   const [range, setRange] = useState(3);
@@ -7307,6 +7346,7 @@ function FundPage({ code, onBack, onCompare }) {
         )}
       </div>
 
+      <SectionBoundary name="Fund costs"><FundFactsForPage code={code} cat={d.cat} /></SectionBoundary>
       <FundDeep code={code} cat={d.cat} />
       <div style={{ fontSize: 10, color: "var(--text3)", lineHeight: 1.5 }}>NAV from AMFI; history since {mqFmtDate(d.since)} {d.since?.slice(0, 4)} from mfapi.in. Returns exclude exit loads and taxes. Information, not advice.</div>
     </div>
@@ -7727,6 +7767,7 @@ function WrapPage({ trades, watchlist, indices, onBack, onOpenStock, onOpenFunds
         {d.picks?.rows?.length > 0 && <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 6 }}>Tonight's forward-test picks: {d.picks.rows.map(x => x.sym).join(", ")}</div>}
       </>)}
 
+      <SectionBoundary name="Your announcements"><YourAnnouncements symbols={mySyms} onOpenStock={onOpenStock} /></SectionBoundary>
       {sec("Coming up for your stocks", <>
         {soon.length === 0 ? <div style={{ fontSize: 12, color: "var(--text3)" }}>{cal ? "No results due in the next 3 days for your positions or watchlist." : "Loading results calendar…"}</div>
           : soon.map(({ sym, r }) => line(sym, r.inDays === 0 ? "results today" : r.inDays === 1 ? "results tomorrow" : `results in ${r.inDays} days`, r.inDays <= 1 ? C.warn : "var(--text2)"))}
@@ -7840,6 +7881,7 @@ function IposPage({ onBack = null, onOpenStock }) {
                 <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: x.subscribed >= 1 ? C.pos : "var(--text2)" }}>{x.subscribed != null ? `${x.subscribed}× subscribed` : ""}</span>
               </div>
               <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>Band ₹{x.band?.[0]}–{x.band?.[1]} · closes {mo(x.close)}{x.size ? ` · ${(x.size / 1e7).toFixed(2)} cr shares on offer` : ""}</div>
+              <IpoSubscription sym={x.sym} sme={x.sme} />
             </div>
           ))}
           {upcoming.map(x => <div key={x.sym} style={{ borderTop: "1px solid var(--border)", padding: "7px 0", fontSize: 12 }}><b>{x.name}</b> <span style={{ color: "var(--text3)" }}>· opens {mo(x.open)}{x.band ? ` · ₹${x.band[0]}–${x.band[1]}` : ""}</span></div>)}
@@ -8477,6 +8519,8 @@ export default function App() {
           <div style={{ fontSize: 13, color: "var(--text3)", margin: "4px 0 12px" }}>Stocks you're following — today's moves first, then the full list.</div>
           <SectionBoundary name="Watchlist moves"><WatchAlertsCard watchlist={watchlist} onOpen={openStock} /></SectionBoundary>
           <div className="card"><WatchlistPanel watchlist={watchlist} setWatchlist={setWatchlist} onPickStock={openStock} /></div>
+          <div style={{ height: 12 }} />
+          <SectionBoundary name="Watchlist index"><WatchIndex watchlist={watchlist} onPickStock={openStock} /></SectionBoundary>
         </div>
       )}
       {page === "compare" && <ComparePage syms={compareSyms} setSyms={setCompareSyms} onBack={() => { setPage(subBack); window.scrollTo(0, 0); }} onOpenStock={openStock} />}
@@ -8486,7 +8530,7 @@ export default function App() {
       {page === "fund" && fundCode && <FundPage code={fundCode} onBack={() => { setPage(fundBack); window.scrollTo(0, 0); }} onCompare={openFundCompare} />}
       {page === "fundcmp" && <FundComparePage codes={fundCmp} setCodes={setFundCmpSaved} onOpenFund={openFund} />}
       {page === "stock" && stockSym && (
-        <StockPage symbol={stockSym} onBack={() => setPage(stockBack || "scan")} onPlan={pickStock} watchlist={watchlist} setWatchlist={setWatchlist} trades={trades} onCompare={openCompare} />
+        <StockPage symbol={stockSym} onBack={() => setPage(stockBack || "scan")} onPlan={pickStock} watchlist={watchlist} setWatchlist={setWatchlist} trades={trades} onCompare={openCompare} onOpenStock={openStock} />
       )}
 
       {showTour && <Tour onDone={() => { setShowTour(false); try { localStorage.setItem("td_tour_done", "1"); } catch (_) {} }} />}

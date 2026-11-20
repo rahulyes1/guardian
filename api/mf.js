@@ -57,7 +57,7 @@ export function normCat(raw) {
 /** AMFI NAVAll.txt → open-ended Direct-Growth plans with their category. Exported for tests. */
 export function parseAmfi(text) {
   const cats = [], catIdx = new Map(), funds = [], seen = new Set();
-  let cat = null, open = false, house = null, latest = null;
+  let cat = null, open = false, house = null, latest = null; const dayCount = {};
   for (const raw of String(text || "").split(/\r?\n/)) {
     const line = raw.trim();
     if (!line) continue;
@@ -83,8 +83,10 @@ export function parseAmfi(text) {
     seen.add(key);
     if (!catIdx.has(cat)) { catIdx.set(cat, cats.length); cats.push(cat); }
     funds.push([Number(c[0]), name, house, catIdx.get(cat), v, d]);
-    if (!latest || d > latest) latest = d;
+    dayCount[d] = (dayCount[d] || 0) + 1;
   }
+  // the file's date = the day most funds are priced for (a few funds carry stray or future dates)
+  for (const [d, n] of Object.entries(dayCount)) if (!latest || n > dayCount[latest] || (n === dayCount[latest] && d > latest)) latest = d;
   return { date: latest, cats, funds };
 }
 
