@@ -6819,7 +6819,7 @@ function MfCategory({ cat, onOpen }) {
       let rows = cached?.rows || [], offset = rows.length, total = cached?.total ?? null;
       try {
         for (;;) {
-          const j = await fetch(`/api/mf?type=cat&cat=${encodeURIComponent(cat)}&offset=${offset}`).then(r => (r.ok ? r.json() : Promise.reject(new Error("Category data unavailable"))));
+          const j = await fetch(`/api/mf?type=cat&cat=${encodeURIComponent(cat)}&offset=${offset}&v=2`).then(r => (r.ok ? r.json() : Promise.reject(new Error("Category data unavailable"))));
           rows = [...rows, ...j.funds]; total = j.total; offset += j.shown;
           const s = { rows, total, done: !j.more };
           _mfCat.set(cat, s); if (alive) setSt(s);
@@ -7022,7 +7022,7 @@ function loadCategoryAll(cat) {
   const p = (async () => {
     let rows = [], offset = 0;
     for (;;) {
-      const j = await fetch(`/api/mf?type=cat&cat=${encodeURIComponent(cat)}&offset=${offset}`).then(r => (r.ok ? r.json() : Promise.reject(new Error("Category data unavailable"))));
+      const j = await fetch(`/api/mf?type=cat&cat=${encodeURIComponent(cat)}&offset=${offset}&v=2`).then(r => (r.ok ? r.json() : Promise.reject(new Error("Category data unavailable"))));
       rows = [...rows, ...j.funds]; offset += j.shown;
       if (!j.more) break;
     }
