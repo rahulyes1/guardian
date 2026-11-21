@@ -1440,7 +1440,7 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
         {openTrades.length === 0 ? (
           <div className="card" style={{ textAlign: "center", padding: "22px 16px", marginBottom: 14 }}>
             <div style={{ color: "var(--text2)", fontSize: 14, marginBottom: 4 }}>Book is clear</div>
-            <div style={{ color: "var(--text3)", fontSize: 12 }}>Pick from today's best setups below, or plan your own.</div>
+            <div style={{ color: "var(--text3)", fontSize: 12 }}>Plan your own, or see today's best setups below.</div>
           </div>
         ) : (
           <div style={{ marginBottom: 14 }}>
@@ -5885,19 +5885,24 @@ function IdeasPage({ watchlist, portfolio, onOpenStock, onPlan }) {
   );
 }
 
+// Always shown: the setups, or why there are none (so "setups below" never points at nothing)
 function BestSetups({ watchlist, portfolio, onOpenStock, onPlan, onSeeAll }) {
-  const { data } = useMarketQuadrant();
-  if (!data?.scans) return null;
+  const { data, error, stalled } = useMarketQuadrant();
+  const head = (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 2 }}>
+      <div className="label">Today's best setups</div>
+      <button className="chip" style={{ fontSize: 10 }} onClick={onSeeAll}>All ideas ›</button>
+    </div>
+  );
+  const empty = (text) => <div className="card" style={{ marginBottom: 14, paddingTop: 12 }}>{head}<div style={{ fontSize: 12, color: "var(--text3)", marginTop: 6, lineHeight: 1.45 }}>{text}</div></div>;
+  if (!data?.scans) return empty(error || stalled ? "Setups need today's market data, which didn't load — tap Retry in the Market Brief above." : "Loading today's setups…");
   let quality = true; try { quality = localStorage.getItem("td_quality") !== "0"; } catch (_) {}
   const top = buildIdeas(data, readMicro(), watchlist).filter(x => x.plan && (!quality || x.qok || x.tags.has("watch"))).slice(0, 5);
   const s = suggestedRisk(data);
-  if (!top.length) return null;
+  if (!top.length) return empty(s?.pct === 0 ? `No setups today — market rules say no new entries (${s.why}).` : `No stock passes today's setup rules${quality ? " with the quality filter on" : ""}. All ideas lists everything that came close.`);
   return (
     <div className="card" style={{ marginBottom: 14, paddingTop: 12 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 2 }}>
-        <div className="label">Today's best setups</div>
-        <button className="chip" style={{ fontSize: 10 }} onClick={onSeeAll}>All ideas ›</button>
-      </div>
+      {head}
       {data.green_light?.mult === 0 ? <StandDownNote d={data} style={{ margin: "6px 0" }} />
         : s?.pct === 0 && <div style={{ fontSize: 11, color: C.warn, margin: "4px 0" }}>Market rules say no new entries today ({s.why}) — watch only.</div>}
       {top.map(x => <IdeaRow key={x.sym} x={x} portfolio={portfolio} riskPct={s?.pct ?? 0} onOpen={onOpenStock} onPlan={onPlan} />)}
