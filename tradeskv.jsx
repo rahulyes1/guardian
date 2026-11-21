@@ -1228,9 +1228,13 @@ function PriceBadge({ info, loading }) {
 // ─── TOP BAR ────────────────────────────────────────────────────────────────
 function TopBar({ regime, portfolio, page, indicesData, onSearch, onMenu }) {
   // The chip shows the same verdict as every other screen: the market signal (bias is one of its four readings)
-  const { data: mq } = useMarketQuadrant();
+  const { data: mq, error: mqErr, stalled } = useMarketQuadrant();
   const sig = mq?.overall;
-  const cfg = sig ? { label: sig, color: MQ_SIGNAL_COLOR[sig], bg: MQ_SIGNAL_BG[sig] } : REGIME_CONFIG[regime];
+  // Only ever the market signal. Never fall back to the stored bias regime (that showed BEAR while
+  // everything else said SELECTIVE). Old data is shown dimmed, with its date on hover.
+  const old = sig && mqAgeDays(mq.as_of) > 4;
+  const cfg = sig ? { label: sig, color: old ? C.muted : MQ_SIGNAL_COLOR[sig], bg: old ? "transparent" : MQ_SIGNAL_BG[sig], title: `Market signal as of ${mqFmtDate(mq.as_of)}${old ? " — not updated since" : ""}` }
+    : { label: mqErr || stalled ? "—" : "…", color: C.muted, bg: "transparent", title: mqErr || stalled ? "Market signal unavailable" : "Loading the market signal" };
   const open = isMarketOpen();
   const nsei = indicesData?.nsei || null;
   const cnx500 = indicesData?.cnx500 || null;
@@ -1255,7 +1259,7 @@ function TopBar({ regime, portfolio, page, indicesData, onSearch, onMenu }) {
         }}>
           TRADESK
         </div>
-        <div style={{
+        <div title={cfg.title} style={{
           background: cfg.bg,
           border: `1px solid ${cfg.color}`,
           borderRadius: 6, padding: "2px 6px",
@@ -3669,7 +3673,8 @@ function MarketBrief({ onOpenQuad, onOpenScan, onOpenWrap }) {
       </div>
       <div style={{ fontSize: 13, color: "var(--text)", marginTop: 8, lineHeight: 1.45 }}>{briefRule(d)}</div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6, marginTop: 12 }}>
+      <div style={{ fontSize: 9.5, color: "var(--text3)", letterSpacing: "0.12em", marginTop: 12 }}>THE FOUR READINGS BEHIND {d.overall}</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6, marginTop: 5 }}>
         {chips.map(([k, v]) => (
           <div key={k} style={{ background: "var(--bg3)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 6px", minWidth: 0 }}>
             <div style={{ fontSize: 9.5, color: "var(--text3)", letterSpacing: "0.12em" }}>{k}</div>
