@@ -11,7 +11,8 @@ import { useSyncedAppState } from "./appStateSync.js";
 import { calendarYears, monthGrid, riskStats, rollingReturns, investCalc, sinceLaunch, RISK_FREE } from "./lib/fundMath.js";
 import { AsOf, useStockDeep, useVal, useJson, StockStory, StockValuation, StockResults, StockHolders, StockAnnouncements, StrongerPeers, StockDNA, PriceLevels, Seasonality } from "./features.jsx";
 import { StyleScoreboard, NiftyMovers, MarketMap, IndexWatch, HighClub, SignalCalendar, MarketReplay, HolderFilings, Superinvestors, EtfPremium, ResultsSeason } from "./features-market.jsx";
-import { MyIdeasPage, TodayIdeasCard } from "./features-ideas.jsx";
+import { MyIdeasPage, TodayIdeasCard, MorningIdeas } from "./features-ideas.jsx";
+import { morningLines, heatPct, HEAT_LIMIT } from "./lib/morning.js";
 import { openRisk, tradeR } from "./lib/risk.js";
 import { FundFacts, TerTag, CategoryFlows, RiskReturnMap, IpoSubscription, WatchIndex, YourAnnouncements } from "./features-invest.jsx";
 // ─── THEME & CONSTANTS ───────────────────────────────────────────────────────
@@ -1401,11 +1402,11 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
     <div className="fade-in" style={{ padding: "16px 16px 120px" }}>
       {/* 1 · Market — signal, environment, today's rule, what changed */}
       <SectionBoundary name="Market brief">
-        {isPreOpen() ? <MorningBrief trades={trades} watchlist={watchlist} onOpenStock={onOpenStock} />
+        {isPreOpen() ? <MorningBrief trades={trades} watchlist={watchlist} onOpenStock={onOpenStock} ideas={ideas} portfolio={portfolio} onPlan={onPlan} />
           : <MarketBrief onOpenQuad={() => { setPage("quadrant"); window.scrollTo(0, 0); }} onOpenScan={() => { setPage("ideas"); window.scrollTo(0, 0); }} onOpenWrap={() => { setPage("wrap"); window.scrollTo(0, 0); }} />}
       </SectionBoundary>
       {/* 1b · your own ideas that reached their entry zone (shown only when you have ideas) */}
-      <SectionBoundary name="My ideas"><TodayIdeasCard ideas={ideas} setIdeas={setIdeas} getPrices={fetchQuotes} onOpenIdeas={() => { setPage("myideas"); window.scrollTo(0, 0); }} onOpenStock={onOpenStock} /></SectionBoundary>
+      {!isPreOpen() && <SectionBoundary name="My ideas"><TodayIdeasCard ideas={ideas} setIdeas={setIdeas} getPrices={fetchQuotes} onOpenIdeas={() => { setPage("myideas"); window.scrollTo(0, 0); }} onOpenStock={onOpenStock} /></SectionBoundary>} {/* before the open, the morning brief lists them */}
 
       {/* 2 · Your book — what needs action first */}
       <SectionBoundary name="Your positions">
@@ -8251,9 +8252,9 @@ function ComparePage({ syms, setSyms, onBack, onOpenStock }) {
 }
 
 // ─── PRE-MARKET BRIEF (weekday mornings) ─────────────────────────────────────
-function MorningBrief({ trades, watchlist, onOpenStock }) {
+function MorningBrief({ trades, watchlist, onOpenStock, ideas = [], portfolio, onPlan }) {
   const { data: d } = useMarketQuadrant();
-  const { deals } = useFlowsDeals();
+  const { flows, deals } = useFlowsDeals();
   const [g, setG] = useState(null), [cal, setCal] = useState(null);
   useEffect(() => { let alive = true; fetchGlobal().then(x => alive && setG(x)).catch(() => {}); fetchResultsCalendar().then(c => alive && setCal(c)); return () => { alive = false; }; }, []);
   const open = (trades || []).filter(t => t.status === "open" || t.status === "partial").map(normalizeTrade);
@@ -8261,13 +8262,30 @@ function MorningBrief({ trades, watchlist, onOpenStock }) {
   const today = cal ? mine.map(s => ({ s, r: upcomingResults(cal, s, 1) })).filter(x => x.r) : [];
   const myDeals = (deals?.deals || []).filter(x => mine.includes(x.sym));
   const sr = d ? suggestedRisk(d) : null;
+  const lines = morningLines({ global: g || [], mq: d, flows, riskPct: sr ? sr.pct : null });
+  const heat = heatPct(trades, portfolio);
+  let quality = true; try { quality = localStorage.getItem("td_quality") !== "0"; } catch (_) {}
+  const top3 = d?.scans ? buildIdeas(d, readMicro(), watchlist).filter(x => x.plan && (!quality || x.qok || x.tags.has("watch"))).slice(0, 3) : [];
   return (
     <div className="card" style={{ marginBottom: 14, border: "1.5px solid var(--violet)" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}><div className="label">☀️ Before the open</div><span style={{ fontSize: 10.5, color: "var(--text3)" }}>NSE opens 9:15</span></div>
-      {d && <div style={{ fontSize: 12.5, marginTop: 6 }}>Signal <b style={{ color: MQ_SIGNAL_COLOR[d.overall] }}>{d.overall}</b> · risk <b>{sr?.pct ?? 0}%</b> per trade · {d.environment?.name?.toLowerCase()}</div>}
-      {g?.length > 0 && <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6, marginTop: 8 }}>
-        {g.slice(0, 8).map(x => <div key={x.t} style={{ minWidth: 0 }}><div style={{ fontSize: 9.5, color: "var(--text3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{x.name}</div><div style={{ fontFamily: "var(--mono)", fontSize: 12, color: pctCol(x.chg) }}>{pctTxt(x.chg)}</div></div>)}
+      {heat > HEAT_LIMIT && <div role="alert" style={{ marginTop: 8, padding: "6px 10px", borderRadius: 8, border: `1px solid ${C.neg}66`, background: "rgba(220,20,60,0.08)", fontSize: 12.5 }}>
+        <b style={{ color: C.neg }}>Portfolio heat {heat.toFixed(1)}%</b> — above your {HEAT_LIMIT}% limit. Tighten stops or trim before adding anything new.
       </div>}
+      {lines.length > 0 && <ol style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 12.5, lineHeight: 1.5, color: "var(--text)" }}>{lines.map((l, i) => <li key={i} style={{ marginBottom: 2 }}>{l}</li>)}</ol>}
+      {lines.length > 0 && <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 2 }}>GIFT Nifty isn't available from a free source; US futures and Asia are the early read. Heat {heat.toFixed(1)}% of ₹{Math.round((portfolio || 0) / 1000)}k.</div>}
+      {top3.length > 0 && <div style={{ marginTop: 10 }}>
+        <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.08em" }}>TOP 3 SETUPS · ENTRY / STOP / 2R TARGET</div>
+        {top3.map(x => { const e = x.plan.entry, s = x.plan.stop, t = Math.round((e + 2 * (e - s)) * 100) / 100; return (
+          <div key={x.sym} style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: 12, padding: "4px 0", borderTop: "1px solid var(--border)" }}>
+            <button onClick={() => onOpenStock(x.sym)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", fontWeight: 700, font: "inherit" }}>{x.sym}</button>
+            <span style={{ flex: 1, fontFamily: "var(--mono)", fontSize: 11, color: "var(--text2)" }}>₹{e} / ₹{s} / ₹{t}</span>
+            {onPlan && <button className="chip chip-sm" onClick={() => onPlan({ symbol: x.sym, entry: e, stop: s, target: t })}>Plan</button>}
+          </div>
+        ); })}
+      </div>}
+      <MorningIdeas ideas={ideas} getPrices={fetchQuotes} onOpenStock={onOpenStock} />
+      {/* the five lines above already cover the signal, the rule and the global cues */}
       {open.length > 0 && <div style={{ marginTop: 8 }}>
         <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.08em" }}>YOUR STOPS TODAY</div>
         {open.map(t => <div key={t.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "3px 0", borderTop: "1px solid var(--border)" }}><button onClick={() => onOpenStock(normalizeSymbol(t.symbol))} style={{ background: "none", border: "none", padding: 0, color: "var(--text)", fontWeight: 700, cursor: "pointer" }}>{normalizeSymbol(t.symbol)}</button><span style={{ fontFamily: "var(--mono)", color: C.neg }}>stop ₹{t.currentStop || t.stop || "—"}</span></div>)}

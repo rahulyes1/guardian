@@ -185,6 +185,28 @@ export function MyIdeasPage({ ideas, setIdeas, portfolio, riskPct, sizeFor, getP
   );
 }
 
+/** Morning brief: your active ideas in or within 2% of their entry zone, at the last price. */
+export function MorningIdeas({ ideas, getPrices, onOpenStock }) {
+  const active = ideas.filter((i) => i.status === "watching" || i.status === "triggered");
+  const { prices } = useIdeaPrices(active.map((i) => i.sym), getPrices);
+  if (!active.length) return null;
+  const rows = active.map((i) => ({ i, p: prices[i.sym], z: zoneState(i, prices[i.sym]) }))
+    .filter(({ i, p, z }) => z.where === "in" || (z.where === "above" && p <= i.hi * 1.02) || (z.where === "below" && p >= i.lo * 0.98));
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.08em" }}>YOUR IDEAS NEAR ENTRY</div>
+      {rows.length ? rows.slice(0, 5).map(({ i, p, z }) => (
+        <div key={i.id} style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: 12, padding: "3px 0", borderTop: "1px solid var(--border)" }}>
+          <button onClick={() => onOpenStock?.(i.sym)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", fontWeight: 700, font: "inherit" }}>{i.sym}</button>
+          <span style={{ ...mono, color: "var(--text2)" }}>₹{fmtP(p)}</span>
+          <span style={{ flex: 1, ...mono, color: "var(--text3)", fontSize: 11 }}>zone ₹{fmtP(i.lo)}{i.hi !== i.lo ? `–${fmtP(i.hi)}` : ""}</span>
+          <span style={{ fontSize: 11, color: z.where === "in" ? C.pos : C.warn }}>{z.where === "in" ? "in zone" : z.text.replace(" the zone", "")}</span>
+        </div>
+      )) : <div style={{ fontSize: 11.5, color: "var(--text3)", padding: "3px 0" }}>{Object.keys(prices).length ? `None of your ${active.length} active idea${active.length > 1 ? "s is" : " is"} within 2% of its zone.` : "Checking prices…"}</div>}
+    </div>
+  );
+}
+
 /** TODAY: ideas whose price is in the entry zone right now (in-app only, no notifications). */
 export function TodayIdeasCard({ ideas, setIdeas, getPrices, onOpenIdeas, onOpenStock }) {
   const active = ideas.filter((i) => i.status === "watching" || i.status === "triggered");
