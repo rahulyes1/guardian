@@ -11,6 +11,7 @@ import { useSyncedAppState } from "./appStateSync.js";
 import { calendarYears, monthGrid, riskStats, rollingReturns, investCalc, sinceLaunch, RISK_FREE } from "./lib/fundMath.js";
 import { AsOf, useStockDeep, useVal, useJson, StockStory, StockValuation, StockResults, StockHolders, StockAnnouncements, StrongerPeers, StockDNA, PriceLevels, Seasonality } from "./features.jsx";
 import { StyleScoreboard, NiftyMovers, MarketMap, IndexWatch, HighClub, SignalCalendar, MarketReplay, HolderFilings, Superinvestors, EtfPremium, ResultsSeason } from "./features-market.jsx";
+import { MyIdeasPage, TodayIdeasCard } from "./features-ideas.jsx";
 import { FundFacts, TerTag, CategoryFlows, RiskReturnMap, IpoSubscription, WatchIndex, YourAnnouncements } from "./features-invest.jsx";
 // ─── THEME & CONSTANTS ───────────────────────────────────────────────────────
 // Light/dark: accents are picked per theme for contrast (vivid on dark, deeper on light).
@@ -1329,7 +1330,7 @@ function TopBar({ regime, portfolio, page, indicesData, onSearch, onMenu }) {
 }
 
 // ─── TODAY PAGE ─────────────────────────────────────────────────────────────
-function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, trades, setPage, watchlist, onOpenStock, onPlan, onOpenFund, onOpenIpos }) {
+function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, trades, setPage, ideas = [], setIdeas, watchlist, onOpenStock, onPlan, onOpenFund, onOpenIpos }) {
   const cfg = REGIME_CONFIG[regime];
   const openTrades = trades.filter(t => t.status === "open" || t.status === "partial").map(normalizeTrade);
   const totalRisk = openTrades.reduce((s, t) => s + (t.riskAmount || 0), 0);
@@ -1402,6 +1403,8 @@ function TodayPage({ regime, setRegime, regimeSince, portfolio, setPortfolio, tr
         {isPreOpen() ? <MorningBrief trades={trades} watchlist={watchlist} onOpenStock={onOpenStock} />
           : <MarketBrief onOpenQuad={() => { setPage("quadrant"); window.scrollTo(0, 0); }} onOpenScan={() => { setPage("ideas"); window.scrollTo(0, 0); }} onOpenWrap={() => { setPage("wrap"); window.scrollTo(0, 0); }} />}
       </SectionBoundary>
+      {/* 1b · your own ideas that reached their entry zone (shown only when you have ideas) */}
+      <SectionBoundary name="My ideas"><TodayIdeasCard ideas={ideas} setIdeas={setIdeas} getPrices={fetchQuotes} onOpenIdeas={() => { setPage("myideas"); window.scrollTo(0, 0); }} onOpenStock={onOpenStock} /></SectionBoundary>
 
       {/* 2 · Your book — what needs action first */}
       <SectionBoundary name="Your positions">
@@ -1606,6 +1609,7 @@ function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillS
     planRef.current = p.entry ? p : null;
     if (p.entry) setEntry(String(p.entry));
     if (p.stop) setStop(String(p.stop));
+    if (p.target) setTarget(String(p.target));
     selectSuggestion({ symbol: p.symbol, name: p.symbol });
     onPrefillUsed?.();
   }, [prefillSymbol]);
@@ -5835,6 +5839,13 @@ function IdeaRow({ x, portfolio, riskPct, onOpen, onPlan, compact }) {
   );
 }
 
+// STOCKS › My ideas, sized with today's risk rule (same sizing as Setups)
+function MyIdeasRoute(props) {
+  const { data } = useMarketQuadrant();
+  const s = data ? suggestedRisk(data) : null;
+  return <MyIdeasPage {...props} riskPct={s ? s.pct : null} sizeFor={sizeFor} getPrices={fetchQuotes} />;
+}
+
 function IdeasPage({ watchlist, portfolio, onOpenStock, onPlan }) {
   const { data, loading, error, progress, retry } = useMarketQuadrant();
   const { deals } = useFlowsDeals();
@@ -5844,7 +5855,7 @@ function IdeasPage({ watchlist, portfolio, onOpenStock, onPlan }) {
   const [quality, toggleQuality] = useQualityGate();
   const head = (
     <div style={{ marginBottom: 12 }}>
-      <div className="section-title">Ideas</div>
+      <div className="section-title">Setups</div>
       <div style={{ fontSize: 13, color: "var(--text3)", marginTop: 4 }}>Everything worth a look today, in one ranked list — sized for today's market.</div>
     </div>
   );
@@ -5896,7 +5907,7 @@ function BestSetups({ watchlist, portfolio, onOpenStock, onPlan, onSeeAll }) {
   const head = (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 2 }}>
       <div className="label">Today's best setups</div>
-      <button className="chip" style={{ fontSize: 10 }} onClick={onSeeAll}>All ideas ›</button>
+      <button className="chip" style={{ fontSize: 10 }} onClick={onSeeAll}>All setups ›</button>
     </div>
   );
   const empty = (text) => <div className="card" style={{ marginBottom: 14, paddingTop: 12 }}>{head}<div style={{ fontSize: 12, color: "var(--text3)", marginTop: 6, lineHeight: 1.45 }}>{text}</div></div>;
@@ -5904,7 +5915,7 @@ function BestSetups({ watchlist, portfolio, onOpenStock, onPlan, onSeeAll }) {
   let quality = true; try { quality = localStorage.getItem("td_quality") !== "0"; } catch (_) {}
   const top = buildIdeas(data, readMicro(), watchlist).filter(x => x.plan && (!quality || x.qok || x.tags.has("watch"))).slice(0, 5);
   const s = suggestedRisk(data);
-  if (!top.length) return empty(s?.pct === 0 ? `No setups today — market rules say no new entries (${s.why}).` : `No stock passes today's setup rules${quality ? " with the quality filter on" : ""}. All ideas lists everything that came close.`);
+  if (!top.length) return empty(s?.pct === 0 ? `No setups today — market rules say no new entries (${s.why}).` : `No stock passes today's setup rules${quality ? " with the quality filter on" : ""}. All setups lists everything that came close.`);
   return (
     <div className="card" style={{ marginBottom: 14, paddingTop: 12 }}>
       {head}
@@ -8331,7 +8342,7 @@ function FundsTodayCard({ onOpen, onOpenFund }) {
 // Which bottom tab a page belongs to
 const NAV_GROUP = {
   today: "today", wrap: "today",
-  ideas: "stocks", scan: "stocks", movers: "stocks", watch: "stocks",
+  ideas: "stocks", myideas: "stocks", scan: "stocks", movers: "stocks", watch: "stocks",
   quadrant: "market",
   funds: "invest", fund: "invest", ipos: "invest", fundcmp: "invest",
   journal: "journal", playbook: "journal",
@@ -8376,7 +8387,7 @@ function SegBar({ items, active, onPick }) {
     </div>
   );
 }
-const STOCKS_SEGS = [["ideas", "Ideas"], ["scan", "Scans"], ["movers", "Movers"], ["watch", "Watchlist"]];
+const STOCKS_SEGS = [["ideas", "Setups"], ["myideas", "My ideas"], ["scan", "Scans"], ["movers", "Movers"], ["watch", "Watchlist"]];
 const INVEST_SEGS = [["funds", "Mutual funds"], ["fundcmp", "Compare"], ["ipos", "IPOs"]];
 const JOURNAL_SEGS = [["journal", "Trades"], ["review", "Review"], ["stats", "Stats"], ["setups", "Setups"]];
 
@@ -8423,6 +8434,8 @@ export default function App() {
     setWatchlist,
     setMfHoldings,
     setMfWatch,
+    ideas,
+    setIdeas,
   } = useSyncedAppState();
   _mfSync = { setHoldings: setMfHoldings, setWatch: setMfWatch };
   const [prefill, setPrefill] = useState(null);
@@ -8507,10 +8520,13 @@ export default function App() {
 
       {page === "today" && (
         <TodayPage regime={regime} setRegime={handleRegimeChange} regimeSince={regimeSince} portfolio={portfolio} setPortfolio={setPortfolio} trades={realTrades} setPage={setPage}
-          watchlist={watchlist} onOpenStock={openStock} onPlan={pickStock} onOpenFund={openFund} onOpenIpos={openIpos} />
+          ideas={ideas} setIdeas={setIdeas} watchlist={watchlist} onOpenStock={openStock} onPlan={pickStock} onOpenFund={openFund} onOpenIpos={openIpos} />
       )}
       {page === "ideas" && (
         <IdeasPage watchlist={watchlist} portfolio={portfolio} onOpenStock={openStock} onPlan={pickStock} />
+      )}
+      {page === "myideas" && (
+        <SectionBoundary name="My ideas"><MyIdeasRoute ideas={ideas} setIdeas={setIdeas} portfolio={portfolio} onPlan={pickStock} onOpenStock={openStock} /></SectionBoundary>
       )}
       <PlanSheet open={planOpen} onClose={() => setPlanOpen(false)}>
         <SectionBoundary name="Trade calculator">

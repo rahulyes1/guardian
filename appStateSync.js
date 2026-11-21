@@ -1,3 +1,4 @@
+import { normalizeIdea } from "./lib/ideas.js";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getSupabaseClient, isSupabaseConfigured } from "./supabaseClient.js";
 
@@ -24,6 +25,7 @@ const DEFAULT_SNAPSHOT = {
   watchlist: [],
   mfHoldings: [],
   mfWatch: [],
+  ideas: [],
   updatedAt: null,
 };
 
@@ -95,6 +97,10 @@ function normalizeSnapshot(input, options = {}) {
       : [],
     mfWatch: Array.isArray(source.mfWatch)
       ? [...new Set(source.mfWatch.map(Number).filter((c) => Number.isFinite(c) && c > 0))].slice(0, 200)
+      : [],
+    // "My ideas" vault — [{ id, sym, thesis, lo, hi, stop, target, status, tags, date, ... }], max 300
+    ideas: Array.isArray(source.ideas)
+      ? source.ideas.map(normalizeIdea).filter(Boolean).filter((x, i, arr) => arr.findIndex((y) => y.id === x.id) === i).slice(0, 300)
       : [],
     updatedAt: typeof source.updatedAt === "string" && source.updatedAt
       ? source.updatedAt
@@ -222,8 +228,13 @@ export function useSyncedAppState() {
   }, [cloudSync]);
 
   // A cloud copy saved before funds were synced has no funds fields: keep this device's funds then
-  const withLocalFunds = (payload) => (payload && typeof payload === "object" && !Array.isArray(payload.mfHoldings)
-    ? { ...payload, mfHoldings: snapshotRef.current.mfHoldings || [], mfWatch: snapshotRef.current.mfWatch || [] } : payload);
+  const withLocalFunds = (payload) => {
+    if (!payload || typeof payload !== "object") return payload;
+    let p = payload;
+    if (!Array.isArray(p.mfHoldings)) p = { ...p, mfHoldings: snapshotRef.current.mfHoldings || [], mfWatch: snapshotRef.current.mfWatch || [] };
+    if (!Array.isArray(p.ideas)) p = { ...p, ideas: snapshotRef.current.ideas || [] };
+    return p;
+  };
 
   const updateCloudSyncState = useCallback((patch) => {
     setCloudSync((prev) => ({ ...prev, ...patch }));
@@ -347,6 +358,10 @@ export function useSyncedAppState() {
 
   const setMfHoldings = useCallback((updater) => {
     updateLocalSnapshot((previous) => ({ ...previous, mfHoldings: resolveUpdater(updater, previous.mfHoldings || []) }));
+  }, [updateLocalSnapshot]);
+
+  const setIdeas = useCallback((updater) => {
+    updateLocalSnapshot((previous) => ({ ...previous, ideas: resolveUpdater(updater, previous.ideas || []) }));
   }, [updateLocalSnapshot]);
 
   const setMfWatch = useCallback((updater) => {
@@ -473,6 +488,8 @@ export function useSyncedAppState() {
     setMfHoldings,
     mfWatch: snapshot.mfWatch || [],
     setMfWatch,
+    ideas: snapshot.ideas || [],
+    setIdeas,
     cloudSync,
   };
 }
