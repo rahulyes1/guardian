@@ -95,12 +95,16 @@ function looksValid(d) {
   return d && MQ_SIGNALS.includes(d.overall) && Array.isArray(d.history) && typeof d.total === "number" && d.total >= 400
     && d.sector_stocks && typeof d.sector_stocks === "object" && d.environment && d.swing_state && "follow_through" in d && d.scans && d.sector_history && Array.isArray(d.themes) && "signal_backtest" in d && Array.isArray(d.scans.ep) && d.rs_of && d.scan_stats && d.plan_of && d.market_monitor && Array.isArray(d.scans.coil) && d.mbi && d.green_light !== undefined && Array.isArray(d.scans.fundflow) && d.q_of && d.dip !== undefined && Array.isArray(d.scans.htf) && d.chg_of;
 }
+const SHARED_TIMEOUT_MS = 10000;
 async function readShared() {
   const sb = sharedClientGetter?.();
   if (!sb) return null;
   try {
-    const { data, error } = await sb.from(SHARED_TABLE)
-      .select("as_of, data, computed_at").order("as_of", { ascending: false }).limit(1);
+    // a hung request (network, or the auth client waiting on a lock) must not stall the whole app
+    const { data, error } = await Promise.race([
+      sb.from(SHARED_TABLE).select("as_of, data, computed_at").order("as_of", { ascending: false }).limit(1),
+      new Promise((res) => setTimeout(() => res({ data: null, error: new Error("shared read timed out") }), SHARED_TIMEOUT_MS)),
+    ]);
     if (error || !data?.length) return null;
     const row = data[0];
     if (!looksValid(row.data)) return null;

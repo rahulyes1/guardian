@@ -2718,10 +2718,12 @@ function useMarketQuadrant() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
   const [progress, setProgress] = useState({ msg: "Initialising…", pct: 0 });
+  const [stalled, setStalled] = useState(false); // loading, but no progress for STALL_MS
   const alive = useRef(true);
+  const lastMove = useRef(Date.now());
 
   const run = async (force = false) => {
-    setError(null);
+    setError(null); setStalled(false); lastMove.current = Date.now();
     if (force) setRefreshing(true); else setLoading(true);
     try {
       const result = await loadMarketQuadrant({ force });
@@ -2735,7 +2737,7 @@ function useMarketQuadrant() {
 
   useEffect(() => {
     alive.current = true;
-    const unsub = subscribeProgress((msg, pct) => alive.current && setProgress({ msg, pct }));
+    const unsub = subscribeProgress((msg, pct) => { if (!alive.current) return; lastMove.current = Date.now(); setStalled(false); setProgress({ msg, pct }); });
     run();
     // During market hours, breadth is re-checked while the app is open (results older than
     // 20 minutes are recomputed; marked "intraday" until NSE's official close).
@@ -2743,8 +2745,16 @@ function useMarketQuadrant() {
     return () => { alive.current = false; unsub(); clearInterval(timer); };
   }, []);
 
-  return { data, loading, refreshing, error, progress, refresh: () => run(true), retry: () => run(false) };
+  // watchdog: while loading with no data on screen, flag a stall if progress hasn't moved for 25 s
+  useEffect(() => {
+    if (!loading || data?.history) return;
+    const t = setInterval(() => { if (alive.current && Date.now() - lastMove.current > STALL_MS) setStalled(true); }, 2000);
+    return () => clearInterval(t);
+  }, [loading, data]);
+
+  return { data, loading, refreshing, error, stalled, progress, refresh: () => run(true), retry: () => run(false) };
 }
+const STALL_MS = 25000;
 
 function MqDelta({ cur, prev, digits = 1, unit = "" }) {
   if (cur == null || prev == null) return null;
@@ -3608,16 +3618,19 @@ function AppSettings({ onTour }) {
 }
 
 function MarketBrief({ onOpenQuad, onOpenScan, onOpenWrap }) {
-  const { data, loading, error, progress, retry } = useMarketQuadrant();
+  const { data, loading, error, stalled, progress, retry } = useMarketQuadrant();
   const { flows } = useFlowsDeals();
   const [allChanges, setAllChanges] = useState(false);
   if (!data?.history) {
     return (
       <div className="card" style={{ marginBottom: 14 }}>
         <div className="label">Market Brief</div>
-        {error ? (
+        {error || stalled ? (
           <>
-            <div style={{ fontSize: 12, color: "var(--red)", marginTop: 6 }}>{error}</div>
+            <div style={{ fontSize: 13, color: "var(--text)", marginTop: 8 }}>Brief unavailable</div>
+            <div style={{ fontSize: 11.5, color: "var(--text3)", marginTop: 4, lineHeight: 1.45 }}>
+              {error ? `Couldn't load today's market data (${error}).` : "The market data is taking too long to arrive — the connection may be slow."}
+            </div>
             <button className="btn-ghost" style={{ marginTop: 10 }} onClick={retry}>Retry</button>
           </>
         ) : (
