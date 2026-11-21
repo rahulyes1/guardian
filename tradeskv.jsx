@@ -12,6 +12,7 @@ import { calendarYears, monthGrid, riskStats, rollingReturns, investCalc, sinceL
 import { AsOf, useStockDeep, useVal, useJson, StockStory, StockValuation, StockResults, StockHolders, StockAnnouncements, StrongerPeers, StockDNA, PriceLevels, Seasonality } from "./features.jsx";
 import { StyleScoreboard, NiftyMovers, MarketMap, IndexWatch, HighClub, SignalCalendar, MarketReplay, HolderFilings, Superinvestors, EtfPremium, ResultsSeason } from "./features-market.jsx";
 import { MyIdeasPage, TodayIdeasCard } from "./features-ideas.jsx";
+import { openRisk, tradeR } from "./lib/risk.js";
 import { FundFacts, TerTag, CategoryFlows, RiskReturnMap, IpoSubscription, WatchIndex, YourAnnouncements } from "./features-invest.jsx";
 // ─── THEME & CONSTANTS ───────────────────────────────────────────────────────
 // Light/dark: accents are picked per theme for contrast (vivid on dark, deeper on light).
@@ -1547,7 +1548,8 @@ function OpenTradeCard({ trade, livePrice }) {
 
 // ─── CALCULATOR PAGE ─────────────────────────────────────────────────────────
 function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillSymbol, onPrefillUsed }) {
-  const planRef = useRef(null); // { symbol, entry, stop } from a stock page's suggested plan
+  const planRef = useRef(null); // { symbol, entry, stop, target?, setupType?, notes? } from a stock page or an idea
+  const symbolRef = useRef(""); // last symbol typed or picked in the calculator
   const [symbol, setSymbol] = useState("");
   const [symbolInfo, setSymbolInfo] = useState(null);
 
@@ -1590,10 +1592,16 @@ function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillS
     showSuggestions,
     suggestions,
   } = useSymbolLookup({
-    onSymbolChange: (v) => { if (planRef.current && normalizeSymbol(v) !== normalizeSymbol(planRef.current.symbol)) planRef.current = null; setSymbol(v); },
+    onSymbolChange: (v) => {
+      if (planRef.current && normalizeSymbol(v) !== normalizeSymbol(planRef.current.symbol)) planRef.current = null;
+      // a different stock (not the one a plan just filled in) clears the entry, so its live price can fill it
+      if (normalizeSymbol(symbolRef.current) !== normalizeSymbol(v) && !(planRef.current && normalizeSymbol(planRef.current.symbol) === normalizeSymbol(v))) setEntry("");
+      symbolRef.current = v;
+      setSymbol(v);
+    },
     onSymbolInfo: setSymbolInfo,
-    // A plan from a stock page keeps its entry; otherwise the live price becomes the entry
-    onLtpSelect: (ltp) => { if (!planRef.current?.entry) setEntry(String(ltp.toFixed(2))); },
+    // A plan keeps its entry; otherwise the live price fills an EMPTY entry only — never overwrites what you typed
+    onLtpSelect: (ltp) => { if (!planRef.current?.entry) setEntry((e) => (String(e || "").trim() ? e : String(ltp.toFixed(2)))); },
   });
 
   useEffect(() => {
@@ -1606,7 +1614,7 @@ function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillS
   useEffect(() => {
     if (!prefillSymbol) return;
     const p = typeof prefillSymbol === "string" ? { symbol: prefillSymbol } : prefillSymbol;
-    planRef.current = p.entry ? p : null;
+    planRef.current = p.entry ? p : null; // { symbol, entry, stop, target?, setupType?, notes?, ideaId? }
     if (p.entry) setEntry(String(p.entry));
     if (p.stop) setStop(String(p.stop));
     if (p.target) setTarget(String(p.target));
@@ -1771,7 +1779,8 @@ function CalcPage({ portfolio, trades, onSendToJournal, onOpenQuadrant, prefillS
 
       {valid && onSendToJournal && (
         <button className="btn-primary" style={{ width: "100%", marginBottom: 8 }}
-          onClick={() => onSendToJournal({ symbol, entry, stop, target, qty: finalQty, riskAmount: actualRisk })}>
+          onClick={() => onSendToJournal({ symbol, entry, stop, target, qty: finalQty, riskAmount: actualRisk,
+            ...(planRef.current && normalizeSymbol(planRef.current.symbol) === normalizeSymbol(symbol) ? { setupType: planRef.current.setupType, notes: planRef.current.notes, ideaId: planRef.current.ideaId } : {}) })}>
           → Send to Journal
         </button>
       )}
@@ -1805,6 +1814,8 @@ function JournalPage({ trades, setTrades, prefill, setPrefill, onOpenStock }) {
         entries: [{ price: prefill.entry ? String(prefill.entry) : "", qty: prefill.qty ? String(prefill.qty) : "" }],
         currentStop: prefill.stop ? String(prefill.stop) : "",
         targets: [prefill.target ? String(prefill.target) : "", "", ""],
+        ...(prefill.setupType && SETUP_TYPES.includes(prefill.setupType) ? { setupType: prefill.setupType } : {}),
+        ...(prefill.notes ? { notes: prefill.notes } : {}),
       });
       if (prefill.symbol) {
         fetchStockPrice(prefill.symbol, { force: true }).then(r => setSymbolInfo(r));
@@ -1825,11 +1836,14 @@ function JournalPage({ trades, setTrades, prefill, setPrefill, onOpenStock }) {
     showSuggestions,
     suggestions,
   } = useSymbolLookup({
-    onSymbolChange: (symbol) => setForm(f => ({ ...f, symbol })),
+    // a different stock clears the first entry price, so the new stock's live price can fill it
+    onSymbolChange: (symbol) => setForm(f => (normalizeSymbol(symbol) === normalizeSymbol(f.symbol) ? { ...f, symbol }
+      : { ...f, symbol, entries: f.entries.map((entry, index) => (index === 0 ? { ...entry, price: "" } : entry)) })),
     onSymbolInfo: setSymbolInfo,
+    // The live price only fills an empty first entry — it never overwrites a price you typed or planned
     onLtpSelect: (ltp) => setForm(f => ({
       ...f,
-      entries: f.entries.map((entry, index) => index === 0 ? { ...entry, price: String(ltp.toFixed(2)) } : entry),
+      entries: f.entries.map((entry, index) => index === 0 && !String(entry.price || "").trim() ? { ...entry, price: String(ltp.toFixed(2)) } : entry),
     })),
   });
 
@@ -1860,7 +1874,7 @@ function JournalPage({ trades, setTrades, prefill, setPrefill, onOpenStock }) {
     ? validLegs.reduce((s, e) => s + parseFloat(e.price) * parseInt(e.qty), 0) / formTotalQty
     : 0;
   const formRisk = form.currentStop && formAvgEntry > 0
-    ? Math.abs(formAvgEntry - parseFloat(form.currentStop)) * formTotalQty
+    ? openRisk(formAvgEntry, parseFloat(form.currentStop), formTotalQty)
     : 0;
 
   const submitTrade = () => {
@@ -1877,7 +1891,7 @@ function JournalPage({ trades, setTrades, prefill, setPrefill, onOpenStock }) {
     const totalQty = entries.reduce((s, e) => s + e.qty, 0);
     const avgEntry = entries.reduce((s, e) => s + e.price * e.qty, 0) / totalQty;
     const currentStop = parseFloat(form.currentStop);
-    const riskAmount = Math.abs(avgEntry - currentStop) * totalQty;
+    const riskAmount = openRisk(avgEntry, currentStop, totalQty);
     const targets = form.targets.map(t => t ? parseFloat(t) : null);
 
     const trade = {
@@ -1904,6 +1918,7 @@ function JournalPage({ trades, setTrades, prefill, setPrefill, onOpenStock }) {
       entry: avgEntry,
       stop: currentStop,
       riskAmount,
+      initialRisk: riskAmount, // R-multiples are measured against the risk you started with
     };
     setTrades([...trades, trade]);
     setForm(emptyForm);
@@ -2114,6 +2129,7 @@ function JournalPage({ trades, setTrades, prefill, setPrefill, onOpenStock }) {
 
 // ─── JOURNAL TRADE CARD ───────────────────────────────────────────────────────
 function JournalTradeCard({ trade, onUpdateTrade, onDelete, onOpenStock }) {
+  const [confirmRemove, setConfirmRemove] = useState(false); // closed trades: remove asks first
   const [mode, setMode] = useState(null); // null | "pyramid" | "updateSL" | "exit"
   const [pyramidForm, setPyramidForm] = useState({ price: "", qty: "", notes: "" });
   const [newSL, setNewSL] = useState("");
@@ -2172,15 +2188,17 @@ function JournalTradeCard({ trade, onUpdateTrade, onDelete, onOpenStock }) {
     const totalQty = newEntries.reduce((s, e) => s + e.qty, 0);
     const avgEntry = newEntries.reduce((s, e) => s + e.price * e.qty, 0) / totalQty;
     const addedQty = parseInt(pyramidForm.qty);
-    const riskAmount = Math.abs(avgEntry - trade.currentStop) * totalQty;
+    const remainingQty = (trade.remainingQty || 0) + addedQty;
+    const riskAmount = openRisk(avgEntry, trade.currentStop, remainingQty);
     onUpdateTrade(trade.id, {
       ...trade,
       entries: newEntries,
       avgEntry,
       totalQty,
-      remainingQty: (trade.remainingQty || 0) + addedQty,
+      remainingQty,
       entry: avgEntry,
       riskAmount,
+      initialRisk: (trade.initialRisk ?? trade.riskAmount ?? 0) + openRisk(parseFloat(pyramidForm.price), trade.currentStop, addedQty),
     });
     setPyramidForm({ price: "", qty: "", notes: "" });
     setMode(null);
@@ -2189,7 +2207,7 @@ function JournalTradeCard({ trade, onUpdateTrade, onDelete, onOpenStock }) {
   const handleUpdateSL = () => {
     if (!newSL || isNaN(parseFloat(newSL))) return;
     const sl = parseFloat(newSL);
-    const riskAmount = Math.abs(trade.avgEntry - sl) * (trade.remainingQty || trade.totalQty || 0);
+    const riskAmount = openRisk(trade.avgEntry, sl, trade.remainingQty || trade.totalQty || 0);
     onUpdateTrade(trade.id, {
       ...trade,
       currentStop: sl,
@@ -2225,8 +2243,9 @@ function JournalTradeCard({ trade, onUpdateTrade, onDelete, onOpenStock }) {
       status: newStatus,
       exitPrice,
       riskAmount: newRemainingQty > 0
-        ? Math.abs(trade.avgEntry - trade.currentStop) * newRemainingQty
+        ? openRisk(trade.avgEntry, trade.currentStop, newRemainingQty)
         : 0,
+      initialRisk: trade.initialRisk ?? trade.riskAmount ?? 0, // keep the starting risk for R once closed
     });
     setExitForm({ qty: "", price: "", reason: "Manual", notes: "" });
     setMode(null);
@@ -2512,8 +2531,14 @@ function JournalTradeCard({ trade, onUpdateTrade, onDelete, onOpenStock }) {
       )}
 
       {/* Remove button for closed trades */}
-      {!isActive && mode === null && (
-        <button onClick={() => onDelete(trade.id)}
+      {!isActive && mode === null && (confirmRemove ? (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4, fontSize: 12 }}>
+          <span style={{ color: "var(--text2)" }}>Remove this trade from your journal and stats?</span>
+          <button onClick={() => onDelete(trade.id)} style={{ background: "none", color: "var(--red)", fontSize: 12, padding: "4px 0", fontWeight: 700 }}>Remove</button>
+          <button onClick={() => setConfirmRemove(false)} style={{ background: "none", color: "var(--text3)", fontSize: 12, padding: "4px 0" }}>Keep</button>
+        </div>
+      ) :
+        <button onClick={() => setConfirmRemove(true)}
           style={{ background: "none", color: "var(--text3)", fontSize: 12, padding: "4px 0", marginTop: 4 }}>
           Remove
         </button>
@@ -3494,7 +3519,7 @@ function MarketSignalStats({ closed }) {
   const rows = Object.entries(groups).filter(([, ts]) => ts.length).map(([sig, ts]) => {
     const wins = ts.filter(t => (t.pnl || 0) > 0).length;
     const pnl = ts.reduce((s, t) => s + (t.pnl || 0), 0);
-    const rs = ts.filter(t => (t.riskAmount || 0) > 0).map(t => (t.pnl || 0) / t.riskAmount);
+    const rs = ts.map(tradeR).filter(r => r != null);
     return { sig, n: ts.length, wr: Math.round((wins / ts.length) * 100), pnl, avgR: rs.length ? rs.reduce((a, b) => a + b, 0) / rs.length : null };
   });
 
@@ -4620,7 +4645,7 @@ function MarketContextStats({ closed }) {
     const ts = groups[k];
     const wins = ts.filter(t => (t.pnl || 0) > 0).length;
     const pnl = ts.reduce((s, t) => s + (t.pnl || 0), 0);
-    const rs = ts.filter(t => (t.riskAmount || 0) > 0).map(t => (t.pnl || 0) / t.riskAmount);
+    const rs = ts.map(tradeR).filter(r => r != null);
     return { k, n: ts.length, wr: Math.round((wins / ts.length) * 100), pnl, avgR: rs.length ? rs.reduce((a, b) => a + b, 0) / rs.length : null };
   });
   const best = rows.filter(r => r.k !== "Unknown" && r.n >= 3 && r.avgR != null).sort((a, b) => b.avgR - a.avgR)[0];
@@ -4853,7 +4878,7 @@ function DisciplineStats({ closed, portfolio }) {
   const scored = closed.map(t => ({ t, ...disciplineScore(t, mq, portfolio) })).filter(x => x.of >= 3);
   if (!scored.length) return null;
   const good = scored.filter(x => x.score === x.of), bad = scored.filter(x => x.score < x.of);
-  const avgR = (xs) => { const rs = xs.filter(x => x.t.riskAmount > 0).map(x => (x.t.pnl || 0) / x.t.riskAmount); return rs.length ? rs.reduce((a, b) => a + b, 0) / rs.length : null; };
+  const avgR = (xs) => { const rs = xs.map(x => tradeR(x.t)).filter(r => r != null); return rs.length ? rs.reduce((a, b) => a + b, 0) / rs.length : null; };
   const wr = (xs) => (xs.length ? Math.round((xs.filter(x => (x.t.pnl || 0) > 0).length / xs.length) * 100) : null);
   const avgScore = scored.reduce((a, x) => a + x.score / x.of, 0) / scored.length;
   const misses = {};
@@ -5402,7 +5427,7 @@ function EquityRisk({ closed, portfolio }) {
   const W = 340, H = 100, lo = Math.min(0, ...pts.map(p => p.eq)), hi = Math.max(0, ...pts.map(p => p.eq)), sp = hi - lo || 1;
   const x = (i) => 4 + (i / Math.max(1, pts.length - 1)) * (W - 44), y = (v) => 6 + (1 - (v - lo) / sp) * (H - 12);
   const path = pts.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.eq).toFixed(1)}`).join("");
-  const rs = sorted.filter(t => t.riskAmount > 0).map(t => (t.pnl || 0) / t.riskAmount);
+  const rs = sorted.map(tradeR).filter(r => r != null);
   const bins = [[-Infinity, -1], [-1, 0], [0, 1], [1, 2], [2, 3], [3, Infinity]], labels = ["<−1R", "−1–0", "0–1", "1–2", "2–3", "3R+"];
   const counts = bins.map(([a, b]) => rs.filter(r => r >= a && r < b).length), maxC = Math.max(1, ...counts);
   return (
@@ -6569,7 +6594,7 @@ function setupRecord(closed, mq, setup) {
   const ts = closed.filter(t => t.setupType === setup);
   if (!ts.length) return null;
   const wins = ts.filter(t => (t.pnl || 0) > 0).length;
-  const rs = ts.filter(t => t.riskAmount > 0).map(t => (t.pnl || 0) / t.riskAmount);
+  const rs = ts.map(tradeR).filter(r => r != null);
   const byEnv = {};
   for (const t of ts) { const e = tradeContext(t, mq).env || "?"; (byEnv[e] ||= []).push(t); }
   const best = Object.entries(byEnv).filter(([e, xs]) => e !== "?" && xs.length >= 2)
@@ -8339,6 +8364,23 @@ function FundsTodayCard({ onOpen, onOpenFund }) {
   );
 }
 
+// Shown when the phone refuses to save (storage full): changes would otherwise vanish on refresh
+function StorageWarning() {
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    const on = (e) => setErr(e.detail?.message || "storage unavailable");
+    window.addEventListener("td-storage-error", on);
+    return () => window.removeEventListener("td-storage-error", on);
+  }, []);
+  if (!err) return null;
+  return (
+    <div role="alert" style={{ margin: "10px 16px 0", padding: "8px 12px", borderRadius: 10, border: `1px solid ${C.neg}66`, background: "rgba(220,20,60,0.08)", fontSize: 12, color: "var(--text)", lineHeight: 1.45 }}>
+      <b style={{ color: C.neg }}>Couldn't save on this phone.</b> Its storage is full or blocked, so your latest changes will be lost if you refresh. Free up space (or leave private browsing), then make the change again.
+      <button onClick={() => setErr(null)} style={{ background: "none", border: "none", color: "var(--text3)", fontSize: 12, marginLeft: 6, padding: 0, cursor: "pointer" }}>Dismiss</button>
+    </div>
+  );
+}
+
 // Which bottom tab a page belongs to
 const NAV_GROUP = {
   today: "today", wrap: "today",
@@ -8506,6 +8548,16 @@ export default function App() {
   };
 
   const realTrades = trades.filter(t => !t.paper); // paper trades stay out of TODAY, heat, sizing and stats
+  // An active idea becomes Taken once a real trade in that stock is saved after the idea was written
+  const tradeKey = realTrades.map(t => `${t.id}:${t.status}`).join(",");
+  useEffect(() => {
+    const live = realTrades.filter(t => t.status === "open" || t.status === "partial");
+    const hit = ideas.filter(x => (x.status === "watching" || x.status === "triggered")
+      && live.some(t => normalizeSymbol(t.symbol) === x.sym && String(t.date || "") >= String(x.date || ""))).map(x => x.id);
+    if (!hit.length) return;
+    const now = new Date().toISOString();
+    setIdeas(xs => xs.map(x => (hit.includes(x.id) ? { ...x, status: "taken", updatedAt: now } : x)));
+  }, [tradeKey, ideas.length]);
   return (
     <div style={{ maxWidth: 480, margin: "0 auto", minHeight: "100vh", background: "var(--bg)", position: "relative" }}>
       <GlobalStyle />
@@ -8513,6 +8565,7 @@ export default function App() {
       <MenuSheet open={menuOpen} onClose={() => setMenuOpen(false)} portfolio={portfolio} setPortfolio={setPortfolio} onTour={() => setShowTour(true)} />
       <SearchSheet open={searchOpen} onClose={() => setSearchOpen(false)} onOpenStock={openStock} onOpenFund={openFund} onOpenIpos={openIpos} />
       <NiftyStrip data={indicesTicker} />
+      <StorageWarning />
       {NAV_GROUP[page] === "stocks" && <SegBar items={STOCKS_SEGS} active={page} onPick={(k) => { setPage(k); window.scrollTo(0, 0); }} />}
       {(page === "funds" || page === "ipos" || page === "fundcmp") && <SegBar items={INVEST_SEGS} active={page} onPick={(k) => { setPage(k); window.scrollTo(0, 0); }} />}
       {(page === "journal" || page === "playbook") && <SegBar items={JOURNAL_SEGS} active={page === "journal" ? "journal" : pbSub}

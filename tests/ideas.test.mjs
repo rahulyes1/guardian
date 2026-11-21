@@ -6,7 +6,7 @@ import { ideaMath, validateIdea, normalizeIdea, zoneState, newlyTriggered } from
 test("R:R from the middle of the entry zone", () => {
   // MCX: zone 3,700–3,760 → entry 3,730; stop 3,500 → risk 230; target 4,300 → reward 570; 570/230 = 2.478 → 2.5
   const m = ideaMath({ lo: 3700, hi: 3760, stop: 3500, target: 4300 });
-  assert.deepEqual(m, { entry: 3730, risk: 230, reward: 570, rr: 2.5, riskPct: 6.2 });
+  assert.deepEqual(m, { entry: 3730, risk: 230, reward: 570, rr: 2.5, riskPct: 6.2, rrTop: 2.1 }); // top: 540 / 260
   // single-price entry
   assert.equal(ideaMath({ lo: 100, hi: 100, stop: 95, target: 115 }).rr, 3);
   // strings from form fields work, with commas

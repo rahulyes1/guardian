@@ -1,4 +1,4 @@
-import { normalizeIdea } from "./lib/ideas.js";
+import { normalizeIdea, IDEA_MAX } from "./lib/ideas.js";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getSupabaseClient, isSupabaseConfigured } from "./supabaseClient.js";
 
@@ -50,11 +50,14 @@ function readJson(key, fallback) {
   }
 }
 
+// Returns false (and tells the app) when the phone's storage refuses the write — e.g. it's full
 function writeJson(key, value) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    // Ignore storage write failures.
+    return true;
+  } catch (error) {
+    try { window.dispatchEvent(new CustomEvent("td-storage-error", { detail: { key, message: error?.message || String(error) } })); } catch (_) {}
+    return false;
   }
 }
 
@@ -100,7 +103,7 @@ function normalizeSnapshot(input, options = {}) {
       : [],
     // "My ideas" vault — [{ id, sym, thesis, lo, hi, stop, target, status, tags, date, ... }], max 300
     ideas: Array.isArray(source.ideas)
-      ? source.ideas.map(normalizeIdea).filter(Boolean).filter((x, i, arr) => arr.findIndex((y) => y.id === x.id) === i).slice(0, 300)
+      ? source.ideas.map(normalizeIdea).filter(Boolean).filter((x, i, arr) => arr.findIndex((y) => y.id === x.id) === i).slice(0, IDEA_MAX)
       : [],
     updatedAt: typeof source.updatedAt === "string" && source.updatedAt
       ? source.updatedAt
@@ -400,6 +403,8 @@ export function useSyncedAppState() {
         userIdRef.current = userId;
         const localSnapshot = snapshotRef.current;
         const localUpdatedAt = toTimestamp(localSnapshot.updatedAt);
+        let synced = localSnapshot; // the snapshot the cloud now matches
+        const editedSince = () => snapshotRef.current !== localSnapshot; // you changed something while this ran
 
         const { data: remoteRow, error: fetchError } = await supabase
           .from(CLOUD_TABLE)
@@ -410,18 +415,23 @@ export function useSyncedAppState() {
         if (cancelled) return;
 
         if (!remoteRow && hasLocalDataRef.current) {
-          await pushSnapshotToCloud(supabase, userId, localSnapshot);
+          synced = snapshotRef.current;
+          await pushSnapshotToCloud(supabase, userId, synced);
         } else if (remoteRow) {
           const remotePayload = normalizeSnapshot(withLocalFunds(remoteRow.payload), { ensureUpdatedAt: false });
           const remoteUpdatedAt = remotePayload.updatedAt || remoteRow.updated_at || null;
-          if (toTimestamp(remoteUpdatedAt) > localUpdatedAt) {
+          // never let the cloud copy replace edits you made while it was loading
+          if (toTimestamp(remoteUpdatedAt) > localUpdatedAt && !editedSince()) {
             applyRemoteSnapshot(remotePayload, remoteUpdatedAt);
-          } else if (hasLocalDataRef.current && localUpdatedAt > toTimestamp(remoteUpdatedAt)) {
-            await pushSnapshotToCloud(supabase, userId, localSnapshot);
+            synced = null;
+          } else if (editedSince() || (hasLocalDataRef.current && localUpdatedAt > toTimestamp(remoteUpdatedAt))) {
+            synced = snapshotRef.current;
+            await pushSnapshotToCloud(supabase, userId, synced);
           }
         }
 
-        pendingSyncRef.current = false;
+        // anything changed after what was just synced stays queued for the next sync
+        pendingSyncRef.current = synced !== null && snapshotRef.current !== synced;
         bootstrappedRef.current = true;
         updateCloudSyncState({
           enabled: true,
